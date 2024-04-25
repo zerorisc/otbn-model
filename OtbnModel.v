@@ -918,9 +918,11 @@ Section Exec.
     (* eventually doesn't guarantee that you've returned, but you know because of the PC *)
     (* so for subroutines you specify in the postcondition that the PC is back to the caller *)    
 
+    (* address-independent reasoning? *)
     (* potential rep for loops: labels at start and end of loops, and also at not-taken branches *)
     (* then you have string -> block as context *)
     (* loop insn takes 2 labels instead of #instructions in loop *)
+    (* then need a loopend instruction because you then need to know the labels *)
     
     Print cinsn.
     Inductive exec : string -> OtbnState -> (option string -> OtbnState -> Prop) -> Prop :=
