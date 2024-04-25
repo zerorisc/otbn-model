@@ -502,6 +502,49 @@ Section Exec.
       loopstack := st.(loopstack);
       insn_counter := st.(insn_counter);
     |}.
+  
+  Definition callstack_pop (st : OtbnState) : maybe (Z * OtbnState) :=
+    (pc <- map_err (hd_error st.(callstack)) "Call stack empty" ;
+     Ok (pc,
+         {| regs := st.(regs);
+           flags := st.(flags);
+           dmem := st.(dmem);
+           callstack := tl st.(callstack);
+           loopstack := st.(loopstack);
+           insn_counter := st.(insn_counter);
+         |})).
+
+  Definition callstack_push (st : OtbnState) (pc : Z) : maybe OtbnState :=
+    (_ <- assertion (length st.(callstack) <? 8)%nat "Call stack full" ;
+     Ok {| regs := st.(regs);
+          flags := st.(flags);
+          dmem := st.(dmem);
+          callstack := pc :: st.(callstack);
+          loopstack := st.(loopstack);
+          insn_counter := st.(insn_counter);
+        |}).
+
+  Definition loopstack_pop (st : OtbnState) : maybe ((Z * Z * nat) * OtbnState) :=
+    (l <- map_err (hd_error st.(loopstack)) "Loop stack empty" ;
+     Ok (l,
+         {| regs := st.(regs);
+           flags := st.(flags);
+           dmem := st.(dmem);
+           callstack := st.(callstack);
+           loopstack := tl st.(loopstack);
+           insn_counter := st.(insn_counter);
+         |})).
+
+  Definition loopstack_push (st : OtbnState) (l : Z * Z * nat) : maybe OtbnState :=
+    (_ <- assertion (length st.(loopstack) <? 8)%nat "Call stack full" ;
+     Ok {| regs := st.(regs);
+          flags := st.(flags);
+          dmem := st.(dmem);
+          callstack := st.(callstack);
+          loopstack := l :: st.(loopstack);
+          insn_counter := st.(insn_counter);
+        |}).
+
 
   (* set the M, L, and Z flags according to the destination register *)
   Definition set_mlz (st : OtbnState) (fg : flag_group) (v : Z) : OtbnState :=
@@ -785,10 +828,11 @@ Section Exec.
 
   Print cinsn.
   Print OtbnState.
-  Definition ctrl1 (pc_st : Z * OtbnState) (i : cinsn) : maybe (Z * OtbnState) :=
+  Definition ctrl1_cps {A} (pc_st : Z * OtbnState) (i : cinsn) (f : maybe (Z * OtbnState) -> A) : A :=
     let pc := fst pc_st in
     let st := snd pc_st in
-    
+    f (Ok pc_st).
+  (*
     match cinsn with
     | Ret =>
         (next_pc <- map_err (hd_error st.(callstack) "Call stack is empty" ;
@@ -818,10 +862,65 @@ Section Exec.
                let end_pc := curr_pc + 4 * len in
                body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
                Ok (GraphLoopi iters body end_pc))
-          end
+          end*)
 
   Section __.
-    Context (blocks : map Z (list sinsn * cinsn)).
+    Context (blocks : map Z (list sinsn * option cinsn)).
+
+    Definition exec_block_cps
+      {A} (pc_st : Z * OtbnState) (f : maybe (Z * OtbnState) -> A) : A :=
+      let pc := fst pc_st in
+      let st := snd pc_st in
+      match mget blocks pc with
+      | None => f (Err "Block not found")
+      | Some (si, ci) =>
+          let pc := pc + (Z.of_nat (length si) * 4) in
+          exec_straightline_cps
+            st si (fun st =>
+                     match st with
+                     | Err x => f (Err x)
+                     | Ok st =>
+                         match ci with
+                         | None =>
+                             (* we must have reached the end of a loop *)
+                             match loopstack_pop st with
+                             | Ok (loop_end_addr, loop_start_addr, iters, st) =>
+                                 if (pc =? loop_end_addr)
+                                 then
+                                   match iters with
+                                   | 0%nat => f (Ok (pc + 4, st))
+                                   | S iters =>
+                                       let loop_entry := (loop_end_addr, loop_start_addr, iters) in
+                                       match loopstack_push st loop_entry with
+                                       | Ok st => f (Ok (loop_start_addr, st))
+                                       | Err x => f (Err x)
+                                       end
+                                   end
+                                 else f (Err "Reached loop end but loop stack did not match PC.")
+                             | Err x => f (Err x)
+                             end
+                         | Some ci => ctrl1_cps (pc, st) ci f
+                         end
+                     end)
+      end.
+
+    Definition exec_block (pc_st : Z * OtbnState) (P : Z * OtbnState -> Prop) : Prop :=
+      exec_block_cps pc_st (fun x =>
+                              match x with
+                              | Err _ => False
+                              | Ok x => P x
+                              end).
+
+    Check eventually.
+    Check eventually exec_block.
+
+    (* key thing that makes this work is that in the postcondition P you can specify which address you returned to *)
+    (* eventually doesn't guarantee that you've returned, but you know because of the PC *)
+    (* so for subroutines you specify in the postcondition that the PC is back to the caller *)    
+
+    (* potential rep for loops: labels at start and end of loops, and also at not-taken branches *)
+    (* then you have string -> block as context *)
+    (* loop insn takes 2 labels instead of #instructions in loop *)
     
     Print cinsn.
     Inductive exec : string -> OtbnState -> (option string -> OtbnState -> Prop) -> Prop :=
