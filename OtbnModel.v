@@ -3,6 +3,8 @@ Require Import Coq.Lists.List.
 Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
+Require Import coqutil.Map.Interface.
+Require Import coqutil.Word.Interface.
 Require Coq.Strings.HexString.
 Import ListNotations.
 Local Open Scope Z_scope.
@@ -119,20 +121,20 @@ Section ISA.
   .
 
   (* Control-flow instructions *)
-  Inductive cinsn : Type :=
+  Inductive cinsn {addr : Type} : Type :=
   (* TODO: technically ret is a special case of JALR, but only RET is used in practice *)
   | Ret : cinsn
   | Ecall : cinsn
-  | Jal : gpr -> Z -> cinsn
-  | Bne : gpr -> gpr -> Z -> cinsn
-  | Beq : gpr -> gpr -> Z -> cinsn
-  | Loop : gpr -> Z -> cinsn
-  | Loopi : Z -> Z -> cinsn
+  | Jal : gpr -> addr -> cinsn
+  | Bne : gpr -> gpr -> addr -> cinsn
+  | Beq : gpr -> gpr -> addr -> cinsn
+  | Loop : gpr -> nat -> cinsn
+  | Loopi : nat -> nat -> cinsn
   .
 
-  Inductive insn : Type :=
+  Inductive insn {addr : Type} : Type :=
   | Straightline : sinsn -> insn
-  | Control : cinsn -> insn
+  | Control : cinsn (addr:=addr) -> insn
   .
 
 End ISA.
@@ -180,9 +182,9 @@ Module OtbnNotations.
   Notation "'bn.lid' a , offset" := (Bn_lid a offset) (at level 10) : otbn_scope.
   Notation "'ret'" := Ret (at level 40) : otbn_scope.
   Notation "'ecall'" := Ecall (at level 40) : otbn_scope.
-  Notation "'jal' a , dst" := (Jal a dst) (at level 40) : otbn_scope.
-  Notation "'bne' a , b , dst" := (Bne a b dst) (at level 40) : otbn_scope.
-  Notation "'beq' a , b , dst" := (Beq a b dst) (at level 40) : otbn_scope.
+  Notation "'jal' a , addr" := (Jal a addr) (at level 40) : otbn_scope.
+  Notation "'bne' a , b , addr" := (Bne a b addr) (at level 40) : otbn_scope.
+  Notation "'beq' a , b , addr" := (Beq a b addr) (at level 40) : otbn_scope.
   Notation "'loop' a , len" := (Loop a len) (at level 40) : otbn_scope.
   Notation "'loopi' a , len" := (Loopi a len) (at level 40) : otbn_scope.
 
@@ -291,90 +293,336 @@ Section RegisterEquality.
   Proof. prove_eqb_spec r1 r2. Qed.
 End RegisterEquality.
 
-Section FlowGraph.
-  (* control-flow graph of the program *)
-  Inductive ProgramGraph {dst : Type} : Type :=
+(*
+(* Maximally-compatible executable implementation. *)
+Section Executable.
+  Context {word32 : word.word 32} {word64 : word.word 64} {word256 : word.word 256}.
+  Context {mem : map.map Z word32}
+    {flagm : map.map flag bool}
+    {gprm : map.map gpr word32}
+    {csrm : map.map csr word32}
+    {wdrm : map.map wdr word256}
+    {wsrm : map.map wsr word256}.
+
+  (* State information for the processor. *)
+  Record OtbnState : Type :=
+    {
+      (* Register files. *)
+      gprs : map.rep (map:=gprm);
+      csrs : map.rep (map:=csrm);
+      wdrs : map.rep (map:=wdrm);
+      wsrs : map.rep (map:=wsrm);
+      (* Flag states. *)
+      flags : map.rep (map:=flagm);
+      (* Data memory *)
+      dmem : mem;
+      (* Call stack: holds the IMEM address of the last calls. *)
+      callstack : list Z;
+      (* Loop stack: holds the IMEM start/end addresses and counter for active loops. *)
+      loopstack : list (Z * Z * nat);
+      (* Instruction counter. *)
+      insn_counter : nat;
+    }.
+
+
+  (* Boilerplate definitions to modify state. *)
+  Definition write_gpr (state : OtbnState) (r : gpr) (v : word32) : OtbnState :=
+    {|
+      gprs := map.put state.(gprs) r v;
+      csrs := state.(csrs);
+      wdrs := state.(wdrs);
+      wsrs := state.(wsrs);
+      flags := state.(flags);
+      dmem := state.(dmem);
+      callstack := state.(callstack);
+      loopstack := state.(loopstack);
+      insn_counter := state.(insn_counter);
+    |}.
+  Definition write_csr (state : OtbnState) (r : csr) (v : word32) : OtbnState :=
+    {|
+      gprs := state.(gprs);
+      csrs := map.put state.(csrs) r v;
+      wdrs := state.(wdrs);
+      wsrs := state.(wsrs);
+      flags := state.(flags);
+      dmem := state.(dmem);
+      callstack := state.(callstack);
+      loopstack := state.(loopstack);
+      insn_counter := state.(insn_counter);
+    |}.
+  Definition write_wdr (state : OtbnState) (r : wdr) (v : word256) : OtbnState :=
+    {|
+      gprs := state.(gprs);
+      csrs := state.(csrs);
+      wdrs := map.put state.(wdrs) r v;
+      wsrs := state.(wsrs);
+      flags := state.(flags);
+      dmem := state.(dmem);
+      callstack := state.(callstack);
+      loopstack := state.(loopstack);
+      insn_counter := state.(insn_counter);
+    |}.
+  Definition write_wsr (state : OtbnState) (r : wsr) (v : word256) : OtbnState :=
+    {|
+      gprs := state.(gprs);
+      csrs := state.(csrs);
+      wdrs := state.(wdrs);
+      wsrs := map.put state.(wsrs) r v;
+      flags := state.(flags);
+      dmem := state.(dmem);
+      callstack := state.(callstack);
+      loopstack := state.(loopstack);
+      insn_counter := state.(insn_counter);
+    |}.
+  Definition write_flag (state : OtbnState) (f : flag) (v : bool) : OtbnState :=
+    {|
+      gprs := state.(gprs);
+      csrs := state.(csrs);
+      wdrs := state.(wdrs);
+      wsrs := state.(wsrs);
+      flags := map.put state.(flags) f v;
+      dmem := state.(dmem);
+      callstack := state.(callstack);
+      loopstack := state.(loopstack);
+      insn_counter := state.(insn_counter);
+    |}.
+
+  (* Boilerplate definitions for reading registers that work with error monad. *)
+  Definition read_gpr (state : OtbnState) (r : gpr) : maybe word32 :=
+    match map.get state.(gprs) r with
+    | Some v => Ok v
+    | None => Err "GPR not initialized"
+    end.
+  Definition read_csr (state : OtbnState) (r : csr) : maybe word32 :=
+    match map.get state.(csrs) r with
+    | Some v => Ok v
+    | None => Err "CSR not initialized"
+    end.
+  Definition read_wdr (state : OtbnState) (r : wdr) : maybe word256 :=
+    match map.get state.(wdrs) r with
+    | Some v => Ok v
+    | None => Err "WDR not initialized"
+    end.
+  Definition read_wsr (state : OtbnState) (r : wsr) : maybe word256 :=
+    match map.get state.(wsrs) r with
+    | Some v => Ok v
+    | None => Err "GPR not initialized"
+    end.
+  Definition read_flag (state : OtbnState) (f : flag) : maybe bool :=
+    match map.get state.(flags) f with
+    | Some v => Ok v
+    | None => Err "Flag not initialized"
+    end.
+  Definition read_limb (state : OtbnState) (l : limb) : maybe word64 :=
+    match l with
+    | limb0 r =>
+        (w <- read_wdr state r;
+         Ok (word.of_Z (word.unsigned w)))
+    | limb1 r =>
+        (w <- read_wdr state r;
+         Ok (word.of_Z (Z.shiftr (word.unsigned w) 64)))
+    | limb2 r =>
+        (w <- read_wdr state r;
+         Ok (word.of_Z (Z.shiftr (word.unsigned w) 128)))
+    | limb3 r =>
+        (w <- read_wdr state r;
+         Ok (word.of_Z (Z.shiftr (word.unsigned w) 192)))
+    end.
+
+  (* Set the M, L, and Z flags based on a 256-bit result. *)
+  Definition write_mlz (state : OtbnState) (fg : flag_group) (v : word256) : OtbnState :=
+    let state := write_flag state (flagM fg) (Z.testbit (word.unsigned v) 255) in
+    let state := write_flag state (flagL fg) (Z.testbit (word.unsigned v) 0) in
+    let state := write_flag state (flagZ fg) (word.eqb v (word.of_Z 0)) in
+    state.
+
+  (* filter out bad immediates for mulqacc *)
+  Definition interp_mulqacc_imm (imm : Z) : maybe Z :=
+    if ((0 <=? imm)%Z && (imm <=? 192)%Z && (imm mod 64 =? 0)%Z)%bool
+    then Ok imm
+    else Err "Bad immediate argument for mulqacc".
+
+  Definition word_mulqacc (z : bool) (acc : word256) (l1 l2 : word64) (imm : Z) : word256 :=
+    word.add
+      (if z then word.of_Z 0 else acc)
+      (word.of_Z (Z.shiftl (word.unsigned l1 * word.unsigned l2) imm)).
+
+  Print OtbnState.
+  Print sinsn.
+  Definition interp_sinsn_cps (state : OtbnState) (i : sinsn) {A} (f : maybe OtbnState -> A) : A :=
+    match i with
+    | Addi d a imm =>
+        (a <- read_gpr state a;
+         Ok (write_gpr state d (word.add a (word.of_Z imm))))
+    | Bn_mulqacc z l1 l2 imm =>
+        (l1 <- read_limb state l1;
+         l2 <- read_limb state l2;
+         acc <- read_wsr state ACC;
+         imm <- interp_mulqacc_imm imm;
+         r <- Ok (word_mulqacc z acc l1 l2 imm);
+         Ok (write_wsr state ACC r))
+    | Bn_mulqacc_wo z d l1 l2 imm =>
+        (l1 <- read_limb state l1;
+         l2 <- read_limb state l2;
+         acc <- read_wsr state ACC;
+         imm <- interp_mulqacc_imm imm;
+         r <- Ok (word_mulqacc z acc l1 l2 imm);
+         Ok (write_wsr (write_wsr  ACC r))
+    | _ => Ok state
+    end.
+      
+    
+    
+
+
+End Executable.
+
+Section FlowGraph.  
+  (* control-flow graph of the program
+
+     the destination parameter varies depending on the purpose:
+       - for interpreting binaries, set addr=Z * list Z * list Z (pc, call stack, loop stack)
+       - for correct-by-construction code, set addr = string (label)
+       - for proofs, set addr = ProgramGraph *)
+  Inductive ProgramGraph {addr : Type} : Type :=
   | GraphEcall : ProgramGraph (* ecall instruction *)
   | GraphLoopEnd : ProgramGraph (* end of loop *)
   | GraphImemEnd : ProgramGraph (* end of instruction memory -- error *)
   | GraphStraightline : sinsn -> ProgramGraph -> ProgramGraph (* straightline instruction *)
-  | GraphJump : dst -> ProgramGraph (* jump (may be jal or ret) *)
-  | GraphBne : gpr -> gpr -> dst -> ProgramGraph -> ProgramGraph
-  | GraphBeq : gpr -> gpr -> dst -> ProgramGraph -> ProgramGraph
+  | GraphJump : addr -> ProgramGraph (* jal or ret *)
+  | GraphBne : gpr -> gpr -> addr -> ProgramGraph -> ProgramGraph
+  | GraphBeq : gpr -> gpr -> addr -> ProgramGraph -> ProgramGraph
   | GraphLoop :
     (* loop with variable number of iterations *)
-    forall (iters : gpr) (body : ProgramGraph) (post : dst), ProgramGraph
+    forall (iters : gpr) (body : ProgramGraph) (post : addr), ProgramGraph
   | GraphLoopi :
     (* loop with constant number of iterations *)
-    forall (iters : Z) (body : ProgramGraph) (post : dst), ProgramGraph
+    forall (iters : Z) (body : ProgramGraph) (post : addr), ProgramGraph
   .
 
-  (* traverse the instructions in order, recording only PCs for jumps *)
-  Fixpoint to_graph'
-    (insns : list insn)
-    (curr_pc : Z)
-    (call_stack : list Z)
-    (loop_stack : list Z)
-    : maybe (ProgramGraph (dst:=Z)) :=
-    if ((0 <? length loop_stack)%nat && (curr_pc =? hd 0 loop_stack)%Z)%bool
-    then Ok GraphLoopEnd
-    else
-      match insns with
-      | [] => Ok GraphImemEnd
-      | i :: insns =>
-          match i with
-          | Straightline i =>
-              (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack;
-               Ok (GraphStraightline i post))
-          | Control Ret =>
-              (next_pc <- map_err (hd_error call_stack) "Call stack is empty" ;
-               Ok (GraphJump next_pc))
-          | Control Ecall => Ok GraphEcall
-          | Control (Jal r next_pc) =>
-              (_ <- assertion (gpr_eqb r x1) "Link registers other than x1 are not modelled" ;
-               _ <- assertion (length call_stack <? 8)%nat "Call stack is full" ;
-               post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphJump next_pc))
-          | Control (Bne r1 r2 branch_pc) =>
-              (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphBne r1 r2 branch_pc post))
-          | Control (Beq r1 r2 branch_pc) =>
-              (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphBeq r1 r2 branch_pc post))
-          | Control (Loop r len) =>
-              (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
-               _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
-               let end_pc := curr_pc + 4 * len in
-               body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
-               Ok (GraphLoop r body end_pc))
-          | Control (Loopi iters len) =>
-              (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
-               _ <- assertion (0 <? iters) "Loopis must have nonzero iterations" ;
-               _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
-               let end_pc := curr_pc + 4 * len in
-               body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
-               Ok (GraphLoopi iters body end_pc))
-          end
+  Section Construction.
+    Context {map : map.map Z (ProgramGraph (addr:=Z * list Z * list Z))}.
+
+    (* traverse the instructions in order, recording only PCs for jumps *)
+    Fixpoint to_graph'
+      (insns : list insn)
+      (curr_pc : Z)
+      (call_stack : list Z)
+      (loop_stack : list Z)
+      : maybe (ProgramGraph (addr:=Z * list Z * list Z)) :=
+      if ((0 <? length loop_stack)%nat && (hd 0 loop_stack =? curr_pc)%Z)%bool
+      then Ok GraphLoopEnd
+      else
+        match insns with
+        | [] => Ok GraphImemEnd
+        | i :: insns =>
+            match i with
+            | Straightline i =>
+                (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack;
+                 Ok (GraphStraightline i post))
+            | Control Ret =>
+                (next_pc <- map_err (hd_error call_stack) "Call stack is empty" ;
+                 Ok (GraphJump (next_pc, tl call_stack, loop_stack)))
+            | Control Ecall => Ok GraphEcall
+            | Control (Jal r next_pc) =>
+                (_ <- assertion (gpr_eqb r x1) "Link registers other than x1 are not modelled" ;
+                 _ <- assertion (length call_stack <? 8)%nat "Call stack is full" ;
+                 post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
+                 Ok (GraphJump (next_pc, curr_pc + 4 :: call_stack, loop_stack)))
+            | Control (Bne r1 r2 branch_pc) =>
+                (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
+                 Ok (GraphBne r1 r2 (branch_pc, call_stack, loop_stack) post))
+            | Control (Beq r1 r2 branch_pc) =>
+                (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
+                 Ok (GraphBeq r1 r2 (branch_pc, call_stack, loop_stack) post))
+            | Control (Loop r len) =>
+                (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
+                 _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
+                 let end_pc := curr_pc + 4 * len in
+                 body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
+                 Ok (GraphLoop r body (end_pc, call_stack, loop_stack)))
+            | Control (Loopi iters len) =>
+                (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
+                 _ <- assertion (0 <? iters) "Loopis must have nonzero iterations" ;
+                 _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
+                 let end_pc := curr_pc + 4 * len in
+                 body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
+                 Ok (GraphLoopi iters body (end_pc, call_stack, loop_stack)))
+            end
+        end.
+
+    Definition lookup_by_pc (insns : list insn) (pc : Z) : maybe insn :=
+      map_err (nth_error insns (Z.to_nat (pc / 4))) "Invalid PC".
+
+    Definition transform_graph
+      (graph : ProgramGraph (addr:=ProgramGraph (addr:=Z * list Z * list Z)))
+      : maybe (ProgramGraph (addr:=ProgramGraph * list Z * list Z)) :=
+      match graph with
+      | GraphEcall
+  Inductive ProgramGraph {addr : Type} : Type :=
+  | GraphEcall : ProgramGraph (* ecall instruction *)
+  | GraphLoopEnd : ProgramGraph (* end of loop *)
+  | GraphImemEnd : ProgramGraph (* end of instruction memory -- error *)
+  | GraphStraightline : sinsn -> ProgramGraph -> ProgramGraph (* straightline instruction *)
+  | GraphJump : addr -> ProgramGraph (* jump (may be jal or ret) *)
+  | GraphBne : gpr -> gpr -> addr -> ProgramGraph -> ProgramGraph
+  | GraphBeq : gpr -> gpr -> addr -> ProgramGraph -> ProgramGraph
+  | GraphLoop :
+    (* loop with variable number of iterations *)
+    forall (iters : gpr) (body : ProgramGraph) (post : addr), ProgramGraph
+  | GraphLoopi :
+    (* loop with constant number of iterations *)
+    forall (iters : Z) (body : ProgramGraph) (post : addr), ProgramGraph
+  .
+    .
+
+    Fixpoint link_graph'
+      (insns : list insn)
+      (blocks : map.rep)
+      : maybe (ProgramGraph (addr:=ProgramGraph * list Z * list Z)) :=
+      let g := to_graph' insns 0 
+    .
+
+    (* TODO: one pass to traverse instructions in order and build blocks *)
+    (* TODO: second pass to find any non-represented PCs and build their blocks *)
+    (* TODO: third pass to link to ProgramGraph instead of Z *)
+    (* Problem: not all paths have the same loop/call stack, you need to know that to know if they error *)
+    (* unless we do a postprocessing pass to check that? traverse all possible routes and keep track of call/loop stack values *)
+    (* *)
+
+    (* Construct the graph by crawling the control flow. Use a fuel argument to prove termination. *)
+    Fixpoint construct_blocks'
+      (fuel : nat) (blocks : map.rep) (insns : list insn) (start_pc : Z)
+      : maybe (map.rep) :=
+      match fuel with
+      | 0 => Err "Out of fuel."
+      | S fuel =>
+          
+      
+        
+    Fixpoint get_addr_pcs (g : ProgramGraph (addr:=Z)) : list Z :=
+      match g with
+      | GraphEcall | GraphLoopEnd | GraphImemEnd => []
+      | GraphStraightline i g => get_addr_pcs g
+      | GraphJump pc => [pc]
+      | GraphBne r1 r2 pc g => pc :: get_addr_pcs g
+      | GraphBeq r1 r2 pc g => pc :: get_addr_pcs g
+      | GraphLoop r body pc => pc :: get_addr_pcs body
+      | GraphLoopi iters body pc => pc :: get_addr_pcs body
       end.
 
-  Fixpoint get_dst_pcs (g : ProgramGraph (dst:=Z)) : list Z :=
-    match g with
-    | GraphEcall | GraphLoopEnd | GraphImemEnd => []
-    | GraphStraightline i g => get_dst_pcs g
-    | GraphJump pc => [pc]
-    | GraphBne r1 r2 pc g => pc :: get_dst_pcs g
-    | GraphBeq r1 r2 pc g => pc :: get_dst_pcs g
-    | GraphLoop r body pc => pc :: get_dst_pcs body
-    | GraphLoopi iters body pc => pc :: get_dst_pcs body
-    end.
+    
 
-  (* for each PC, if there is a jump to that PC or if the PC is the
-     start PC, then construct the program graph that flows from it *)
   (*
-  Definition to_graph (insns : list insn) : maybe (ProgramGraph (dst:=ProgramGraph)) :=
+  Definition to_graph (start_pc : Z) (insns : list insn)
+    : maybe (ProgramGraph (addr:=ProgramGraph)) :=
+    let pcs := start_pc
+    let idx := start_pc / 4 in
+    skipn insns idx
    *)
 
 End FlowGraph.
+ *)
 
 (* bitwise operation shorthand *)
 Local Infix "|'" := Z.lor (at level 40, only parsing) : Z_scope.
@@ -386,8 +634,14 @@ Local Coercion Z.b2z : bool >-> Z.
 (* Executable model of OTBN. *)
 Section Exec.
   (* Parameterize over randomness implementation. *)
-  Context {rnd : nat -> Z} {rnd_range : forall x, 0 <= rnd x < 2^256}.
-  Context {urnd : nat -> Z} {urnd_range : forall x, 0 <= urnd x < 2^256}.
+  Context {rnd : nat -> Z} {rnd_range : forall x, 0 <= rnd x < 2^256}
+    {urnd : nat -> Z} {urnd_range : forall x, 0 <= urnd x < 2^256}.
+
+  (* Parameterize over the representation of program counter. *)
+  Context {addr : Type}
+    {advance_pc : addr -> addr}
+    {addr_eqb : addr -> addr -> bool}
+    {addr_eqb_spec : forall a1 a2, BoolSpec (a1 = a2) (a1 <> a2) (addr_eqb a1 a2)}.
 
   (* Parameterize over the map implementation. *)
   Context {map : Type -> Type -> Type}
@@ -411,11 +665,13 @@ Section Exec.
       (* Data memory *)
       dmem : mem;
       (* Call stack: holds the IMEM address of the last calls. *)
-      callstack : list Z;
+      callstack : list addr;
       (* Loop stack: holds the IMEM start/end addresses and counter for active loops. *)
-      loopstack : list (Z * Z * nat);
+      loopstack : list (addr * addr * nat);
       (* Instruction counter. *)
       insn_counter : nat;
+      (* Program counter *)
+      pc : addr;
     }.
 
   Definition read_gpr (st : OtbnState) (r : gpr) : maybe Z :=
@@ -433,7 +689,7 @@ Section Exec.
 
   Definition read_wsr (st : OtbnState) (r : wsr) : maybe Z :=
     match r with
-    | RND => Ok (rnd (st.(insn_counter)))
+    | RND => Ok (rnd st.(insn_counter))
     | URND => Ok (urnd st.(insn_counter))
     | _ => map_err (mget st.(regs) (wsreg r)) "WSR undefined"
     end.
@@ -483,6 +739,7 @@ Section Exec.
       callstack := st.(callstack);
       loopstack := st.(loopstack);
       insn_counter := st.(insn_counter) + 1;
+      pc := st.(pc);
     |}.
 
   Definition regfile_set (st : OtbnState) (r : reg) (v : Z) : OtbnState :=
@@ -492,6 +749,7 @@ Section Exec.
       callstack := st.(callstack);
       loopstack := st.(loopstack);
       insn_counter := st.(insn_counter);
+      pc := st.(pc);
     |}.
 
   Definition flagfile_set (st : OtbnState) (f : flag) (v : bool) : OtbnState :=
@@ -501,30 +759,42 @@ Section Exec.
       callstack := st.(callstack);
       loopstack := st.(loopstack);
       insn_counter := st.(insn_counter);
+      pc := st.(pc);
     |}.
   
-  Definition callstack_pop (st : OtbnState) : maybe (Z * OtbnState) :=
+  Definition jump (st : OtbnState) (pc : addr) : OtbnState :=
+    {| regs := st.(regs);
+      flags := st.(flags);
+      dmem := st.(dmem);
+      callstack := st.(callstack);
+      loopstack := st.(loopstack);
+      insn_counter := st.(insn_counter);
+      pc := pc;
+    |}.
+  
+  Definition callstack_pop (st : OtbnState) : maybe  OtbnState :=
     (pc <- map_err (hd_error st.(callstack)) "Call stack empty" ;
-     Ok (pc,
-         {| regs := st.(regs);
+     Ok ({| regs := st.(regs);
            flags := st.(flags);
            dmem := st.(dmem);
            callstack := tl st.(callstack);
            loopstack := st.(loopstack);
            insn_counter := st.(insn_counter);
+           pc := pc;
          |})).
 
-  Definition callstack_push (st : OtbnState) (pc : Z) : maybe OtbnState :=
+  Definition callstack_push (st : OtbnState) (new_pc : addr) : maybe OtbnState :=
     (_ <- assertion (length st.(callstack) <? 8)%nat "Call stack full" ;
      Ok {| regs := st.(regs);
           flags := st.(flags);
           dmem := st.(dmem);
-          callstack := pc :: st.(callstack);
+          callstack := new_pc :: st.(callstack);
           loopstack := st.(loopstack);
           insn_counter := st.(insn_counter);
+          pc := st.(pc);
         |}).
 
-  Definition loopstack_pop (st : OtbnState) : maybe ((Z * Z * nat) * OtbnState) :=
+  Definition loopstack_pop (st : OtbnState) : maybe ((addr * addr * nat) * OtbnState) :=
     (l <- map_err (hd_error st.(loopstack)) "Loop stack empty" ;
      Ok (l,
          {| regs := st.(regs);
@@ -533,9 +803,10 @@ Section Exec.
            callstack := st.(callstack);
            loopstack := tl st.(loopstack);
            insn_counter := st.(insn_counter);
+          pc := st.(pc);
          |})).
 
-  Definition loopstack_push (st : OtbnState) (l : Z * Z * nat) : maybe OtbnState :=
+  Definition loopstack_push (st : OtbnState) (l : addr * addr * nat) : maybe OtbnState :=
     (_ <- assertion (length st.(loopstack) <? 8)%nat "Call stack full" ;
      Ok {| regs := st.(regs);
           flags := st.(flags);
@@ -543,7 +814,14 @@ Section Exec.
           callstack := st.(callstack);
           loopstack := l :: st.(loopstack);
           insn_counter := st.(insn_counter);
+          pc := st.(pc);
         |}).
+
+  Fixpoint repeat_advance_pc (pc : addr) (n : nat) : addr :=
+    match n with
+    | O => pc
+    | S n => advance_pc (repeat_advance_pc pc n)
+    end.
 
 
   (* set the M, L, and Z flags according to the destination register *)
@@ -667,6 +945,7 @@ Section Exec.
 
   Definition exec1
     (st : OtbnState) (i : sinsn) : maybe OtbnState :=
+    let st := inc_insn_counter st in
     match i with
     | Addi d x imm =>
         (_ <- assertion (valid_addi_imm imm) "Invalid immediate for addi";
@@ -762,15 +1041,15 @@ Section Exec.
         (_ <- assertion (negb(xinc && yinc)) "Cannot increment both indirect registers (bn.movr)";
          src_ptr <- read_gpr st yr ;
          src <- index_to_wdr (src_ptr &' 32) ;
-         dst_ptr <- read_gpr st xr ;
-         dst <- index_to_wdr (dst_ptr &' 32) ;
+         addr_ptr <- read_gpr st xr ;
+         addr <- index_to_wdr (addr_ptr &' 32) ;
          v <- read_wdr st src ;
          st <- (if xinc
                 then write_gpr st xr (src_ptr + 1)
                 else if yinc
-                     then write_gpr st yr (dst_ptr + 1)
+                     then write_gpr st yr (addr_ptr + 1)
                      else Ok st) ;
-         Ok (write_wdr st dst v))
+         Ok (write_wdr st addr v))
     | Bn_lid x offset y =>
         let xinc := has_inc x in
         let yinc := has_inc y in
@@ -780,15 +1059,15 @@ Section Exec.
          _ <- assertion (valid_mem_offset offset) "Invalid offset for bn.lid";
          src_ptr <- read_gpr st yr ;
          src <- index_to_wdr (src_ptr &' 32) ;
-         dst_ptr <- read_gpr st xr ;
-         dst <- index_to_wdr (dst_ptr &' 32) ;
+         addr_ptr <- read_gpr st xr ;
+         addr <- index_to_wdr (addr_ptr &' 32) ;
          v <- read_wdr st src ;
          st <- (if xinc
                 then write_gpr st xr (src_ptr + 1)
                 else if yinc
-                     then write_gpr st yr (dst_ptr + 1)
+                     then write_gpr st yr (addr_ptr + 1)
                      else Ok st) ;
-         Ok (write_wdr st dst v))
+         Ok (write_wdr st addr v))
           (*
     | _ => Err "NotImplemented"
 *)
@@ -826,200 +1105,168 @@ Section Exec.
     reflexivity.
   Qed.
 
-  Print cinsn.
-  Print OtbnState.
-  Definition ctrl1_cps {A} (pc_st : Z * OtbnState) (i : cinsn) (f : maybe (Z * OtbnState) -> A) : A :=
-    let pc := fst pc_st in
-    let st := snd pc_st in
-    f (Ok pc_st).
-  (*
-    match cinsn with
-    | Ret =>
-        (next_pc <- map_err (hd_error st.(callstack) "Call stack is empty" ;
-         Ok (GraphJump next_pc))
-          | Control Ecall => Ok GraphEcall
-          | Control (Jal r next_pc) =>
-              (_ <- assertion (gpr_eqb r x1) "Link registers other than x1 are not modelled" ;
-               _ <- assertion (length call_stack <? 8)%nat "Call stack is full" ;
-               post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphJump next_pc))
-          | Control (Bne r1 r2 branch_pc) =>
-              (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphBne r1 r2 branch_pc post))
-          | Control (Beq r1 r2 branch_pc) =>
-              (post <- to_graph' insns (curr_pc + 4) call_stack loop_stack ;
-               Ok (GraphBeq r1 r2 branch_pc post))
-          | Control (Loop r len) =>
-              (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
-               _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
-               let end_pc := curr_pc + 4 * len in
-               body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
-               Ok (GraphLoop r body end_pc))
-          | Control (Loopi iters len) =>
-              (_ <- assertion (0 <? len) "Loops must have nonzero length" ;
-               _ <- assertion (0 <? iters) "Loopis must have nonzero iterations" ;
-               _ <- assertion (length loop_stack <? 8)%nat "Loop stack is full" ;
-               let end_pc := curr_pc + 4 * len in
-               body <- to_graph' insns (curr_pc + 4) call_stack (end_pc :: loop_stack) ;
-               Ok (GraphLoopi iters body end_pc))
-          end*)
+  Definition ctrl1_cps (st : OtbnState) (i : cinsn (addr:=addr))
+    {A} (f : maybe OtbnState -> A) : A :=
+    let st := inc_insn_counter st in
+    let next_pc := advance_pc st.(pc) in
+    match i with
+    | Ret => f (callstack_pop st)
+    | Ecall => f (Ok st)
+    | Jal r jump_pc =>
+        if gpr_eqb r x0
+        then f (Ok (jump st jump_pc))
+        else if gpr_eqb r x1
+             then 
+               match callstack_push st next_pc with
+               | Err e => f (Err e)
+               | Ok st => f (Ok (jump st jump_pc))
+               end
+             else f (Err "Jump-and-link for registers other than x1 or x0 is not supported.")
+    | Bne r1 r2 branch_pc =>
+        match read_gpr st r1, read_gpr st r2 with
+        | Err e, _ => f (Err e)
+        | _, Err e => f (Err e)
+        | Ok v1, Ok v2 =>
+            if (v1 =? v2) then f (Ok (jump st next_pc)) else f (Ok (jump st branch_pc))
+        end
+    | Beq r1 r2 branch_pc =>
+        match read_gpr st r1, read_gpr st r2 with
+        | Err e, _ => f (Err e)
+        | _, Err e => f (Err e)
+        | Ok v1, Ok v2 =>
+            if (v1 =? v2) then f (Ok (jump st branch_pc)) else f (Ok (jump st next_pc))
+        end
+    | Loop r len =>
+        match read_gpr st r with
+        | Err e => f (Err e)
+        | Ok v =>
+            if (0 <=? len)%nat
+            then
+              if 0 <=? v
+              then
+                let start_addr := next_pc in
+                let end_addr := repeat_advance_pc st.(pc) len in
+                match loopstack_push st (start_addr, end_addr, len) with
+                | Err e => f (Err e)
+                | Ok st => f (Ok (jump st next_pc))
+                end
+              else f (Err "Loop iteration count must be > 0.")
+            else f (Err "Loop instruction length must be > 0.")
+        end
+    | Loopi iters len =>
+        if (0 <=? len)%nat
+        then
+          if (0 <=? iters)%nat
+          then
+            let start_addr := next_pc in
+            let end_addr := repeat_advance_pc st.(pc) len in
+            match loopstack_push st (start_addr, end_addr, iters) with
+            | Err e => f (Err e)
+            | Ok st => f (Ok (jump st next_pc))
+            end
+          else f (Err "Loop iteration count must be > 0.")
+        else f (Err "Loop instruction length must be > 0.")
+    end.
 
   Section __.
-    Context (blocks : map Z (list sinsn * option cinsn)).
+    Context (blocks : map addr (list sinsn * option (cinsn (addr:=addr)))).
 
-    Definition exec_block_cps
-      {A} (pc_st : Z * OtbnState) (f : maybe (Z * OtbnState) -> A) : A :=
-      let pc := fst pc_st in
-      let st := snd pc_st in
-      match mget blocks pc with
+    Definition exec_cps
+      {A} (st : OtbnState) (f : maybe OtbnState -> A) : A :=
+      match mget blocks st.(pc) with
       | None => f (Err "Block not found")
       | Some (si, ci) =>
-          let pc := pc + (Z.of_nat (length si) * 4) in
+          let end_pc := repeat_advance_pc st.(pc) (length si) in          
           exec_straightline_cps
             st si (fun st =>
                      match st with
-                     | Err x => f (Err x)
+                     | Err e => f (Err e)
                      | Ok st =>
                          match ci with
                          | None =>
-                             (* we must have reached the end of a loop *)
+                             (* Not a control-flow instruction; we
+                                must have reached the end of a loop *)
                              match loopstack_pop st with
+                             | Err e => f (Err e)
                              | Ok (loop_end_addr, loop_start_addr, iters, st) =>
-                                 if (pc =? loop_end_addr)
+                                 if addr_eqb end_pc loop_end_addr
                                  then
                                    match iters with
-                                   | 0%nat => f (Ok (pc + 4, st))
+                                   | 0%nat => f (Ok (jump st (advance_pc loop_end_addr)))
                                    | S iters =>
                                        let loop_entry := (loop_end_addr, loop_start_addr, iters) in
                                        match loopstack_push st loop_entry with
-                                       | Ok st => f (Ok (loop_start_addr, st))
-                                       | Err x => f (Err x)
+                                       | Ok st => f (Ok (jump st loop_start_addr))
+                                       | Err e => f (Err e)
                                        end
                                    end
                                  else f (Err "Reached loop end but loop stack did not match PC.")
-                             | Err x => f (Err x)
                              end
-                         | Some ci => ctrl1_cps (pc, st) ci f
+                         | Some ci => ctrl1_cps (jump st end_pc) ci f
                          end
                      end)
       end.
 
-    Definition exec_block (pc_st : Z * OtbnState) (P : Z * OtbnState -> Prop) : Prop :=
-      exec_block_cps pc_st (fun x =>
-                              match x with
-                              | Err _ => False
-                              | Ok x => P x
-                              end).
+    Definition exec (st : OtbnState) (P : OtbnState -> Prop) : Prop :=
+      exec_cps st (fun x =>
+                     match x with
+                     | Err _ => False
+                     | Ok x => P x
+                     end).
 
     Check eventually.
-    Check eventually exec_block.
+    Check eventually exec.
+    Check (forall (initial_state : OtbnState) (end_addr : addr),
+              eventually exec (fun st =>
+                                 st.(pc) = end_addr /\ read_wdr st w0 = Ok 0)
+                initial_state).
 
-    (* key thing that makes this work is that in the postcondition P you can specify which address you returned to *)
-    (* eventually doesn't guarantee that you've returned, but you know because of the PC *)
-    (* so for subroutines you specify in the postcondition that the PC is back to the caller *)    
+    (* key thing that makes this work is that in the postcondition P
+    you can specify which address you returned to *)
+    (* eventually doesn't guarantee that you've returned, but you know
+    because of the PC *)
+    (* so for subroutines you specify in the postcondition that the PC
+    is back to the caller *)
+
+    (* one problem: you need to know all the PCs at the preprocessing
+    stage to create blocks *)
+    (* fine for analyzing existing programs if you can take in a
+    binary, but it means that correct-by-construction is hard and also
+    proofs are not reusable between different binaries *)
 
     (* address-independent reasoning? *)
-    (* potential rep for loops: labels at start and end of loops, and also at not-taken branches *)
+    (* potential rep for loops: labels at start and end of loops, and
+    also at not-taken branches *)
     (* then you have string -> block as context *)
     (* loop insn takes 2 labels instead of #instructions in loop *)
-    (* then need a loopend instruction because you then need to know the labels *)
+    (* then need a loopend instruction because you then need to know
+    the labels *)
     
+    (* potential solution: use strings as the index for blocks, yes,
+    but don't require all strings to be actual labels *)
+    (* if processing existing code, use labels for branch/jump
+    destinations, but then custom identifiers for branch-not-taken and
+    loop-start or loop-post destinations *)
+    (* if creating new code, use whatever labels you want for these
+    destinations -- they will appear in the final binary *)
+
+    
+    (* alternative: graph representation? *)
+    (* duplicative representation -- same piece of code may be there
+    multiple times if there is a jump/branch destination within the
+    block *)
+    (* for taking in a binary you can just preprocess the binary and
+    maybe duplicate a bit of work *)
+    (* for correct-by-construction, you build the graph explicitly and
+    then assemble it -- here the duplicative rep is somewhat
+    problematic. You may have the same code repeated -- maybe define
+    something on the graph that assigns labels to jump points, and if
+    two labels are the same then they should have the same code? As
+    for jumps that go into the middle of blocks, maybe a
+    postprocessing step on the assembly that sees where one block is a
+    suffix of another and unifies them? or just not jump into the
+    middle of blocks *)
+
     Print cinsn.
-    Inductive exec : string -> OtbnState -> (option string -> OtbnState -> Prop) -> Prop :=
-    | ExecBlock lbl st post
-        sis ci (_:mget blocks lbl = Some (sis, ci))
-        f (_:exec_straightline_cps st sis (fun st => post) = )
-      :
-      exec_straightline_cps st 
-      
-    .
-  End __.
-
-  Fixpoint exec
-    (labels : map string Z)
-    (blocks : map Z Block)
-    (st : OtbnState)
-    (start : Block) : maybe OtbnState :=
-    match start with
-    | Ret insns =>
-        (st <- exec_straightline st insns ;
-         pc <- map_err (hd_error st.(callstack)) "Call stack empty" ;
-         b <- map_err (mget blocks pc) "No block found for PC";
-         exec labels blocks st b)
-    | _ => Err "NotImplemented"
-    end.
   
-
-  Definition run1
-    (i : sinsn)
-    (regs : regfile) (flags : flagfile) (dmem : mem)
-    (P : regfile -> flagfile -> mem -> Prop)
-    : Prop :=
-    match i with
-    | Mulqacc z x y s =>
-        exists vx vy vacc,
-        read_limb regs x = Ok vx
-        /\ read_limb regs y = Ok vy
-        /\ read_wsr regs ACC = Ok vacc
-        /\ valid_mul_shift s
-        /\ (let x := vx in
-            let y := vy in
-            let acc := vacc in
-            let r := (acc + ((x * y) << s)) in
-            let regs' := write_wsr regs ACC r in
-            P regs' flags dmem)
-    end.
-
-        
-        let st := if z then write_wsr st ACC 0 else st in
-        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc" ;
-         x <- read_limb st x ;
-         y <- read_limb st y ;
-         acc <- read_wsr st ACC ;
-         Ok (write_wsr st ACC (acc + (x * y) << s)))
-    | Mulqacc_wo z d x y s =>
-        let st := if z then write_wsr st ACC 0 else st in
-        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc.wo" ;
-         x <- read_limb st x ;
-         y <- read_limb st y ;
-         acc <- read_wsr st ACC ;
-         let acc' := acc + ((x * y) << s) in
-         Ok (write_wdr (write_wsr st ACC acc') d acc'))
-    | Mulqacc_so z L d x y s =>
-        let st := if z then write_wsr st ACC 0 else st in
-        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc.so" ;
-         x <- read_limb st x ;
-         y <- read_limb st y ;
-         old <- read_wdr st d ;
-         acc <- read_wsr st ACC ;
-         let acc' := acc + ((x * y) << s) in
-         let accL := acc' &' (Z.ones 128) in
-         let accH := acc' >> 128 in
-         let dL := old &' (Z.ones 128) in
-         let dH := old >> 128 in
-         let d' := if L
-                   then (accL |' (dH << 128))
-                   else (dL |' (accL << 128)) in
-         Ok (write_wdr (write_wsr st ACC acc') d d'))
-    | Addm d x y =>
-         (x <- read_wdr st x ;
-          y <- read_wdr st y ;
-          m <- read_wsr st MOD ;          
-          Ok (write_wdr st d (addm_spec x y m)))
-    | Subm d x y =>
-         (x <- read_wdr st x ;
-          y <- read_wdr st y ;
-          m <- read_wsr st MOD ;          
-          Ok (write_wdr st d (subm_spec x y m)))
-    | Add d x y s fg =>
-        (_ <- assertion (valid_arith_shift s) "Invalid shift for bn.add" ;
-         c <- read_flag st (flagC fg) ;
-         x <- read_wdr st x ;
-         y <- read_wdr st y ;
-         Ok (write_wdr st d (x + y + c)))
-    | _ => Err "NotImplemented"
-    end.
-
-
-  
-End Exec.
+End __.
