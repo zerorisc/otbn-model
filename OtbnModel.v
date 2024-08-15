@@ -1,9 +1,11 @@
 Require Import Coq.Strings.String.
+Require Import Coq.Init.Datatypes.
 Require Import Coq.Lists.List.
 Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Map.Interface.
+Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Coq.Strings.HexString.
 Import ListNotations.
@@ -150,43 +152,60 @@ Module OtbnNotations.
   Declare Scope otbn_scope.
   Delimit Scope otbn_scope with otbn.
 
+  (* special arguments *)
   Notation "x '.0'" := (limb0 x) (at level 0) : otbn_scope.
   Notation "x '.1'" := (limb1 x) (at level 0) : otbn_scope.
   Notation "x '.2'" := (limb2 x) (at level 0) : otbn_scope.
   Notation "x '.3'" := (limb3 x) (at level 0) : otbn_scope.
   Notation "a '++'" := (ind_inc a) (at level 20) : otbn_scope.
-  Notation "'addi' d , a , imm" := (Addi d a imm) (at level 40) : otbn_scope. 
-  Notation "'bn.mulqacc' a , b , imm" := (Bn_mulqacc false a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo' d , a , b , imm" := (Bn_mulqacc_wo false d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo.z' d , a , b , imm" := (Bn_mulqacc_wo true d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.L' , a , b , imm" := (Bn_mulqacc_so false true d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.U' , a , b , imm" := (Bn_mulqacc_so false false d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm" := (Bn_mulqacc_so true true d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm" := (Bn_mulqacc_so true false d a b imm) (at level 40) : otbn_scope.
-  Notation "'bn.addm' d , a , b " := (Bn_addm d a b) (at level 40) : otbn_scope.
-  Notation "'bn.subm' d , a , b " := (Bn_subm d a b) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b , fg" := (Bn_add d a b (lshift 0) fg) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b '<<' s , fg" := (Bn_add d a b (lshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b '>>' s , fg" := (Bn_add d a b (rshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b , fg" := (Bn_addc d a b (lshift 0) fg) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b '<<' s , fg" := (Bn_addc d a b (lshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b '>>' s , fg" := (Bn_addc d a b (rshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b , fg" := (Bn_sub d a b (lshift 0) fg) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b '<<' s , fg" := (Bn_sub d a b (lshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b '>>' s , fg" := (Bn_sub d a b (rshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b , fg" := (Bn_subb d a b (lshift 0) fg) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b '<<' s , fg" := (Bn_subb d a b (lshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b '>>' s , fg" := (Bn_subb d a b (rshift s) fg) (at level 40) : otbn_scope.
-  Notation "'bn.movr' a , b" := (Bn_movr a b) (at level 40) : otbn_scope.
-  Notation "'bn.lid' a , offset" := (Bn_lid a offset) (at level 10) : otbn_scope.
-  Notation "'ret'" := Ret (at level 40) : otbn_scope.
-  Notation "'ecall'" := Ecall (at level 40) : otbn_scope.
-  Notation "'jal' a , addr" := (Jal a addr) (at level 40) : otbn_scope.
-  Notation "'bne' a , b , addr" := (Bne a b addr) (at level 40) : otbn_scope.
-  Notation "'beq' a , b , addr" := (Beq a b addr) (at level 40) : otbn_scope.
-  Notation "'loop' a , len" := (Loop a len) (at level 40) : otbn_scope.
-  Notation "'loopi' a , len" := (Loopi a len) (at level 40) : otbn_scope.
+
+  (* straightline instructions *)
+  Notation "'addi' d , a , imm" := (Addi d a imm : insn) (at level 40) : otbn_scope. 
+  Notation "'bn.mulqacc' a , b , imm" := (Bn_mulqacc false a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo' d , a , b , imm" := (Bn_mulqacc_wo false d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo.z' d , a , b , imm" := (Bn_mulqacc_wo true d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.L' , a , b , imm" := (Bn_mulqacc_so false true d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.U' , a , b , imm" := (Bn_mulqacc_so false false d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm" := (Bn_mulqacc_so true true d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm" := (Bn_mulqacc_so true false d a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addm' d , a , b " := (Bn_addm d a b : insn) (at level 40) : otbn_scope.
+  Notation "'bn.subm' d , a , b " := (Bn_subm d a b : insn) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b , fg" := (Bn_add d a b (lshift 0) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b '<<' s , fg" := (Bn_add d a b (lshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b '>>' s , fg" := (Bn_add d a b (rshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b , fg" := (Bn_addc d a b (lshift 0) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b '<<' s , fg" := (Bn_addc d a b (lshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b '>>' s , fg" := (Bn_addc d a b (rshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b , fg" := (Bn_sub d a b (lshift 0) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b '<<' s , fg" := (Bn_sub d a b (lshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b '>>' s , fg" := (Bn_sub d a b (rshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b , fg" := (Bn_subb d a b (lshift 0) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b '<<' s , fg" := (Bn_subb d a b (lshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b '>>' s , fg" := (Bn_subb d a b (rshift s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.movr' a , b" := (Bn_movr a b : insn) (at level 40) : otbn_scope.
+
+  (* Load-store offset notations require special handling to parse the
+     parentheses as actual symbols. Only the most common offsets get
+     notations here, unfortunately; others may need to be written
+     without notation. *)
+  Notation "'bn.lid' a , 0( b )" := (Bn_lid a 0 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 32( b )" := (Bn_lid a 32 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 64( b )" := (Bn_lid a 64 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 96( b )" := (Bn_lid a 96 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 128( b )" := (Bn_lid a 128 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 160( b )" := (Bn_lid a 160 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 192( b )" := (Bn_lid a 192 b : insn) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 224( b )" := (Bn_lid a 224 b : insn) (at level 10) : otbn_scope.
+
+  (* Control instructions. *)
+  Notation "'ret'" := (Ret : insn) (at level 40) : otbn_scope.
+  Notation "'ecall'" := (Ecall : insn) (at level 40) : otbn_scope.
+  Notation "'jal' a , addr" := (Jal a addr : insn) (at level 40) : otbn_scope.
+  Notation "'bne' a , b , addr" := (Bne a b addr : insn) (at level 40) : otbn_scope.
+  Notation "'beq' a , b , addr" := (Beq a b addr : insn) (at level 40) : otbn_scope.
+  Notation "'loop' a , len" := (Loop a len : insn) (at level 40) : otbn_scope.
+  Notation "'loopi' a , len" := (Loopi a len : insn) (at level 40) : otbn_scope.
 
   (* Tests for instruction notations. *)
   Check (addi x3, x0, 5)%otbn.
@@ -213,7 +232,6 @@ Module OtbnNotations.
   Check (bn.movr x20, x21++)%otbn.
   Check (bn.lid x20, 0(x21))%otbn.
   Check (bn.lid x20, 32(x21++))%otbn.
-  Check (bn.lid x20, (-32)(x21++))%otbn.
   Check (ret)%otbn.
   Check (ecall)%otbn.
   Check (bne x3, x4, 0xfde)%otbn.
@@ -306,23 +324,17 @@ Section Exec.
   Context {rnd : nat -> Z} {rnd_range : forall x, 0 <= rnd x < 2^256}
     {urnd : nat -> Z} {urnd_range : forall x, 0 <= urnd x < 2^256}.
 
-  (* Parameterize over the representation of program counter. *)
+  (* Parameterize over the representation of code locations. *)
   Context {addr : Type}
     {advance_pc : addr -> addr}
     {addr_eqb : addr -> addr -> bool}
     {addr_eqb_spec : forall a1 a2, BoolSpec (a1 = a2) (a1 <> a2) (addr_eqb a1 a2)}.
 
   (* Parameterize over the map implementation. *)
-  Context {map : Type -> Type -> Type}
-    {mget : forall {K V}, map K V -> K -> option V}
-    {mset : forall {K V}, map K V -> K -> V -> map K V}
-    {mget_mset_eq : forall K V (m : map K V) k v, mget (mset m k v) k = Some v}
-    {mget_mset_neq : forall K V (m : map K V) k1 k2 v,
-        k1 <> k2 -> mget (mset m k1 v) k2 = mget m k2}.
-  Arguments mget {_ _}. Arguments mset {_ _}.
-  Notation regfile := (map reg Z) (only parsing).
-  Notation flagfile := (map flag bool) (only parsing).
-  Notation mem := (map Z Z) (only parsing).
+  Context {regfile : map.map reg Z}
+    {flagfile : map.map flag bool}
+    {mem : map.map Z Z}
+    {blockmap : map.map addr (list sinsn * option (cinsn (addr:=addr)))}.
 
   (* State information for the processor. *)
   Record OtbnState : Type :=
@@ -350,21 +362,21 @@ Section Exec.
         (* TODO: a direct read from the call stack is possible but
            rare in practice. For now, don't model it. *)
         Err "Attempt to directly read from the call stack. This behavior is not yet modelled."
-    | _ => map_err (mget st.(regs) (gpreg r)) "GPR undefined"
+    | _ => map_err (map.get st.(regs) (gpreg r)) "GPR undefined"
     end.
 
   Definition read_wdr (st : OtbnState) (r : wdr) : maybe Z :=
-    map_err (mget st.(regs) (wdreg r)) "WDR undefined".
+    map_err (map.get st.(regs) (wdreg r)) "WDR undefined".
 
   Definition read_wsr (st : OtbnState) (r : wsr) : maybe Z :=
     match r with
     | RND => Ok (rnd st.(insn_counter))
     | URND => Ok (urnd st.(insn_counter))
-    | _ => map_err (mget st.(regs) (wsreg r)) "WSR undefined"
+    | _ => map_err (map.get st.(regs) (wsreg r)) "WSR undefined"
     end.
 
   Definition read_flag (st : OtbnState) (f : flag) : maybe bool :=
-    map_err (mget st.(flags) f) "Flag undefined".
+    map_err (map.get st.(flags) f) "Flag undefined".
 
   (* Assemble a group of flags into an integer value. *)
   Definition read_flag_group (st : OtbnState) (fg : flag_group) : maybe Z :=
@@ -412,7 +424,7 @@ Section Exec.
     |}.
 
   Definition regfile_set (st : OtbnState) (r : reg) (v : Z) : OtbnState :=
-    {| regs := mset st.(regs) r v;
+    {| regs := map.put st.(regs) r v;
       flags := st.(flags);
       dmem := st.(dmem);
       callstack := st.(callstack);
@@ -423,7 +435,7 @@ Section Exec.
 
   Definition flagfile_set (st : OtbnState) (f : flag) (v : bool) : OtbnState :=
     {| regs := st.(regs);
-      flags := mset st.(flags) f v;
+      flags := map.put st.(flags) f v;
       dmem := st.(dmem);
       callstack := st.(callstack);
       loopstack := st.(loopstack);
@@ -754,23 +766,23 @@ Section Exec.
     f (exec_straightline st insns).
 
   (* Test *)
-  Import OtbnNotations.
   Goal (forall st,
+           map.ok regfile ->
            read_wdr st w2 = Ok 5 ->
            (st <- exec_straightline st
-                    [(addi x2, x0, 2)%otbn;
-                     (bn.add w0, w2, w2, FG0)%otbn];
+                    ([Addi x2 x0 2;
+                      Bn_add w0 w2 w2 (lshift 0) FG0]);
             read_wdr st w0) = Ok 10).
   Proof.
     intros; cbn. destruct st.
     cbv [read_wdr inc_insn_counter regs prefix_err] in *; cbn.
-    rewrite !mget_mset_neq by congruence.
+    rewrite !map.get_put_diff by congruence.
     lazymatch goal with
     | H : _ = inl _ |- _ => rewrite H; cbn [bind]
     end.
     cbn [write_wdr regfile_set regs].
-    rewrite ?mget_mset_neq by congruence.
-    rewrite mget_mset_eq by congruence.
+    rewrite ?map.get_put_diff by congruence.
+    rewrite ?map.get_put_same by congruence.
     reflexivity.
   Qed.
 
@@ -838,11 +850,11 @@ Section Exec.
     end.
 
   Section __.
-    Context (blocks : map addr (list sinsn * option (cinsn (addr:=addr)))).
+    Context (blocks : map.rep (map:=blockmap)).
 
     Definition exec_cps
       {A} (st : OtbnState) (f : maybe OtbnState -> A) : A :=
-      match mget blocks st.(pc) with
+      match map.get blocks st.(pc) with
       | None => f (Err "Block not found")
       | Some (si, ci) =>
           let end_pc := repeat_advance_pc st.(pc) (length si) in          
@@ -889,7 +901,7 @@ Section Exec.
               eventually exec (fun st =>
                                  st.(pc) = end_addr /\ read_wdr st w0 = Ok 0)
                 initial_state).
-
+    
     (* key thing that makes this work is that in the postcondition P
     you can specify which address you returned to *)
     (* eventually doesn't guarantee that you've returned, but you know
@@ -897,45 +909,159 @@ Section Exec.
     (* so for subroutines you specify in the postcondition that the PC
     is back to the caller *)
 
-    (* one problem: you need to know all the PCs at the preprocessing
-    stage to create blocks *)
-    (* fine for analyzing existing programs if you can take in a
-    binary, but it means that correct-by-construction is hard and also
-    proofs are not reusable between different binaries *)
+    (* question: how do you create blocks? *)
+    (* can use Z when processing binaries, since you know PC ahead of time *)
+    (* can use string + offset for correct-by-construction *)
 
-    (* address-independent reasoning? *)
-    (* potential rep for loops: labels at start and end of loops, and
-    also at not-taken branches *)
-    (* then you have string -> block as context *)
-    (* loop insn takes 2 labels instead of #instructions in loop *)
-    (* then need a loopend instruction because you then need to know
-    the labels *)
+    (* need a definition that parses list of insns into blocks *)
+    (* need a way to construct subroutines as blocks *)
+    (* keep in mind that PCs are relative in binaries *)
+
+
+  End __.
+
+  Section TestProof.
+    Context {start_addr pow32_addr : addr}
+      {addrs_disjoint :
+        NoDup [start_addr; advance_pc (start_addr); advance_pc (advance_pc (start_addr));
+               pow32_addr; advance_pc (pow32_addr); advance_pc (advance_pc (pow32_addr))]}.
+    Import OtbnNotations.
+
+    Definition pow32_program : list (insn (addr:=Z)) :=
+      [
+        (* start: *)
+        jal x1, 8
+        ; ecall
+        (* pow32: *)
+        ; loopi 5, 1
+        ; bn.add w2, w2, w2, FG0
+        ; ret
+      ]%otbn.
+
+    Definition pow32_blocks : map.rep (map:=blockmap) :=
+      let blocks := map.empty in
+      let pc := pow32_addr in
+      let blocks := map.put blocks pc ([], Some (Loopi 5 1)) in
+      let pc := advance_pc pc in
+      let blocks := map.put blocks pc ([Bn_add w2 w2 w2 (lshift 0) FG0], None) in
+      let pc := advance_pc pc in
+      let blocks := map.put blocks pc ([], Some Ret) in
+      blocks.
+    Definition start_blocks : map.rep (map:=blockmap) :=
+      let blocks := map.empty in
+      let pc := start_addr in 
+      let blocks := map.put blocks pc ([], Some (Jal x1 pow32_addr)) in
+      let pc := advance_pc start_addr in 
+      let blocks := map.put blocks pc ([], Some Ecall) in
+      blocks.
+
+    Lemma pow32_disjoint :
+      pow32_addr <> advance_pc (pow32_addr)
+      /\ pow32_addr <> advance_pc (advance_pc (pow32_addr))
+      /\ advance_pc (pow32_addr) <> advance_pc (advance_pc (pow32_addr)).
+    Admitted.
+
+    Ltac mapsimpl :=
+      rewrite ?map.get_put_diff by congruence;
+      multimatch goal with
+      | |- context [map.get (map.put ?m ?k1 ?v) ?k2] =>
+          replace (map.put m k1 v) with (map.put m k2 v) by congruence;
+          rewrite (map.get_put_same m k2 v)
+      end.
+
+    Lemma exec_straightline_cps_empty (st : OtbnState) {A} (f : _ -> A) :
+      exec_straightline_cps st [] f = f (Ok st).
+    Proof. reflexivity. Qed.
+
+    Lemma repeat_advance_pc_0 (pc : addr) : repeat_advance_pc pc 0 = pc.
+    Proof. reflexivity. Qed.
+
+    Lemma jump_noop (st : OtbnState) (dst : addr) :
+      st.(pc) = dst -> jump st dst = st.
+    Proof. intros; subst; destruct st; reflexivity. Qed.
+
+    Lemma ctrl1_loopi (st : OtbnState) iters looplen :
+      (length st.(loopstack) < 8)%nat ->
+      ctrl1_cps st (Loopi iters looplen)
+        (fun st' => match st' with
+                    | inl st' =>
+                        (st'.(regs) = st.(regs)
+                         /\ st'.(flags) = st.(flags)
+                         /\ st'.(dmem) = st.(dmem)
+                         /\ st'.(callstack) = st.(callstack)
+                         /\ st'.(loopstack) =
+                              (advance_pc st.(pc), repeat_advance_pc st.(pc) looplen, iters)
+                                :: st.(loopstack)
+                         /\ st'.(insn_counter) = (st.(insn_counter) + 1)%nat
+                         /\ st'.(pc) = advance_pc (st.(pc)))
+                    | inr _ => False
+                    end).
+    Proof.
+      intros. cbv [ctrl1_cps inc_insn_counter jump loopstack_push assertion bind].
+      cbn [pc insn_counter loopstack callstack regs flags dmem].
+      repeat lazymatch goal with
+             | |- context [(?x <=? ?y)%nat] =>
+                 destruct (Nat.leb_spec x y); try lia
+             | |- context [(?x <? ?y)%nat] =>
+                 destruct (Nat.ltb_spec x y); try lia
+             end.
+      cbn [pc insn_counter loopstack callstack regs flags dmem].
+      ssplit; reflexivity.
+    Qed.
+
+    Lemma pow32_correct (st : OtbnState) :
+      map.ok blockmap ->
+      (0 < length st.(callstack))%nat ->
+      (length st.(loopstack) < 8)%nat ->
+      st.(pc) = pow32_addr ->
+      forall v,
+        map.get st.(regs) w2 = Some v ->
+        eventually (exec pow32_blocks)
+          (fun st' =>
+             st'.(pc) = hd pow32_addr st.(callstack)
+             /\ st'.(dmem) = st.(dmem)
+             /\ st'.(loopstack) = st.(loopstack)
+             /\ st'.(callstack) = tl st.(callstack)
+             /\ st'.(regs) = map.put st.(regs) w2 (v ^ 32)
+             /\ st'.(insn_counter) = (st.(insn_counter) + 7)%nat)
+        st.
+    Proof.
+      intros.
+      pose proof pow32_disjoint.
+      repeat lazymatch goal with
+             | H : _ /\ _ |- _ => destruct H
+             end.
+      
+      eapply eventually_step.
+      { cbv [exec exec_cps pow32_blocks]. mapsimpl.
+        rewrite exec_straightline_cps_empty.
+        rewrite repeat_advance_pc_0.
+        rewrite jump_noop by congruence.
+        apply ctrl1_loopi. lia. }
+
+
+      cbv beta; intros.
+      repeat lazymatch goal with
+             | H : _ /\ _ |- _ => destruct H
+             end.
+      eapply eventually_step.
+      { cbv [exec exec_cps pow32_blocks]. mapsimpl.
+        
+        (* need weakening lemma for exec_straightline_cps, then lemma for Bn_add *)
+        (* TODO: maybe separate OTBN control state from regs/flags? *)
+        (* TODO: maybe eliminate insn counter? *)
+        (* TODO: eliminate maybes, use err bits -- for imms and shifts do a mod or drop bits *)
+        
+      
+
+    Qed.
+End TestProof.
+
+  Check exec.
+  Fixpoint to_blocks (insns : list (insn (addr:=Z))) : :=
     
-    (* potential solution: use strings as the index for blocks, yes,
-    but don't require all strings to be actual labels *)
-    (* if processing existing code, use labels for branch/jump
-    destinations, but then custom identifiers for branch-not-taken and
-    loop-start or loop-post destinations *)
-    (* if creating new code, use whatever labels you want for these
-    destinations -- they will appear in the final binary *)
 
-    
-    (* alternative: graph representation? *)
-    (* duplicative representation -- same piece of code may be there
-    multiple times if there is a jump/branch destination within the
-    block *)
-    (* for taking in a binary you can just preprocess the binary and
-    maybe duplicate a bit of work *)
-    (* for correct-by-construction, you build the graph explicitly and
-    then assemble it -- here the duplicative rep is somewhat
-    problematic. You may have the same code repeated -- maybe define
-    something on the graph that assigns labels to jump points, and if
-    two labels are the same then they should have the same code? As
-    for jumps that go into the middle of blocks, maybe a
-    postprocessing step on the assembly that sees where one block is a
-    suffix of another and unifies them? or just not jump into the
-    middle of blocks *)
 
-    Print cinsn.
   
+End Exec.
 End __.
