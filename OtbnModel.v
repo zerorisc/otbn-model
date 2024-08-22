@@ -240,6 +240,7 @@ Module OtbnNotations.
   Check (loopi 2, 5)%otbn.
 End OtbnNotations.
 
+(*
 Section ErrorMonad.
   (* returns either a value or an error message, helpful for debugging *)
   Definition maybe (A : Type) : Type := A + string.
@@ -278,6 +279,54 @@ Module ErrorMonadNotations.
   Notation "'Err' x" := (inr x%string) (at level 20, only parsing).
 End ErrorMonadNotations.
 Import ErrorMonadNotations.
+ *)
+
+Section CpsMonad.
+  Definition bind {A B C} (x : (A -> C) -> C) (f : A -> (B -> C) -> C) : (B -> C) -> C :=
+    fun P => x (fun a => f a P).
+  Definition ret {A B} (a : A) (P : A -> B) : B := P a.
+End CpsMonad.
+Module CpsMonadNotations.
+  Notation "a <- b ; c" := (bind b (fun a => c)) (at level 100, right associativity).
+  Notation Ok := inl (only parsing).
+  Notation "'Err' x" := (inr x%string) (at level 20, only parsing).
+End CpsMonadNotations.
+Import CpsMonadNotations.
+
+Module CpsMonadTest.
+  Local Definition add_cps (a b : nat) (P : nat -> Prop) : Prop :=
+    let ab := (a + b)%nat in
+    P ab.
+
+  Eval cbv beta iota delta [add_cps] in
+    (fun a b c d e =>
+       add_cps a b
+         (fun w => add_cps w c
+                     (fun x => add_cps x d
+                                 (fun y => add_cps y e
+                                             (fun z => z = 0%nat))))).
+  Eval cbv beta iota delta [add_cps] in
+    (fun a b c d e =>
+       (w <- add_cps a b ;
+        x <- add_cps w c ;
+        y <- add_cps x d ;
+        add_cps y e)).
+
+  Local Fixpoint mul_cps (a b : nat) : (nat -> Prop) -> Prop :=
+    match b with
+    | O => ret 0%nat
+    | S b =>
+        x <- mul_cps a b ;
+        add_cps x a
+    end.
+
+  Goal (forall a, mul_cps a 5 (fun x => x = 5 * a))%nat.
+  Proof.
+    intros. cbv beta iota delta [mul_cps add_cps bind ret].
+    cbn. lia.
+  Qed.
+End CpsMonadTest.
+
 
 (* Boilerplate definitions for comparing registers. *)
 Section RegisterEquality.
@@ -320,21 +369,330 @@ Local Coercion Z.b2z : bool >-> Z.
 
 (* Executable model of OTBN. *)
 Section Exec.
-  (* Parameterize over randomness implementation. *)
-  Context {rnd : nat -> Z} {rnd_range : forall x, 0 <= rnd x < 2^256}
-    {urnd : nat -> Z} {urnd_range : forall x, 0 <= urnd x < 2^256}.
-
   (* Parameterize over the representation of code locations. *)
   Context {addr : Type}
+    {error_addr : addr}
     {advance_pc : addr -> addr}
     {addr_eqb : addr -> addr -> bool}
     {addr_eqb_spec : forall a1 a2, BoolSpec (a1 = a2) (a1 <> a2) (addr_eqb a1 a2)}.
+
+  (* error values for cases that should be unreachable *)
+  Context {error_Z : Z} {error_bool : bool}.
 
   (* Parameterize over the map implementation. *)
   Context {regfile : map.map reg Z}
     {flagfile : map.map flag bool}
     {mem : map.map Z Z}
     {blockmap : map.map addr (list sinsn * option (cinsn (addr:=addr)))}.
+
+  (* Really, I want to talk about terminal states -- either a return
+     from the subroutine, the end of the program, or an error.
+
+     straightline needs/edits only regs, flags, dmem --> but can error
+     control needs/edits callstack, loopstack, pc, needs regs --> can also error 
+
+     need to process through, come out with a Prop in the end via cps style passing
+     the prop gives you rnd reasoning much easier
+   *)
+
+  (* mulqacc shifts must be positive multiples of 64 *)
+  Definition to_valid_mul_shift (s : Z) : Z :=
+    Z.shiftl (Z.land (Z.shiftr (Z.abs s) 6) 3) 6.
+  (* rshi shifts must be in the range [0,255] *)
+  Definition to_valid_rshi_imm (s : Z) : Z := Z.land (Z.abs s) 255.
+  (* other shift immediates must be multiples of 8 and in the range [0,248] *)
+  Definition to_valid_arith_shift (s : shift) : Z :=
+    let s := match s with
+             | lshift x => x
+             | rshift x => x
+             end in
+    Z.shiftl (Z.land (Z.shiftr (Z.abs s) 3) 31) 3.
+  (* immediates for addi must be in the range [-2048, 2047] *)
+  (* TODO: this implementation cuts off the very lowest value, -2048 *)
+  Definition to_valid_addi_imm (imm : Z) : Z :=
+    if 0 <=? imm
+    then Z.land imm 2047
+    else - (Z.land (-imm) 2047).
+  (* offsets for loads and stores are in the range [-16384, 16352] in steps of 32 *)
+  (* TODO: this implementation cuts off the very lowest value, -16384 *)
+  Definition to_valid_mem_offset (offset : Z) : Z :=
+    if 0 <=? offset
+    then Z.shiftl (Z.land (Z.shiftr offset 5) 511) 5
+    else - Z.shiftl (Z.land (Z.shiftr (- offset) 5) 511) 5.
+
+  (* Raw getter for registers; use read_reg instead for most purposes. *)
+  Definition REGISTER_NOT_INITIALIZED : Prop := False.
+  Definition reg_get (regs : regfile) (r : reg) (P : Z -> Prop) : Prop :=
+    match map.get regs r with
+    | Some v => P v
+    | None => False
+    end.
+
+  Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> Prop) : Prop :=
+    match r with
+    | x0 => P 0 (* x0 always reads as 0 *)
+    | x1 =>
+        (* TODO: call stack reads are rare in practice; for now, don't model *)
+        False
+    | _ => reg_get regs (gpreg r) P
+    end.
+
+  Definition read_wdr (regs : regfile) (r : wdr) (P : Z -> Prop) : Prop :=
+    reg_get regs (wdreg r) P.
+
+  Definition read_wsr (regs : regfile) (r : wsr) (P : Z -> Prop) : Prop :=
+    match r with
+    | RND => forall r, P r
+    | URND => forall u, P u
+    | _ => reg_get regs (wsreg r) P
+    end.
+
+  Definition read_flag (flags : flagfile) (f : flag) (P : bool -> Prop) : Prop :=
+    match map.get flags f with
+    | Some v => P v
+    | None => False
+    end.
+
+  (* Assemble a group of flags into an integer value. *)
+  Definition read_flag_group (flags : flagfile) (fg : flag_group) : (Z -> Prop) -> Prop :=
+    c <- read_flag flags (flagC fg) ;
+    m <- read_flag flags (flagM fg) ;
+    l <- read_flag flags (flagL fg) ;
+    z <- read_flag flags (flagZ fg) ;
+    ret (c |' (m << 1) |' (l << 2) |' (z << 3)).
+
+  Definition read_csr (flags : flagfile) (r : csr) : (Z -> Prop) -> Prop :=
+    match r with
+    | CSR_FG0 => read_flag_group flags FG0
+    | CSR_FG1 => read_flag_group flags FG1
+    | CSR_FLAGS =>
+        fg0 <- read_flag_group flags FG0 ;
+        fg1 <- read_flag_group flags FG1 ;
+        ret (fg0 |' (fg1 << 4))
+    end.
+
+  (* Implements a read from the register file, handling all special registers. *)
+  Definition read_reg (regs : regfile) (flags : flagfile) (r : reg) : (Z -> Prop) -> Prop :=
+    match r with
+    | gpreg r => read_gpr regs r
+    | wdreg r => read_wdr regs r
+    | csreg r => read_csr flags r
+    | wsreg r => read_wsr regs r
+    end.
+
+  Definition read_limb (regs : regfile) (l : limb) : (Z -> Prop) -> Prop :=
+    match l with
+    | limb0 r =>
+        (x <- read_wdr regs r ;
+         ret (x &' Z.ones 64))
+    | limb1 r =>
+        (x <- read_wdr regs r ;
+         ret ((x >> 64) &' Z.ones 64))
+    | limb2 r =>
+        (x <- read_wdr regs r ;
+         ret ((x >> 128) &' Z.ones 64))
+    | limb3 r =>
+        (x <- read_wdr regs r ;
+         ret ((x >> 192) &' Z.ones 64))
+  end.
+
+  Definition cast32 (v : Z) : Z := v &' Z.ones 32.
+  Definition cast256 (v : Z) : Z := v &' Z.ones 256.
+
+  Definition write_gpr (regs : regfile) (r : gpr) (v : Z) : (regfile -> Prop) -> Prop :=
+    match r with
+    | x0 => ret regs
+    | x1 =>
+        (* TODO: this should push to the call stack, but is
+           practically never used. For now, don't model this behavior
+           and treat it as an error. *)
+        fun _ => False
+    | _ => ret (map.put regs (gpreg r) (cast32 v))
+    end.
+
+  Definition write_wdr (regs : regfile) (r : wdr) (v : Z) : (regfile -> Prop) -> Prop :=
+    ret (map.put regs (wdreg r) (cast256 v)).
+  Definition write_wsr (regs : regfile) (r : wsr) (v : Z) : (regfile -> Prop) -> Prop :=
+    match r with
+    | RND => ret regs (* writes to RND are ignored *)
+    | URND => ret regs (* writes to URND are ignored *)
+    | _ => ret (map.put regs (wsreg r) (cast256 v))
+    end.
+
+  Print ret.
+  Print bind.
+  (* bind : ((A -> C) -> C) -> (A -> (B -> C) -> C) -> (B -> C) -> C *)
+  (* A = regs, C = Prop, B = ??? *)
+  (* continuation: A -> (B -> C) -> C *)
+  (* ret : A -> (A -> B) -> B *)
+  (* bind x (fun a => (fun b => P) *)
+  Check (fun (x : (regfile -> Prop) -> Prop) =>
+           bind x).
+  Check (fun d x imm regs (flags : flagfile) (dmem : mem) (P : _ -> _ -> _ -> Prop) =>
+        (x <- read_gpr regs x ;
+         regs <- write_gpr regs d (x + imm) ;
+         (fun b : unit => P regs flags dmem))).
+  Check (fun d x imm regs (flags : flagfile) (dmem : mem) P =>
+        read_gpr regs x
+          (fun x =>
+             write_gpr regs d (x + imm)
+               (fun regs => P regs flags dmem))).
+  Print ret.
+  Print bind.
+  Check read_gpr.
+  Check write_gpr.
+  Definition exec1_cps
+    (regs : regfile) (flags : flagfile) (dmem : mem)
+    (i : sinsn) (P : regfile -> flagfile -> mem -> Prop) : Prop :=
+    match i with
+    | Addi d x imm =>
+        let imm := to_valid_addi_imm imm in
+        read_gpr regs x
+          (fun x =>
+             write_gpr regs d (x + imm)
+               (fun regs => P regs flags dmem))
+          (*
+        (x <- read_gpr regs x ;
+         regs <- write_gpr regs d (x + imm) ;
+         ret (P regs flags dmem)) *)
+    | _ => False
+    end.
+    | Bn_mulqacc z x y s =>
+        let st := if z then write_wsr st ACC 0 else st in
+        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc";
+         x <- read_limb st x ;
+         y <- read_limb st y ;
+         acc <- read_wsr st ACC ;
+         let r := mulqacc_spec acc x y s in
+         Ok (write_wsr st ACC r))
+    | Bn_mulqacc_wo z d x y s =>
+        let st := if z then write_wsr st ACC 0 else st in
+        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc.wo" ;
+         x <- read_limb st x ;
+         y <- read_limb st y ;
+         acc <- read_wsr st ACC ;
+         let r := mulqacc_spec acc x y s in
+         Ok (write_wdr (write_wsr st ACC r) d r))
+    | Bn_mulqacc_so z L d x y s =>
+        let st := if z then write_wsr st ACC 0 else st in
+        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc.so" ;
+         x <- read_limb st x ;
+         y <- read_limb st y ;
+         old <- read_wdr st d ;
+         acc <- read_wsr st ACC ;
+         let r := mulqacc_spec acc x y s in
+         let accL := r &' (Z.ones 128) in
+         let accH := r >> 128 in
+         let dL := old &' (Z.ones 128) in
+         let dH := old >> 128 in
+         let d' := if L
+                   then (accL |' (dH << 128))
+                   else (dL |' (accL << 128)) in
+         Ok (write_wdr (write_wsr st ACC r) d d'))
+    | Bn_addm d x y =>
+         (x <- read_wdr st x ;
+          y <- read_wdr st y ;
+          m <- read_wsr st MOD ;          
+          Ok (write_wdr st d (addm_spec x y m)))
+    | Bn_subm d x y =>
+         (x <- read_wdr st x ;
+          y <- read_wdr st y ;
+          m <- read_wsr st MOD ;
+          Ok (write_wdr st d (subm_spec x y m)))
+    | Bn_add d x y s fg =>
+        (_ <- assertion (valid_arith_shift s) "Invalid shift for bn.add" ;
+         x <- read_wdr st x ;
+         y <- read_wdr st y ;
+         let r := x + y in
+         let st := set_mlz st fg r in
+         let st := flagfile_set st (flagC fg) (2^256 <=? r) in
+         Ok (write_wdr st d r))
+    | Bn_addc d x y s fg =>
+        (_ <- assertion (valid_arith_shift s) "Invalid shift for bn.addc" ;
+         c <- read_flag st (flagC fg);
+         x <- read_wdr st x ;
+         y <- read_wdr st y ;
+         let r := x + y + c in
+         let st := set_mlz st fg r in
+         let st := flagfile_set st (flagC fg) (2^256 <=? r) in
+         Ok (write_wdr st d r))
+    | Bn_sub d x y s fg =>
+        (_ <- assertion (valid_arith_shift s) "Invalid shift for bn.sub" ;
+         x <- read_wdr st x ;
+         y <- read_wdr st y ;
+         let r := x - y in
+         let st := set_mlz st fg r in
+         let st := flagfile_set st (flagC fg) (r <? 0) in
+         Ok (write_wdr st d r))
+    | Bn_subb d x y s fg =>
+        (_ <- assertion (valid_arith_shift s) "Invalid shift for bn.subb" ;
+         b <- read_flag st (flagC fg);
+         x <- read_wdr st x ;
+         y <- read_wdr st y ;
+         let r := x - y - b in
+         let st := set_mlz st fg r in
+         let st := flagfile_set st (flagC fg) (r <? 0) in
+         Ok (write_wdr st d r))
+    | Bn_rshi d x y imm =>
+        (_ <- assertion (valid_rshi_imm imm) "Invalid immediate for bn.rshi" ;
+         x <- read_wdr st x ;
+         y <- read_wdr st y ;
+         let r := rshi_spec x y imm in
+         Ok (write_wdr st d r))
+    | Bn_movr x y =>
+        let xinc := has_inc x in
+        let yinc := has_inc y in
+        let xr := ind_to_gpr x in
+        let yr := ind_to_gpr y in
+        (_ <- assertion (negb(xinc && yinc)) "Cannot increment both indirect registers (bn.movr)";
+         src_ptr <- read_gpr st yr ;
+         src <- index_to_wdr (src_ptr &' 32) ;
+         addr_ptr <- read_gpr st xr ;
+         addr <- index_to_wdr (addr_ptr &' 32) ;
+         v <- read_wdr st src ;
+         st <- (if xinc
+                then write_gpr st xr (src_ptr + 1)
+                else if yinc
+                     then write_gpr st yr (addr_ptr + 1)
+                     else Ok st) ;
+         Ok (write_wdr st addr v))
+    | Bn_lid x offset y =>
+        let xinc := has_inc x in
+        let yinc := has_inc y in
+        let xr := ind_to_gpr x in
+        let yr := ind_to_gpr y in
+        (_ <- assertion (negb(xinc && yinc)) "Cannot increment both indirect registers (bn.lid)";
+         _ <- assertion (valid_mem_offset offset) "Invalid offset for bn.lid";
+         src_ptr <- read_gpr st yr ;
+         src <- index_to_wdr (src_ptr &' 32) ;
+         addr_ptr <- read_gpr st xr ;
+         addr <- index_to_wdr (addr_ptr &' 32) ;
+         v <- read_wdr st src ;
+         st <- (if xinc
+                then write_gpr st xr (src_ptr + 1)
+                else if yinc
+                     then write_gpr st yr (addr_ptr + 1)
+                     else Ok st) ;
+         Ok (write_wdr st addr v))
+
+  Inductive OtbnState : Type :=
+  | OtbnBusy :
+    forall (regs : regfile) (flags : flagfile) (dmem : mem)
+           (callstack : list addr) (loopstack : list (addr * addr * nat)),
+      OtbnState
+  | OtbnErr : forall (err_code : Z) (msg : string), OtbnState
+  | OtbnDone : forall (dmem : mem), OtbnState
+  | OtbnReturn :
+    forall (regs : regfile) (flags : flagfile) (dmem : mem),
+      OtbnState
+  .
+
+  Definition exec (st : OtbnState) (P : OtbnState -> Prop) : Prop :=
+    exec_cps st (fun x =>
+                   match x with
+                   | Err _ => False
+                   | Ok x => P x
+                   end).
 
   (* State information for the processor. *)
   Record OtbnState : Type :=
@@ -351,53 +709,73 @@ Section Exec.
       loopstack : list (addr * addr * nat);
       (* Instruction counter. *)
       insn_counter : nat;
-      (* Program counter *)
+      (* Program counter. *)
       pc : addr;
+      (* Errors. *)
+      errs : 
     }.
 
-  Definition read_gpr (st : OtbnState) (r : gpr) : maybe Z :=
+  (* Called when OTBN encounters an error or ecall. *)
+  Definition wipe (st : OtbnState) : OtbnState :=
+    {| regs := map.empty;
+      flags := map.empty;
+      dmem := st.(dmem);
+      callstack := [];
+      loopstack := [];
+      insn_counter := st.(insn_counter);
+      pc := st.(pc);
+    |}.
+
+  Definition reg_get (st : OtbnState) (r : reg) : Z :=
+    match map.get st.(regs) r with
+    | Some v => v
+    | None => error_Z
+    end.
+
+  Definition read_gpr (st : OtbnState) (r : gpr) : Z :=
     match r with
-    | x0 => Ok 0 (* x0 always reads as 0 *)
+    | x0 => 0 (* x0 always reads as 0 *)
     | x1 =>
-        (* TODO: a direct read from the call stack is possible but
-           rare in practice. For now, don't model it. *)
-        Err "Attempt to directly read from the call stack. This behavior is not yet modelled."
-    | _ => map_err (map.get st.(regs) (gpreg r)) "GPR undefined"
+        (* TODO: call stack reads are rare in practice; for now, don't model *)
+        error_Z
+    | _ => reg_get st (gpreg r)
     end.
 
-  Definition read_wdr (st : OtbnState) (r : wdr) : maybe Z :=
-    map_err (map.get st.(regs) (wdreg r)) "WDR undefined".
+  Definition read_wdr (st : OtbnState) (r : wdr) : Z := reg_get st (wdreg r).
 
-  Definition read_wsr (st : OtbnState) (r : wsr) : maybe Z :=
+  Definition read_wsr (st : OtbnState) (r : wsr) : Z :=
     match r with
-    | RND => Ok (rnd st.(insn_counter))
-    | URND => Ok (urnd st.(insn_counter))
-    | _ => map_err (map.get st.(regs) (wsreg r)) "WSR undefined"
+    | RND => rnd st.(insn_counter)
+    | URND => urnd st.(insn_counter)
+    | _ => reg_get st (wsreg r)
     end.
 
-  Definition read_flag (st : OtbnState) (f : flag) : maybe bool :=
-    map_err (map.get st.(flags) f) "Flag undefined".
+  Definition read_flag (st : OtbnState) (f : flag) : bool :=
+    match map.get st.(flags) f with
+    | Some v => v
+    | None => error_bool
+    end.
 
   (* Assemble a group of flags into an integer value. *)
-  Definition read_flag_group (st : OtbnState) (fg : flag_group) : maybe Z :=
-    c <- read_flag st (flagC fg) ;
-    m <- read_flag st (flagM fg) ;
-    l <- read_flag st (flagL fg) ;
-    z <- read_flag st (flagZ fg) ;
-    Ok (c |' (m << 1) |' (l << 2) |' (z << 3)).
+  Definition read_flag_group (st : OtbnState) (fg : flag_group) : Z :=
+    let c := read_flag st (flagC fg) in
+    let m := read_flag st (flagM fg) in
+    let l := read_flag st (flagL fg) in
+    let z := read_flag st (flagZ fg) in
+    c |' (m << 1) |' (l << 2) |' (z << 3).
 
-  Definition read_csr (st : OtbnState) (r : csr) : maybe Z :=
+  Definition read_csr (st : OtbnState) (r : csr) : Z :=
     match r with
     | CSR_FG0 => read_flag_group st FG0
     | CSR_FG1 => read_flag_group st FG1
     | CSR_FLAGS =>
-        (fg0 <- read_flag_group st FG0;
-         fg1 <- read_flag_group st FG1;
-         Ok (fg0 |' (fg1 << 4)))
+        let fg0 := read_flag_group st FG0 in
+        let fg1 := read_flag_group st FG1 in
+        fg0 |' (fg1 << 4)
     end.
 
   (* Implements a read from the register file, handling all special registers. *)
-  Definition read_reg (st : OtbnState) (r : reg) : maybe Z :=
+  Definition read_reg (st : OtbnState) (r : reg) : Z :=
     match r with
     | gpreg r => read_gpr st r
     | wdreg r => read_wdr st r
@@ -405,12 +783,12 @@ Section Exec.
     | wsreg r => read_wsr st r
     end.
 
-  Definition read_limb (st : OtbnState) (l : limb) : maybe Z :=
+  Definition read_limb (st : OtbnState) (l : limb) : Z :=
     match l with
-    | limb0 r => x <- read_wdr st r; Ok (x &' Z.ones 64)
-    | limb1 r => x <- read_wdr st r; Ok ((x >> 64) &' Z.ones 64)
-    | limb2 r => x <- read_wdr st r; Ok ((x >> 128) &' Z.ones 64)
-    | limb3 r => x <- read_wdr st r; Ok ((x >> 192) &' Z.ones 64)
+    | limb0 r => (read_wdr st r) &' Z.ones 64
+    | limb1 r => ((read_wdr st r) >> 64) &' Z.ones 64
+    | limb2 r => ((read_wdr st r) >> 128) &' Z.ones 64
+    | limb3 r => ((read_wdr st r) >> 192) &' Z.ones 64
   end.
 
   Definition inc_insn_counter (st : OtbnState) : OtbnState :=
@@ -453,7 +831,7 @@ Section Exec.
       pc := pc;
     |}.
   
-  Definition callstack_pop (st : OtbnState) : maybe  OtbnState :=
+  Definition callstack_pop (st : OtbnState) : OtbnState :=
     (pc <- map_err (hd_error st.(callstack)) "Call stack empty" ;
      Ok ({| regs := st.(regs);
            flags := st.(flags);
@@ -1009,6 +1387,13 @@ Section Exec.
       ssplit; reflexivity.
     Qed.
 
+    Lemma exec_straightline_cps_weaken (st : OtbnState) (insns : list sinsn) (P : _ -> Prop) :
+      forall (Q : _ -> Prop),
+        exec_straightline_cps st insns Q ->
+        (forall st', Q st' -> P st') ->
+        exec_straightline_cps st insns P.
+    Proof. cbv [exec_straightline_cps exec_straightline]. intros; eauto. Qed.
+
     Lemma pow32_correct (st : OtbnState) :
       map.ok blockmap ->
       (0 < length st.(callstack))%nat ->
@@ -1046,6 +1431,9 @@ Section Exec.
              end.
       eapply eventually_step.
       { cbv [exec exec_cps pow32_blocks]. mapsimpl.
+        cbv [exec_straightline_cps exec_straightline]. cbn [fold_left].
+        eapply exec_straightline_cps_weaken.
+        
         
         (* need weakening lemma for exec_straightline_cps, then lemma for Bn_add *)
         (* TODO: maybe separate OTBN control state from regs/flags? *)
