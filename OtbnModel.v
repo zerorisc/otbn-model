@@ -304,13 +304,14 @@ Module CpsMonadTest.
          (fun w => add_cps w c
                      (fun x => add_cps x d
                                  (fun y => add_cps y e
-                                             (fun z => z = 0%nat))))).
+                                             (fun z => z = y))))).
   Eval cbv beta iota delta [add_cps] in
     (fun a b c d e =>
        (w <- add_cps a b ;
         x <- add_cps w c ;
         y <- add_cps x d ;
-        add_cps y e)).
+        z <- add_cps y e ;
+        ret (z = y))).
 
   Local Fixpoint mul_cps (a b : nat) : (nat -> Prop) -> Prop :=
     match b with
@@ -394,7 +395,26 @@ Section Exec.
      need to process through, come out with a Prop in the end via cps style passing
      the prop gives you rnd reasoning much easier
    *)
+  (* mulqacc shifts must be positive multiples of 64 *)
+  Definition is_valid_mul_shift (s : Z) : Prop :=
+    s = 0 \/ s = 64 \/ s = 128 \/ s = 192.
+  (* rshi shifts must be in the range [0,255] *)
+  Definition is_valid_rshi_imm (s : Z) : Prop := 0 <= s < 256.
+  (* other shift immediates must be multiples of 8 and in the range [0,248] *)
+  Definition is_valid_arith_shift (s : shift) : Prop :=
+    let s := match s with
+             | lshift x => x
+             | rshift x => x
+             end in
+    (s mod 8 = 0) /\ 0 <= s < 256.
+  (* immediates for addi must be in the range [-2048, 2047] *)
+  Definition is_valid_addi_imm (imm : Z) : Prop :=
+    -2048 <= imm <= 2047.
+  (* offsets for loads and stores are in the range [-16384, 16352] in steps of 32 *)
+  Definition is_valid_mem_offset (offset : Z) : Prop :=
+    -16384 <= offset <= 16352.
 
+  (*
   (* mulqacc shifts must be positive multiples of 64 *)
   Definition to_valid_mul_shift (s : Z) : Z :=
     Z.shiftl (Z.land (Z.shiftr (Z.abs s) 6) 3) 6.
@@ -419,82 +439,62 @@ Section Exec.
     if 0 <=? offset
     then Z.shiftl (Z.land (Z.shiftr offset 5) 511) 5
     else - Z.shiftl (Z.land (Z.shiftr (- offset) 5) 511) 5.
-
-  (* Raw getter for registers; use read_reg instead for most purposes. *)
-  Definition REGISTER_NOT_INITIALIZED : Prop := False.
-  Definition reg_get (regs : regfile) (r : reg) (P : Z -> Prop) : Prop :=
-    match map.get regs r with
-    | Some v => P v
-    | None => False
-    end.
-
-  Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> Prop) : Prop :=
+   *)
+  Definition read_gpr (regs : regfile) (r : gpr) : option Z :=
     match r with
-    | x0 => P 0 (* x0 always reads as 0 *)
+    | x0 => Some 0 (* x0 always reads as 0 *)
     | x1 =>
         (* TODO: call stack reads are rare in practice; for now, don't model *)
-        False
-    | _ => reg_get regs (gpreg r) P
+        None
+    | _ => map.get regs (gpreg r)
     end.
 
-  Definition read_wdr (regs : regfile) (r : wdr) (P : Z -> Prop) : Prop :=
-    reg_get regs (wdreg r) P.
+  Definition read_wdr (regs : regfile) (r : wdr) : option Z :=
+    map.get regs (wdreg r).
 
   Definition read_wsr (regs : regfile) (r : wsr) (P : Z -> Prop) : Prop :=
     match r with
     | RND => forall r, P r
     | URND => forall u, P u
-    | _ => reg_get regs (wsreg r) P
+    | _ => exists v, map.get regs (wsreg r) = Some v /\ P v
     end.
 
-  Definition read_flag (flags : flagfile) (f : flag) (P : bool -> Prop) : Prop :=
-    match map.get flags f with
-    | Some v => P v
-    | None => False
-    end.
+  Definition read_flag (flags : flagfile) (f : flag) : option bool :=
+    map.get flags f.
 
   (* Assemble a group of flags into an integer value. *)
-  Definition read_flag_group (flags : flagfile) (fg : flag_group) : (Z -> Prop) -> Prop :=
-    c <- read_flag flags (flagC fg) ;
-    m <- read_flag flags (flagM fg) ;
-    l <- read_flag flags (flagL fg) ;
-    z <- read_flag flags (flagZ fg) ;
-    ret (c |' (m << 1) |' (l << 2) |' (z << 3)).
+  Definition read_flag_group (flags : flagfile) (fg : flag_group) (P : Z -> Prop) : Prop :=
+    exists c m l z,
+      read_flag flags (flagC fg) = Some c
+      /\ read_flag flags (flagM fg) = Some m
+      /\ read_flag flags (flagL fg) = Some l
+      /\ read_flag flags (flagZ fg) = Some z
+      /\ P (c |' (m << 1) |' (l << 2) |' (z << 3)).
 
-  Definition read_csr (flags : flagfile) (r : csr) : (Z -> Prop) -> Prop :=
+  Definition read_csr (flags : flagfile) (r : csr) (P : Z -> Prop) : Prop :=
     match r with
-    | CSR_FG0 => read_flag_group flags FG0
-    | CSR_FG1 => read_flag_group flags FG1
+    | CSR_FG0 => read_flag_group flags FG0 P
+    | CSR_FG1 => read_flag_group flags FG1 P
     | CSR_FLAGS =>
-        fg0 <- read_flag_group flags FG0 ;
-        fg1 <- read_flag_group flags FG1 ;
-        ret (fg0 |' (fg1 << 4))
+        read_flag_group flags FG0
+          (fun fg0 => read_flag_group flags FG1
+                        (fun fg1 => P (fg0 |' (fg1 << 4))))
     end.
 
-  (* Implements a read from the register file, handling all special registers. *)
-  Definition read_reg (regs : regfile) (flags : flagfile) (r : reg) : (Z -> Prop) -> Prop :=
-    match r with
-    | gpreg r => read_gpr regs r
-    | wdreg r => read_wdr regs r
-    | csreg r => read_csr flags r
-    | wsreg r => read_wsr regs r
-    end.
-
-  Definition read_limb (regs : regfile) (l : limb) : (Z -> Prop) -> Prop :=
+  Definition wdr_for_limb (l : limb) : wdr :=
     match l with
-    | limb0 r =>
-        (x <- read_wdr regs r ;
-         ret (x &' Z.ones 64))
-    | limb1 r =>
-        (x <- read_wdr regs r ;
-         ret ((x >> 64) &' Z.ones 64))
-    | limb2 r =>
-        (x <- read_wdr regs r ;
-         ret ((x >> 128) &' Z.ones 64))
-    | limb3 r =>
-        (x <- read_wdr regs r ;
-         ret ((x >> 192) &' Z.ones 64))
-  end.
+    | limb0 r => r
+    | limb1 r => r
+    | limb2 r => r
+    | limb3 r => r
+    end.
+  Definition get_limb (l : limb) (v : Z) :=
+    match l with
+    | limb0 r => (v          &' Z.ones 64)
+    | limb1 r => ((v >> 64 ) &' Z.ones 64)
+    | limb2 r => ((v >> 128) &' Z.ones 64)
+    | limb3 r => ((v >> 192) &' Z.ones 64)
+    end.
 
   Definition cast32 (v : Z) : Z := v &' Z.ones 32.
   Definition cast256 (v : Z) : Z := v &' Z.ones 256.
@@ -510,61 +510,97 @@ Section Exec.
     | _ => ret (map.put regs (gpreg r) (cast32 v))
     end.
 
-  Definition write_wdr (regs : regfile) (r : wdr) (v : Z) : (regfile -> Prop) -> Prop :=
-    ret (map.put regs (wdreg r) (cast256 v)).
-  Definition write_wsr (regs : regfile) (r : wsr) (v : Z) : (regfile -> Prop) -> Prop :=
+  Definition write_wdr (regs : regfile) (r : wdr) (v : Z) : regfile :=
+    map.put regs (wdreg r) (cast256 v).
+  Definition write_wsr (regs : regfile) (r : wsr) (v : Z) : regfile :=
     match r with
-    | RND => ret regs (* writes to RND are ignored *)
-    | URND => ret regs (* writes to URND are ignored *)
-    | _ => ret (map.put regs (wsreg r) (cast256 v))
+    | RND => regs (* writes to RND are ignored *)
+    | URND => regs (* writes to URND are ignored *)
+    | _ => map.put regs (wsreg r) (cast256 v)
     end.
 
-  Print ret.
-  Print bind.
-  (* bind : ((A -> C) -> C) -> (A -> (B -> C) -> C) -> (B -> C) -> C *)
-  (* A = regs, C = Prop, B = ??? *)
-  (* continuation: A -> (B -> C) -> C *)
-  (* ret : A -> (A -> B) -> B *)
-  (* bind x (fun a => (fun b => P) *)
-  Check (fun (x : (regfile -> Prop) -> Prop) =>
-           bind x).
-  Check (fun d x imm regs (flags : flagfile) (dmem : mem) (P : _ -> _ -> _ -> Prop) =>
-        (x <- read_gpr regs x ;
-         regs <- write_gpr regs d (x + imm) ;
-         (fun b : unit => P regs flags dmem))).
-  Check (fun d x imm regs (flags : flagfile) (dmem : mem) P =>
-        read_gpr regs x
-          (fun x =>
-             write_gpr regs d (x + imm)
-               (fun regs => P regs flags dmem))).
-  Print ret.
-  Print bind.
-  Check read_gpr.
-  Check write_gpr.
-  Definition exec1_cps
+  (* specifications for complex operations (may make proofs a little nicer) *)
+  Definition mulqacc_spec (acc x y s : Z) : Z :=
+    acc + (x * y) << s.
+  Definition addm_spec (x y m : Z) : Z :=
+    let r := x + y in
+    if r >? m then r - m else r.
+  Definition subm_spec (x y m : Z) : Z :=
+    let r := x - y in
+    if r <? 0 then r + m else r.
+  Definition rshi_spec (x y imm : Z) : Z :=
+    let xy := Z.lor (x << 256) y in
+    xy >> imm.
+
+  Definition run1
     (regs : regfile) (flags : flagfile) (dmem : mem)
-    (i : sinsn) (P : regfile -> flagfile -> mem -> Prop) : Prop :=
+    (i : sinsn) (post : regfile -> flagfile -> mem -> Prop) : Prop :=
     match i with
     | Addi d x imm =>
-        let imm := to_valid_addi_imm imm in
-        read_gpr regs x
-          (fun x =>
-             write_gpr regs d (x + imm)
-               (fun regs => P regs flags dmem))
-          (*
-        (x <- read_gpr regs x ;
-         regs <- write_gpr regs d (x + imm) ;
-         ret (P regs flags dmem)) *)
+        is_valid_addi_imm imm /\
+          (exists v,
+              read_gpr regs x = Some v
+              /\ write_gpr regs d (v + imm)
+                   (fun regs => post regs flags dmem))
+    | Bn_mulqacc z x y s =>
+        is_valid_mul_shift s
+        /\ let regs := if z then write_wsr regs ACC 0 else regs in
+           (exists vx vy,
+               read_wdr regs (wdr_for_limb x) = Some vx
+               /\ read_wdr regs (wdr_for_limb y) = Some vy
+               /\ read_wsr regs ACC
+                    (fun acc =>
+                       let x := get_limb x vx in
+                       let y := get_limb y vy in
+                       let r := mulqacc_spec acc x y s in
+                       let regs := write_wsr regs ACC r in
+                       post regs flags dmem))
+    | Bn_mulqacc_wo z d x y s =>
+        is_valid_mul_shift s
+        /\ let regs := if z then write_wsr regs ACC 0 else regs in
+           (exists vx vy,
+               read_wdr regs (wdr_for_limb x) = Some vx
+               /\ read_wdr regs (wdr_for_limb y) = Some vy
+               /\ read_wsr regs ACC
+                    (fun acc =>
+                       let x := get_limb x vx in
+                       let y := get_limb y vy in
+                       let r := mulqacc_spec acc x y s in
+                       let regs := write_wsr regs ACC r in
+                       let regs := write_wdr regs d r in
+                       post regs flags dmem))
     | _ => False
     end.
-    | Bn_mulqacc z x y s =>
-        let st := if z then write_wsr st ACC 0 else st in
-        (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc";
-         x <- read_limb st x ;
-         y <- read_limb st y ;
-         acc <- read_wsr st ACC ;
-         let r := mulqacc_spec acc x y s in
-         Ok (write_wsr st ACC r))
+
+  Goal (map.ok regfile ->
+        run1
+           (map.put map.empty (gpreg x2) 5)
+           map.empty map.empty
+           (Addi x3 x2 4)
+           (fun r f d =>
+              run1 r f d
+                (Addi x4 x3 (-4))
+                (fun r f d => read_gpr r x4 = Some 5))).
+  Proof.
+    cbv [run1].
+    intros.
+    ssplit; [ cbv [is_valid_addi_imm]; lia | ].
+    eexists; ssplit; [ | ].
+    { cbv [read_gpr].
+      repeat progress (rewrite ?map.get_put_diff, ?map.get_put_same by congruence).
+      reflexivity. }
+    cbv [write_gpr ret].
+    ssplit; [ cbv [is_valid_addi_imm]; lia | ].
+    eexists; ssplit; [ | ].
+    { cbv [read_gpr].
+      repeat progress (rewrite ?map.get_put_diff, ?map.get_put_same by congruence).
+      reflexivity. }
+    cbv [read_gpr].
+    repeat progress (rewrite ?map.get_put_diff, ?map.get_put_same by congruence).
+    reflexivity.
+  Qed.
+    
+  
     | Bn_mulqacc_wo z d x y s =>
         let st := if z then write_wsr st ACC 0 else st in
         (_ <- assertion (valid_mul_shift s) "Invalid shift for bn.mulqacc.wo" ;
