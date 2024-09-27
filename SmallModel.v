@@ -178,7 +178,7 @@ Section Exec.
   Fixpoint run (regs : regfile) (sinsns : list sinsn) (post : regfile -> Prop) : Prop :=
     match sinsns with
     | [] => post regs
-    | i :: sinsns => run1 regs i (fun regs => run regs sinsns post)
+    | i :: sinsns => run1 regs i (fun regs' => run regs' sinsns post)
     end.
 
   Fixpoint repeat_advance_pc (pc : addr) (n : nat) : addr :=
@@ -227,6 +227,11 @@ Section Exec.
   Definition set_pc (st : otbn_state) (pc : addr) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
+    | _ => post st
+    end.
+  Definition set_regs (st : otbn_state) (regs : regfile) (post : otbn_state -> Prop) : Prop :=
+    match st with
+    | otbn_busy pc _ cstack lstack => post (otbn_busy pc regs cstack lstack)
     | _ => post st
     end.
   Definition next_pc (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
@@ -319,10 +324,14 @@ Section Exec.
         /\ run regs sinsns
              (fun regs =>
                 let pc := repeat_advance_pc pc (length sinsns) in
-                match final with
-                | Some i => ctrl1 st i post
-                | None => loop_end st post
-                end)
+                set_pc st pc
+                  (fun st =>
+                     set_regs st regs
+                       (fun st =>
+                          match final with
+                          | Some i => ctrl1 st i post
+                          | None => loop_end st post
+                          end)))
     | _ => post st
     end.
 End Exec.
@@ -548,15 +557,17 @@ Module Test.
        add  x5, x2, x3
        ret
    *)
+  Definition add_fn : string * list (insn (addr:=string)) :=
+    ("add"%string,
+        [(Add x5 x2 x3 : insn);
+         (Ret : insn)]).
   Definition test_program0 : list (string * list (insn (addr:=string))) :=
     [ ("start",
         [ (Addi x2 x0 2 : insn);
           (Addi x3 x0 3 : insn);
           (Jal x1 "add" : insn);
           (Ecall : insn)]);
-      ("add",
-        [(Add x5 x2 x3 : insn);
-         (Ret : insn)])]%string.
+      add_fn ]%string.
 
   (* Test program 1 : build multiplication out of addition
 
@@ -578,9 +589,7 @@ Module Test.
           (Jal x1 "add" : insn);
           (Addi x4 x5 0 : insn);
           (Ret : insn)]);
-      ("add",
-        [(Add x5 x2 x3 : insn);
-         (Ret : insn)])]%string.
+      add_fn ]%string.
 
   Compute (label_loop_ends test_program0).
   Compute (get_objects test_program0).
@@ -602,19 +611,175 @@ Module Test.
   Definition blocks0 : blockmap := ltac:(derive_blockmap test_program0).
   Definition blocks1 : blockmap := ltac:(derive_blockmap test_program1).
 
-  Check eventually (run_block blocks0).
-  Print otbn_state.
-  Lemma test_program0_correct regfile :
+  Ltac solve_map_step t :=
+    first [ rewrite map.get_put_diff by t
+          | rewrite map.get_put_same by t
+          | reflexivity ].
+  Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
+  Ltac simplify_side_condition_step :=
+    lazymatch goal with
+    | |- exists _, _ => eexists
+    | |- _ /\ _ => split
+    | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
+    | |- map.get _ _ = Some _ => solve_map
+    | |- (_ < _)%nat => lia
+    | |- Some _ = Some _ => reflexivity
+    | _ => cbn [run_block run run1 read_gpr write_gpr ctrl1
+                  set_pc set_regs call_stack_pop call_stack_push
+                  length hd_error tl
+                  repeat_advance_pc advance_pc Z.add Pos.add]
+    end.
+  Ltac simplify_side_condition := repeat simplify_side_condition_step.
+
+  Lemma test_program0_correct (regfile : map.map reg Z) :
     map.ok regfile ->
-    forall (regs : regfile) a b,
+    eventually
+      (run_block (advance_pc:=advance_pc) blocks0)
+      (fun st =>
+         match st with
+         | otbn_done _ regs =>
+             map.get regs (gpreg x5) = Some 5
+         | _ => False
+         end)
+      (start_state 0).
+  Proof.
+    cbv [blocks0 start_state]; intros.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. apply eventually_done.
+    solve_map.
+  Qed.
+
+  (* Next: prove something about the add block individually, and use
+     that to prove something about the mul program individually *)
+
+  (* TODO: maybe need to represent functions with internal labels too?
+     for e.g. branches -- may need these blocks to be linked
+     sequentially, and it makes loop ends easier too *)
+
+  Definition linked_at
+    (ctx : blockmap) (fn : string * list (insn (addr:=string))) (pc : Z) :=
+    exists program,
+      build program = inl ctx
+      /\ In add_fn program
+      /\ (let syms := snd (get_symbols (label_loop_ends program)) in
+          map.get syms (fst fn) = Some pc).
+
+  (* For proofs about the object file, parameterize over the overall program *)
+  Lemma add_fn_correct regfile :
+    map.ok regfile ->
+    forall (ctx : blockmap)
+           (regs : regfile) cstack lstack
+           start_pc a b,
+      linked_at ctx add_fn start_pc ->
       map.get regs (gpreg x2) = Some a ->
       map.get regs (gpreg x3) = Some b ->
-      eventually (run_block blocks0) regs
+      eventually
+        (run_block (advance_pc:=advance_pc) ctx)
+        (fun st =>
+           match st with
+           | otbn_done _ regs' =>
+               map.get regs (gpreg x5) = Some (cast32 (a + b))
+               /\ map.only_differ regs (PropSet.of_list [gpreg x5]) regs'
+           | _ => False
+           end)
+        (otbn_busy start_pc regs cstack lstack).
   Proof.
-    cbv [test_blk_add]; intros.
-    rewrite run_block_step. cbv [run1].
-    eexists; split; [ eassumption | ].
-    eexists; split; [ eassumption | ].
-    cbv [write_gpr].
+
   Qed.
+  Check add_fn.
+  Print link.
+  Check Forall.
+  Check get_objects.
+  Print objects.
+  Compute (get_objects (label_loop_ends test_program1)).
+  Compute (get_symbols (label_loop_ends test_program1)).
+  Check (fun fn => get_objects (label_loop_ends [fn])).
+  Check label_loop_ends.
+  Print objects.
+  (* given start pc, then for all label, blocks list in objs:
+       blockmap[pc + length so far] = block converted to Z
+       the "converted to Z" is another prop saying the labels correspond to something in the blockmap?
+       maybe we need syms too to state "converted to Z"
+   *)
+  Definition cinsn_is_linked
+    (syms : map.rep (map:=symbols))
+    (syms : map.rep (map:=objects))
+    (i1 : cinsn (addr:=string))
+    (i2 : cinsn (addr:=Z)) : Prop :=
+    match i1, i2 with
+    | Jal r dst1, Jal r dst2 =>
+        map.get syms dst1 = dst2
+        /\ 
+    | _ => True
+    end.
+  (* Ugh, this seems a little ugly. Can we do better? *)
+  Definition is_linked (blocks : blockmap) (fn : string * list insn) : Prop :=
+    let fn := label_loop_ends [fn] in
+    let objs := get_objects fn in
+    Forall
+      (fun label_insns =>
+         let label := fst label_insns in
+         let insns := snd label_insns in
+         map.get label = 
+      ) fn.
+    map.fold
+      (fun P label b =>
+         
+
+  
+  Definition add_obj : map.rep (map:=objects) := Eval vm_compute in get_objects [add_fn].
+
+  (*
+  Print objects.
+
+  (* add zero-offsets to all labels. *)
+  Fixpoint init_offsets_cinsn (i : cinsn (addr:=string)) : cinsn (addr:=string * Z) :=
+    match i with
+    | Ret => Ret
+    | Ecall => Ecall
+    | Jal r dst => Jal r (dst, 0)
+    | Beq r1 r2 dst => Beq r1 r2 (dst, 0)
+    | Bne r1 r2 dst => Bne r1 r2 (dst, 0)
+    | Loop r n => Loop r n
+    | Loopi imm n => Loopi imm n
+    end.
+  Fixpoint init_offsets_block (b : block string) : block (string * Z) :=
+    match snd b with
+    | None => (fst b, None)
+    | Some i => (fst b, Some (init_offsets_cinsn i))
+    end.
+  Print objects.
+  Print map.map.
+  Fixpoint init_offsets (objs : map.rep (map:=objects))
+    : map.rep (string * Z) (block (string * Z)) :=
+    map.fold
+      (fun 
+    *)
+
+  Check run_block.
+  Print add_fn.
+  Eval compute in get_objects [add_fn].
+  Print objects.
+  (* For proofs about the object file, parameterize over the overall blockmap *)
+  Lemma add_fn_correct regfile :
+    map.ok regfile ->
+    forall (ctx : blockmap) (regs : regfile) add_pc a b,
+      map.get regs (gpreg x2) = Some a ->
+      map.get regs (gpreg x3) = Some b ->
+      map.get blockmap add_pc = 
+      eventually
+        (run_block (advance_pc:=advance_pc) ctx)
+        (fun st =>
+           match st with
+           | otbn_done _ regs' =>
+               map.get regs (gpreg x5) = Some 5
+               /\ map.only_differ regs (PropSet.of_list [gpreg x5]) regs'
+           | _ => False
+           end)
+        (start_state 0).
 End Test.
