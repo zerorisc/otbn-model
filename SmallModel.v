@@ -49,15 +49,17 @@ Section ISA.
   | Jal : gpr -> addr -> cinsn
   | Bne : gpr -> gpr -> addr -> cinsn
   | Beq : gpr -> gpr -> addr -> cinsn
-  | Loop : gpr -> nat -> cinsn
-  | Loopi : nat -> nat -> cinsn
+  (* Note: loops here use an end instruction instead of an iteration
+     count to make codegen and processing easier. *)
+  | Loop : gpr -> cinsn
+  | Loopi : nat -> cinsn
+  | LoopEnd : cinsn
   .
 
   Inductive insn {addr : Type} : Type :=
   | Straightline : sinsn -> insn
   | Control : cinsn (addr:=addr) -> insn
   .
-
 End ISA.
 
 (* Boilerplate definitions for comparing registers. *)
@@ -84,6 +86,59 @@ Section RegisterEquality.
   Proof. prove_eqb_spec r1 r2. Qed.
 End RegisterEquality.
 
+Section Stringify.
+  Context {addr : Type} {addr_to_string : addr -> string}.
+  Local Coercion addr_to_string : addr >-> string.
+
+  Definition gpr_to_string (r : gpr) : string :=
+    match r with
+    | x0 => "x0"
+    | x1 => "x1"
+    | x2 => "x2"
+    | x3 => "x3"
+    | x4 => "x4"
+    | x5 => "x5"
+    | x6 => "x6"
+    | x7 => "x7"
+    end.
+  Local Coercion gpr_to_string : gpr >-> string.
+
+  Definition csr_to_string (r : csr) : string :=
+    match r with
+    | CSR_RND => "CSR_RND"
+    end.
+  Local Coercion csr_to_string : csr >-> string.
+
+  Definition sinsn_to_string (i : sinsn) : string :=
+    match i with
+    | Addi rd rs imm =>
+        "addi " ++ rd ++ ", " ++ rs ++ ", " ++ HexString.of_Z imm
+    | Add rd rs1 rs2 =>
+        "add " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Csrrs rd rs =>
+        "csrrs " ++ rd ++ ", " ++ rs ++ ", "
+    end.
+
+  Definition cinsn_to_string (i : cinsn (addr:=addr)) : string :=
+    match i with
+    | Ret => "ret"
+    | Ecall => "ecall"
+    | Jal r dst => "jal " ++ r ++ ", " ++ dst
+    | Bne r1 r2 dst => "bne " ++ r1 ++ ", " ++ r2 ++ ", " ++ dst
+    | Beq r1 r2 dst => "beq " ++ r1 ++ ", " ++ r2 ++ ", " ++ dst
+    | Loop r => "loop " ++ r
+    | Loopi n => "loop " ++ HexString.of_nat n
+    | LoopEnd => "loopend"
+    end.
+
+  Definition insn_to_string (i : insn) : string :=
+    match i with
+    | Straightline i => sinsn_to_string i
+    | Control i => cinsn_to_string i
+    end.
+
+End Stringify.
+
 (* bitwise operation shorthand *)
 Local Infix "|'" := Z.lor (at level 40, only parsing) : Z_scope.
 Local Infix "&'" := Z.land (at level 40, only parsing) : Z_scope.
@@ -95,10 +150,10 @@ Local Coercion Z.b2z : bool >-> Z.
 Section Exec.
   (* Parameterize over the representation of code locations. *)
   Context {addr : Type}
-    {advance_pc : addr -> addr}
     {addr_eqb : addr -> addr -> bool}
     {addr_eqb_spec : forall a1 a2, BoolSpec (a1 = a2) (a1 <> a2) (addr_eqb a1 a2)}.
-  Definition block (addr : Type) : Type := (list sinsn * option (cinsn (addr:=addr))).
+  Definition block (addr : Type) : Type := (list sinsn * cinsn (addr:=addr)).
+  Definition advance_pc (pc : addr * nat) := (fst pc, S (snd pc)).
 
   (* error values for cases that should be unreachable (these can be
      any value and exist mostly to help debugging -- it's easier to
@@ -107,7 +162,7 @@ Section Exec.
   Context {error_Z : Z}.
 
   (* Parameterize over the map implementation. *)
-  Context {regfile : map.map reg Z} {blockmap : map.map addr (block addr)}.
+  Context {regfile : map.map reg Z} {get_block : addr * nat -> option (block addr)}.
 
   (* Really, I want to talk about terminal states -- either a return
      from the subroutine, the end of the program, or an error.
@@ -153,7 +208,7 @@ Section Exec.
     | CSR_RND => P regs (* writes ignored *)
     end.
 
-  Definition run1
+  Definition strt1
     (regs : regfile) (i : sinsn) (post : regfile -> Prop) : Prop :=
     match i with
     | Addi d x imm =>
@@ -175,28 +230,22 @@ Section Exec.
                   write_csr regs d (Z.lxor vd vx) post))
     end.
 
-  Fixpoint run (regs : regfile) (sinsns : list sinsn) (post : regfile -> Prop) : Prop :=
-    match sinsns with
-    | [] => post regs
-    | i :: sinsns => run1 regs i (fun regs' => run regs' sinsns post)
-    end.
-
-  Fixpoint repeat_advance_pc (pc : addr) (n : nat) : addr :=
+  Fixpoint repeat_advance_pc (pc : addr * nat) (n : nat) : addr * nat :=
     match n with
     | O => pc
     | S n => advance_pc (repeat_advance_pc pc n)
     end.
 
-  Local Notation call_stack := (list addr) (only parsing).
-  Local Notation loop_stack := (list (addr * addr * nat)) (only parsing).
+  Local Notation call_stack := (list (addr * nat)) (only parsing).
+  Local Notation loop_stack := (list (addr * nat * nat)) (only parsing).
   Inductive otbn_state : Type :=
-  | otbn_busy (pc : addr) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
-  | otbn_error (pc : addr) (errs : list string)
-  | otbn_done (pc : addr) (regs : regfile)
+  | otbn_busy (pc : addr * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
+  | otbn_error (pc : addr * nat) (errs : list string)
+  | otbn_done (pc : addr * nat) (regs : regfile)
   .  
-  Definition start_state (start_pc : addr) : otbn_state :=
+  Definition start_state (start_pc : addr * nat) : otbn_state :=
     otbn_busy start_pc map.empty [] [].
-  Definition get_pc (st : otbn_state) : addr :=
+  Definition get_pc (st : otbn_state) : addr * nat :=
     match st with
     | otbn_busy pc _ _ _ => pc
     | otbn_error pc _ => pc
@@ -224,7 +273,7 @@ Section Exec.
     | otbn_busy pc regs cstack lstack => post (otbn_done pc regs)
     | _ => post st
     end.
-  Definition set_pc (st : otbn_state) (pc : addr) (post : otbn_state -> Prop) : Prop :=
+  Definition set_pc (st : otbn_state) (pc : addr * nat) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
     | _ => post st
@@ -247,13 +296,13 @@ Section Exec.
 
   (* Begin a new loop. *)
   Definition loop_start
-    (st : otbn_state) (iters : nat) (size : nat) (post : otbn_state -> Prop) : Prop :=
+    (st : otbn_state) (iters : nat) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs cstack lstack =>
         let start_pc := advance_pc pc in
-        let end_pc := repeat_advance_pc pc size in
         (length lstack < 8)%nat
-        /\ post (otbn_busy start_pc regs cstack ((start_pc, end_pc, iters) :: lstack))
+        /\ iters <> 0%nat
+        /\ post (otbn_busy start_pc regs cstack ((start_pc, iters) :: lstack))
     | _ => False
     end.
 
@@ -263,14 +312,13 @@ Section Exec.
   Definition loop_end (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs cstack lstack =>
-        exists start_addr end_addr iters,
-        hd_error lstack = Some (start_addr, end_addr, iters)
-        /\ end_addr = pc
+        exists start_addr iters,
+        hd_error lstack = Some (start_addr, iters)
         /\ match iters with
            | O => post (otbn_busy (advance_pc pc) regs cstack (tl lstack))
            | S iters =>
                post (otbn_busy start_addr regs cstack
-                       ((start_addr, end_addr, iters) :: tl lstack))
+                       ((start_addr, iters) :: tl lstack))
            end
     | _ => False
     end.
@@ -282,14 +330,14 @@ Section Exec.
      sometimes should in fact happen on some inputs, and "this program
      is not valid" (e.g. out-of-bounds immediate value that cannot be
      encoded). *)
-  Definition ctrl1 (st : otbn_state) (i : cinsn) (post : otbn_state -> Prop) : Prop :=
+  Definition ctrl1 (st : otbn_state) (i : cinsn (addr:=addr)) (post : otbn_state -> Prop) : Prop :=
     match i with
     | Ret =>  call_stack_pop st post
     | Ecall => program_exit st post
     | Jal r dst =>
         match r with
-        | x0 => set_pc st dst post
-        | x1 => call_stack_push st (fun st => set_pc st dst post)
+        | x0 => set_pc st (dst, 0%nat) post
+        | x1 => call_stack_push st (fun st => set_pc st (dst, 0%nat) post)
         | _ =>
             (* technically it is possible to write the PC to other
                registers but practically this is almost never done, so
@@ -302,36 +350,36 @@ Section Exec.
              read_gpr_from_state st r2
                (fun v2 =>
                   (v1 = v2 /\ next_pc st post)
-                  \/ (v1 <> v2 /\ set_pc st dst post)))
+                  \/ (v1 <> v2 /\ set_pc st (dst, 0%nat) post)))
     | Beq r1 r2 dst =>
         read_gpr_from_state st r1
           (fun v1 =>
              read_gpr_from_state st r2
                (fun v2 =>
                   (v1 <> v2 /\ next_pc st post)
-                  \/ (v1 = v2 /\ set_pc st dst post)))
-    | Loopi v n => loop_start st v n post
-    | Loop r n => read_gpr_from_state st r
-                    (fun v => 0 < v /\ loop_start st (Z.to_nat v) n post)
+                  \/ (v1 = v2 /\ set_pc st (dst, 0%nat) post)))
+    | Loopi v => loop_start st v post
+    | Loop r => read_gpr_from_state st r
+                  (fun v => 0 < v /\ loop_start st (Z.to_nat v) post)
+    | LoopEnd => loop_end st post
     end.
 
-  Definition run_block (blocks : blockmap) (st : otbn_state)
-    (post : otbn_state -> Prop) : Prop :=
+  Fixpoint strt (regs : regfile) (insns : list sinsn) (post : regfile -> Prop) : Prop :=
+    match insns with
+    | [] => post regs
+    | i :: insns => strt1 regs i (fun regs => strt regs insns post)
+    end.
+
+  Definition run (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs cstack lstack =>
         exists sinsns final,
-        map.get blocks pc = Some (sinsns, final)
-        /\ run regs sinsns
+        get_block pc = Some (sinsns, final)
+        /\ strt regs sinsns
              (fun regs =>
-                let pc := repeat_advance_pc pc (length sinsns) in
-                set_pc st pc
-                  (fun st =>
-                     set_regs st regs
-                       (fun st =>
-                          match final with
-                          | Some i => ctrl1 st i post
-                          | None => loop_end st post
-                          end)))
+                set_pc st (fst pc, (snd pc + length sinsns)%nat)
+                  (fun st => set_regs st regs
+                               (fun st => ctrl1 st final post)))
     | _ => post st
     end.
 End Exec.
@@ -382,88 +430,55 @@ Local Coercion Control : cinsn >-> insn.
 
 (* Contains a way to link programs into block maps. *)
 Section Build.
-  Definition advance_pc (pc : Z) := pc + 4.
   Definition blockmap : map.map Z (block Z) := SortedListZ.map _.
   Definition objects : map.map string (list (block string)) := SortedListString.map _.
   Definition symbols : map.map string Z := SortedListString.map _.
   Import ErrorMonadNotations.
 
-  (* Split a program at a given index in the instruction list and add
-     the label. Does nothing if the program is already split at this
-     index or the index is past the end of the program. *)
-  Fixpoint insert_label
-    (program : list (string * list (insn (addr:=string))))
-    (idx : nat) (label : string) : list (string * list (insn (addr:=string))) :=
-    match program with
-    | [] => program
-    | fn :: program =>
-        let name := fst fn in
-        let insns := snd fn in
-        if Nat.ltb idx (length insns)
-        then if Nat.eqb idx 0
-             then program
-             else
-               let fn1 := (name, firstn idx insns) in
-               let fn2 := (label, skipn idx insns) in
-               fn1 :: fn2 :: program
-        else fn :: insert_label program (idx - length insns) label
-    end.
+  (* Functions are conceptually just "labelled chunks of instructions
+     that should always be linked sequentially." They have:
+     - a name
+     - a list of instructions *)
+  Definition function : Type := string * list (insn (addr:=string)).
 
-  Definition flatten_program (program : list (string * list (insn (addr:=string))))
+  Definition flatten_program (program : list function)
     : list (insn (addr:=string)) :=
     fold_left (fun insns fn => insns ++ snd fn) program [].
-
-  (* Go through the program and add labels to the loop ends. *)
-  Definition label_loop_ends (program : list (string * list (insn (addr:=string))))
-    : list (string * list (insn (addr:=string))) :=
-    let insns := flatten_program program in
-    snd (fold_left
-           (fun lidx_program iidx =>
-              let lidx := fst lidx_program in
-              let program := snd lidx_program in
-              let i := nth_default (Ecall : insn) insns iidx in
-              let label := ("loop" ++ String.of_nat lidx ++ "_end")%string in
-              match i with
-              | Loop _ n =>
-                  let program := insert_label program (iidx + 1 + n) label in
-                  (S lidx, program)
-              | Loopi _ n =>
-                  let program := insert_label program (iidx + 1 + n) label in
-                  (S lidx, program)
-              | _ => (lidx, program)
-              end
-           )
-           (seq 0 (length insns)) (0%nat, program)).
 
   Fixpoint get_blocks'
     (insns : list (insn (addr:=string)))
     (blocks : list (block string)) (curr : list sinsn)
-    : list (block string) :=
+    : maybe (list (block string)) :=
     match insns with
-    | [] => match curr with
-            | [] => blocks
-            | _ => blocks ++ [(curr, None)]
-            end
+    | [] =>
+        (* we should always end on a control-flow instruction *)                           
+        match curr with
+        | [] => Ok blocks
+        | _ => Err ("Dangling straightline instructions: "
+                      ++ String.concat "; " (List.map sinsn_to_string curr))
+        end
     | i :: insns =>
         match i with
         | Straightline i => get_blocks' insns blocks (curr ++ [i])
-        | Control i => get_blocks' insns (blocks ++ [(curr, Some i)]) []
+        | Control i => get_blocks' insns (blocks ++ [(curr, i)]) []
         end
     end.
-  Definition get_blocks (insns : list (insn (addr:=string))) : list (block string) :=
+  Definition get_blocks (insns : list (insn (addr:=string))) : maybe (list (block string)) :=
     get_blocks' insns [] [].
 
-  Definition get_objects (program : list (string * list (insn (addr:=string))))
-    : map.rep (map:=objects) :=
+  Definition get_objects (program : list function)
+    : maybe (map.rep (map:=objects)) :=
     fold_left
       (fun objs fn =>
          let name := fst fn in
          let insns := snd fn in
-         map.put objs name (get_blocks insns))
-      program map.empty.
+         objs <- objs ;
+         blocks <- get_blocks insns ;
+         Ok (map.put objs name blocks))
+      program (Ok map.empty).
 
   (* Returns the PC at the end of IMEM plus the symbol table. *)
-  Definition get_symbols (program : list (string * list (insn (addr:=string)))) 
+  Definition get_symbols (program : list function) 
     : Z * map.rep (map:=symbols) :=
     fold_left
       (fun (pc_syms : Z * (map.rep (map:=symbols))) fn =>
@@ -472,7 +487,7 @@ Section Build.
          let name := fst fn in
          let insns := snd fn in
          let syms := map.put syms name pc in
-         let pc := repeat_advance_pc (advance_pc:=advance_pc) pc (length insns) in
+         let pc := pc + (4 * Z.of_nat (length insns)) in
          (pc, syms))
       program (0, map.empty).
 
@@ -490,23 +505,16 @@ Section Build.
     | Beq r1 r2 dst =>
         (dst <- map_err (map.get syms dst) ("Destination " ++ dst ++ " not found (beq)");
          Ok (Beq r1 r2 dst))
-    | Loop r n => Ok (Loop r n)
-    | Loopi imm n => Ok (Loopi imm n)
+    | Loop r => Ok (Loop r)
+    | Loopi imm => Ok (Loopi imm)
+    | LoopEnd => Ok LoopEnd
     end.
 
   Definition link_block (syms : map.rep (map:=symbols)) (b : block string) : maybe (block Z) :=
-    match snd b with
-    | None => Ok (fst b, None)
-    | Some i =>
-        (i <- link_cinsn syms i;
-         Ok (fst b, Some i))
-    end.
+    i <- link_cinsn syms (snd b) ;
+    Ok (fst b, i).
 
-  Definition block_size {addr} (b : block addr) : nat :=
-    length (fst b) + (match snd b with
-                      | None => 0
-                      | Some _ => 1
-                      end).
+  Definition block_size {addr} (b : block addr) : nat := S (length (fst b)).
 
   Fixpoint link_blocks
     (syms : map.rep (map:=symbols)) (curr_blocks : list (block string))
@@ -517,11 +525,9 @@ Section Build.
         (b <- link_block syms b;
          link_blocks syms curr_blocks
            (map.put all_blocks pc b)
-           (repeat_advance_pc (advance_pc:=advance_pc) pc (block_size b)))
+           (pc + (4 * Z.of_nat (block_size b))))
     end.
 
-  (* TODO: the intermediate symbols won't be found here... maybe symbol + offset? *)
-  (* why do we need objs, given the shape program has already? Can we just skip it? *)
   Definition link (objs : map.rep (map:=objects))
     (syms : map.rep (map:=symbols)) : maybe blockmap :=
     map.fold
@@ -532,19 +538,14 @@ Section Build.
       (Ok map.empty)
       objs.
 
-  Definition build (program : list (string * list (insn (addr:=string))))
+  Definition build (program : list function)
     : maybe blockmap :=
-    let program := label_loop_ends program in
-    let objs := get_objects program in
     let syms := snd (get_symbols program) in
+    objs <- get_objects program ;
     link objs syms.
 End Build.
 
 Module Test.
-  (* TODO: the current method can't reason about individual functions
-  at all -- we get a call stack error, no? Maybe we can make proofs
-  that include "there's a PC in the call stack"? *)
-  
   (* Test program 0 : a function that adds two registers.
 
      start:
@@ -557,11 +558,11 @@ Module Test.
        add  x5, x2, x3
        ret
    *)
-  Definition add_fn : string * list (insn (addr:=string)) :=
+  Definition add_fn : function :=
     ("add"%string,
         [(Add x5 x2 x3 : insn);
          (Ret : insn)]).
-  Definition test_program0 : list (string * list (insn (addr:=string))) :=
+  Definition test_program0 : list function :=
     [ ("start",
         [ (Addi x2 x0 2 : insn);
           (Addi x3 x0 3 : insn);
@@ -582,21 +583,20 @@ Module Test.
        add  x5, x2, x3
        ret
   *)
-  Definition test_program1 : list (string * list (insn (addr:=string))) :=
+  Definition test_program1 : list function :=
     [ ("mul",
         [ (Addi x4 x0 0 : insn);
-          (Loop x2 2 : insn);
+          (Loop x2 : insn);
           (Jal x1 "add" : insn);
           (Addi x4 x5 0 : insn);
+          (LoopEnd : insn);
           (Ret : insn)]);
       add_fn ]%string.
 
-  Compute (label_loop_ends test_program0).
   Compute (get_objects test_program0).
   Compute (get_symbols test_program0).
   Compute (build test_program0).
-  
-  Compute (label_loop_ends test_program1).
+
   Compute (get_objects test_program1).
   Compute (get_symbols test_program1).
   Compute (build test_program1).
@@ -623,28 +623,58 @@ Module Test.
     | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
     | |- map.get _ _ = Some _ => solve_map
     | |- (_ < _)%nat => lia
+    | |- (_ <= _)%nat => lia
     | |- Some _ = Some _ => reflexivity
-    | _ => cbn [run_block run run1 read_gpr write_gpr ctrl1
+    | _ => cbn [run strt1 strt read_gpr write_gpr ctrl1
                   set_pc set_regs call_stack_pop call_stack_push
-                  length hd_error tl
+                  length hd_error tl skipn fst snd
                   repeat_advance_pc advance_pc Z.add Pos.add]
     end.
   Ltac simplify_side_condition := repeat simplify_side_condition_step.
 
+  (* TODO: need to figure out how to do this so it works right if offset goes past end of block *)
+  Definition get_block (blocks : map.rep (map:=blockmap)) (pc : Z * nat)
+    : option (block Z) :=
+    let start := fst pc in
+    let offset := snd pc in
+    match map.get blocks start with
+    | None => None
+    | Some (sinsns, final) =>
+        if (offset <=? length sinsns)%nat
+        then Some (skipn offset sinsns, final)
+        else (* TODO: what here? need to go to next block... *)
+    end.
+    map.get blocks (fst pc + (4 * Z.of_nat (snd pc))).
+  Definition get_block (blocks : map.rep (map:=objects)) (pc : string * nat)
+    : option (block string) :=
+    match map.get blocks fst pc with
+    | None => None
+    | Some b =>
+        
+    
+
+  (* problem: returning from a jump you need to break to the next block *)
+  (* offset doesn't work here *)
+  Print blocks0.
+  About run.
   Lemma test_program0_correct (regfile : map.map reg Z) :
     map.ok regfile ->
     eventually
-      (run_block (advance_pc:=advance_pc) blocks0)
+      (run (get_block:=map.get blocks0))
       (fun st =>
          match st with
          | otbn_done _ regs =>
              map.get regs (gpreg x5) = Some 5
          | _ => False
          end)
-      (start_state 0).
+      (start_state (0, 0%nat)).
   Proof.
     cbv [blocks0 start_state]; intros.
     eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
     intros; subst. eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
@@ -660,14 +690,38 @@ Module Test.
   (* TODO: maybe need to represent functions with internal labels too?
      for e.g. branches -- may need these blocks to be linked
      sequentially, and it makes loop ends easier too *)
+  (* Could also just say "linked at" with size offset *)
 
   Definition linked_at
-    (ctx : blockmap) (fn : string * list (insn (addr:=string))) (pc : Z) :=
+    (ctx : blockmap) (fn : function) (pc : Z) :=
     exists program,
       build program = inl ctx
       /\ In add_fn program
-      /\ (let syms := snd (get_symbols (label_loop_ends program)) in
+      /\ (let syms := snd (get_symbols program) in
           map.get syms (fst fn) = Some pc).
+
+
+  (* TODO: can I state the get condition without reimplementing link?
+     maybe the get is the same as if I had linked it from 0? *)
+  (*
+  Lemma linked_at_get ctx fn pc :
+    linked_at ctx fn pc ->
+    map.get ctx pc = *)
+  (* maybe I can talk at the level of objs and syms instead of blockmap? *)
+  (* in that case, need:
+     - a proof linking reasoning about objs/syms with reasoning about blockmap
+     - some way to talk about "running" objs -- technically run just works?
+
+    but what about advance_pc? how can I advance a string?
+    could do it with string * offset
+    could represent pc and addr differently?
+    but then how to do jumps? need extra indirection addr -> Z
+    this could work though, then the indirect is map.get syms
+    for blockmap it's id
+   *)
+  Print run_block.
+  Print objects.
+    
 
   (* For proofs about the object file, parameterize over the overall program *)
   Lemma add_fn_correct regfile :
@@ -689,8 +743,20 @@ Module Test.
            end)
         (otbn_busy start_pc regs cstack lstack).
   Proof.
+    (*
+    cbv [linked_at]; intros.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           end. *)
+    intros.
+    eapply eventually_step.
+    { simplify_side_condition.
+      Print run_b.
 
   Qed.
+
+
   Check add_fn.
   Print link.
   Check Forall.
