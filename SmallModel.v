@@ -42,13 +42,13 @@ Section ISA.
   .
 
   (* Control-flow instructions *)
-  Inductive cinsn {addr : Type} : Type :=
+  Inductive cinsn {destination : Type} : Type :=
   (* TODO: technically ret is a special case of JALR, but only RET is used in practice *)
   | Ret : cinsn
   | Ecall : cinsn
-  | Jal : gpr -> addr -> cinsn
-  | Bne : gpr -> gpr -> addr -> cinsn
-  | Beq : gpr -> gpr -> addr -> cinsn
+  | Jal : gpr -> destination -> cinsn
+  | Bne : gpr -> gpr -> destination -> cinsn
+  | Beq : gpr -> gpr -> destination -> cinsn
   (* Note: loops here use an end instruction instead of an iteration
      count to make codegen and processing easier. *)
   | Loop : gpr -> cinsn
@@ -56,9 +56,9 @@ Section ISA.
   | LoopEnd : cinsn
   .
 
-  Inductive insn {addr : Type} : Type :=
+  Inductive insn {destination : Type} : Type :=
   | Straightline : sinsn -> insn
-  | Control : cinsn (addr:=addr) -> insn
+  | Control : cinsn (destination:=destination) -> insn
   .
 End ISA.
 
@@ -87,8 +87,8 @@ Section RegisterEquality.
 End RegisterEquality.
 
 Section Stringify.
-  Context {addr : Type} {addr_to_string : addr -> string}.
-  Local Coercion addr_to_string : addr >-> string.
+  Context {destination : Type} {destination_to_string : destination -> string}.
+  Local Coercion destination_to_string : destination >-> string.
 
   Definition gpr_to_string (r : gpr) : string :=
     match r with
@@ -119,7 +119,7 @@ Section Stringify.
         "csrrs " ++ rd ++ ", " ++ rs ++ ", "
     end.
 
-  Definition cinsn_to_string (i : cinsn (addr:=addr)) : string :=
+  Definition cinsn_to_string (i : cinsn (destination:=destination)) : string :=
     match i with
     | Ret => "ret"
     | Ecall => "ecall"
@@ -148,12 +148,12 @@ Local Coercion Z.b2z : bool >-> Z.
 
 (* Executable model of OTBN. *)
 Section Exec.
-  (* Parameterize over the representation of code locations. *)
-  Context {addr : Type}
-    {addr_eqb : addr -> addr -> bool}
-    {addr_eqb_spec : forall a1 a2, BoolSpec (a1 = a2) (a1 <> a2) (addr_eqb a1 a2)}.
-  Definition block (addr : Type) : Type := (list sinsn * cinsn (addr:=addr)).
-  Definition advance_pc (pc : addr * nat) := (fst pc, S (snd pc)).
+  (* Parameterize over the representation of jump locations. *)
+  Context {destination : Type}
+    {destination_eqb : destination -> destination -> bool}
+    {destination_eqb_spec :
+      forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (destination_eqb d1 d2)}.
+  Definition advance_pc (pc : destination * nat) := (fst pc, S (snd pc)).
 
   (* error values for cases that should be unreachable (these can be
      any value and exist mostly to help debugging -- it's easier to
@@ -162,7 +162,8 @@ Section Exec.
   Context {error_Z : Z}.
 
   (* Parameterize over the map implementation. *)
-  Context {regfile : map.map reg Z} {get_block : addr * nat -> option (block addr)}.
+  Context {regfile : map.map reg Z}
+    {fetch : destination * nat -> option (insn (destination:=destination))}.
 
   (* Really, I want to talk about terminal states -- either a return
      from the subroutine, the end of the program, or an error.
@@ -208,44 +209,22 @@ Section Exec.
     | CSR_RND => P regs (* writes ignored *)
     end.
 
-  Definition strt1
-    (regs : regfile) (i : sinsn) (post : regfile -> Prop) : Prop :=
-    match i with
-    | Addi d x imm =>
-        is_valid_addi_imm imm /\
-          read_gpr regs x
-            (fun vx =>
-               write_gpr regs d (vx + imm) post)
-    | Add d x y =>
-        read_gpr regs x
-          (fun vx =>
-             read_gpr regs y
-               (fun vy =>
-                  write_gpr regs d (vx + vy) post))
-    | Csrrs d x =>
-        read_gpr regs x
-          (fun vx =>
-             read_csr regs d
-               (fun vd =>
-                  write_csr regs d (Z.lxor vd vx) post))
-    end.
-
-  Fixpoint repeat_advance_pc (pc : addr * nat) (n : nat) : addr * nat :=
+  Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
     match n with
     | O => pc
     | S n => advance_pc (repeat_advance_pc pc n)
     end.
 
-  Local Notation call_stack := (list (addr * nat)) (only parsing).
-  Local Notation loop_stack := (list (addr * nat * nat)) (only parsing).
+  Local Notation call_stack := (list (destination * nat)) (only parsing).
+  Local Notation loop_stack := (list (destination * nat * nat)) (only parsing).
   Inductive otbn_state : Type :=
-  | otbn_busy (pc : addr * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
-  | otbn_error (pc : addr * nat) (errs : list string)
-  | otbn_done (pc : addr * nat) (regs : regfile)
+  | otbn_busy (pc : destination * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
+  | otbn_error (pc : destination * nat) (errs : list string)
+  | otbn_done (pc : destination * nat) (regs : regfile)
   .  
-  Definition start_state (start_pc : addr * nat) : otbn_state :=
+  Definition start_state (start_pc : destination * nat) : otbn_state :=
     otbn_busy start_pc map.empty [] [].
-  Definition get_pc (st : otbn_state) : addr * nat :=
+  Definition get_pc (st : otbn_state) : destination * nat :=
     match st with
     | otbn_busy pc _ _ _ => pc
     | otbn_error pc _ => pc
@@ -273,7 +252,8 @@ Section Exec.
     | otbn_busy pc regs cstack lstack => post (otbn_done pc regs)
     | _ => post st
     end.
-  Definition set_pc (st : otbn_state) (pc : addr * nat) (post : otbn_state -> Prop) : Prop :=
+  Definition set_pc
+    (st : otbn_state) (pc : destination * nat) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
     | _ => post st
@@ -323,6 +303,28 @@ Section Exec.
     | _ => False
     end.
 
+  Definition strt1
+    (regs : regfile) (i : sinsn) (post : regfile -> Prop) : Prop :=
+    match i with
+    | Addi d x imm =>
+        is_valid_addi_imm imm /\
+          read_gpr regs x
+            (fun vx =>
+               write_gpr regs d (vx + imm) post)
+    | Add d x y =>
+        read_gpr regs x
+          (fun vx =>
+             read_gpr regs y
+               (fun vy =>
+                  write_gpr regs d (vx + vy) post))
+    | Csrrs d x =>
+        read_gpr regs x
+          (fun vx =>
+             read_csr regs d
+               (fun vd =>
+                  write_csr regs d (Z.lxor vd vx) post))
+    end.
+
   (* TODO: is it possible to simplify the address logic here so we can
     directly link "dst" as a block, even if it means repeated terms? *)
   (* TODO: is it necessary to simulate some error conditions? There
@@ -330,7 +332,9 @@ Section Exec.
      sometimes should in fact happen on some inputs, and "this program
      is not valid" (e.g. out-of-bounds immediate value that cannot be
      encoded). *)
-  Definition ctrl1 (st : otbn_state) (i : cinsn (addr:=addr)) (post : otbn_state -> Prop) : Prop :=
+  Definition ctrl1
+    (st : otbn_state) (i : cinsn (destination:=destination))
+    (post : otbn_state -> Prop) : Prop :=
     match i with
     | Ret =>  call_stack_pop st post
     | Ecall => program_exit st post
@@ -364,22 +368,19 @@ Section Exec.
     | LoopEnd => loop_end st post
     end.
 
-  Fixpoint strt (regs : regfile) (insns : list sinsn) (post : regfile -> Prop) : Prop :=
-    match insns with
-    | [] => post regs
-    | i :: insns => strt1 regs i (fun regs => strt regs insns post)
-    end.
-
-  Definition run (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
+  Definition run1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs cstack lstack =>
-        exists sinsns final,
-        get_block pc = Some (sinsns, final)
-        /\ strt regs sinsns
-             (fun regs =>
-                set_pc st (fst pc, (snd pc + length sinsns)%nat)
-                  (fun st => set_regs st regs
-                               (fun st => ctrl1 st final post)))
+        exists i,
+        fetch pc = Some i
+        /\ match i with
+           | Straightline i =>
+               strt1 regs i
+                 (fun regs =>
+                    set_regs st regs
+                      (fun st => set_pc st (advance_pc pc) post))
+           | Control i => ctrl1 st i post
+           end
     | _ => post st
     end.
 End Exec.
@@ -413,6 +414,12 @@ Section ErrorMonad.
     | b :: l =>
         bind (f x b) (maybe_fold_left f l)
     end.
+  Fixpoint maybe_flat_map {A B} (f : A -> maybe (list B)) (l : list A) : maybe (list B) :=
+    match l with
+    | [] => inl []
+    | a :: l =>
+        bind (f a) (fun l1 => bind (maybe_flat_map f l) (fun l2 => inl (l1 ++ l2)))
+    end.
   Definition assertion (cond : bool) (msg : string) : maybe unit :=
     if cond then inl tt else inr msg.
 End ErrorMonad.
@@ -428,71 +435,69 @@ Local Coercion Straightline : sinsn >-> insn.
 Local Coercion Control : cinsn >-> insn.
  
 
-(* Contains a way to link programs into block maps. *)
+(* Contains a way to link programs. *)
 Section Build.
-  Definition blockmap : map.map Z (block Z) := SortedListZ.map _.
-  Definition objects : map.map string (list (block string)) := SortedListString.map _.
-  Definition symbols : map.map string Z := SortedListString.map _.
+  (* TODO: how should we now represent programs? All we need is fetch. *)
+  (* option: map from string -> list insn, so that all destinations
+     that are jumped to need an entry. The list insns can
+     overlap. Execution should not pass the end. *)
+  (* Can this cause problems with cycles or too much redundancy? *)
+  (* option: list insns * map from string -> nat, return tail of list always *)
+  (* this is nice from a representation redundancy perspective *)
+  (* how about reasoning with objs? *)
+  (* different fetch, multiple copies of list insns * map from string -> nat to choose from *)
+  (* or maybe each obj needs to be considered separately? *)
+  Definition symbols : map.map string nat := SortedListString.map _.
   Import ErrorMonadNotations.
 
-  (* Functions are conceptually just "labelled chunks of instructions
-     that should always be linked sequentially." They have:
-     - a name
-     - a list of instructions *)
-  Definition function : Type := string * list (insn (addr:=string)).
+  (* Objects are conceptually just "chunks of instructions that should
+     always be linked sequentially." *)
+  Definition object : Type := list (insn (destination:=string)).
+  (* Functions consist of a name, internal labels (map of string ->
+     offset within the function), and a list of instructions. *)
+  Definition function : Type := string * symbols * object.
+  (* Programs are lists of instructions that link to each other with
+     offsets within the global program. This represents code
+     post-linking. *)
+  Definition program : Type := list (insn (destination:=nat)).
 
-  Definition flatten_program (program : list function)
-    : list (insn (addr:=string)) :=
-    fold_left (fun insns fn => insns ++ snd fn) program [].
-
-  Fixpoint get_blocks'
-    (insns : list (insn (addr:=string)))
-    (blocks : list (block string)) (curr : list sinsn)
-    : maybe (list (block string)) :=
-    match insns with
-    | [] =>
-        (* we should always end on a control-flow instruction *)                           
-        match curr with
-        | [] => Ok blocks
-        | _ => Err ("Dangling straightline instructions: "
-                      ++ String.concat "; " (List.map sinsn_to_string curr))
-        end
-    | i :: insns =>
-        match i with
-        | Straightline i => get_blocks' insns blocks (curr ++ [i])
-        | Control i => get_blocks' insns (blocks ++ [(curr, i)]) []
-        end
+  Definition add_symbol (syms : symbols) (label : string) (offset : nat)
+    : maybe symbols :=
+    match map.get syms label with
+    | Some _ => Err ("Symbol " ++ label ++ " appears more than once.")
+    | None => Ok (map.put syms label offset)
     end.
-  Definition get_blocks (insns : list (insn (addr:=string))) : maybe (list (block string)) :=
-    get_blocks' insns [] [].
 
-  Definition get_objects (program : list function)
-    : maybe (map.rep (map:=objects)) :=
-    fold_left
-      (fun objs fn =>
-         let name := fst fn in
-         let insns := snd fn in
-         objs <- objs ;
-         blocks <- get_blocks insns ;
-         Ok (map.put objs name blocks))
-      program (Ok map.empty).
+  Definition merge_symbols
+    (global_offset : nat) (global_syms fn_syms : symbols) : maybe symbols :=
+    map.fold
+      (fun global_syms label fn_offset =>
+         (global_syms <- global_syms ;
+          add_symbol global_syms label (global_offset + fn_offset)))
+      (Ok global_syms) fn_syms.
 
-  (* Returns the PC at the end of IMEM plus the symbol table. *)
-  Definition get_symbols (program : list function) 
-    : Z * map.rep (map:=symbols) :=
-    fold_left
-      (fun (pc_syms : Z * (map.rep (map:=symbols))) fn =>
-         let pc := fst pc_syms in
-         let syms := snd pc_syms in
-         let name := fst fn in
-         let insns := snd fn in
-         let syms := map.put syms name pc in
-         let pc := pc + (4 * Z.of_nat (length insns)) in
-         (pc, syms))
-      program (0, map.empty).
+  (* Returns the symbols plus the overall size of the program *)
+  Definition link_symbols_for_function
+    (syms_offset : symbols * nat) (fn : function) : maybe (symbols * nat) :=
+    let fn_name := fst (fst fn) in
+    let fn_syms := snd (fst fn) in
+    let fn_insns := snd fn in
+    (syms <- add_symbol (fst syms_offset) fn_name (snd syms_offset) ;
+     syms <- merge_symbols (snd syms_offset) syms fn_syms ;
+     Ok (syms, (snd syms_offset + length fn_insns)%nat)).
+  Definition link_symbols'
+    (start_syms : symbols)
+    (start_offset : nat)
+    (fns : list function)
+    : maybe (symbols * nat) :=
+    maybe_fold_left link_symbols_for_function fns (start_syms, start_offset).
+  Definition link_symbols (fns : list function) : maybe symbols :=
+    (syms_offset <- link_symbols' map.empty 0%nat fns ;
+     Ok (fst syms_offset)).
 
   Definition link_cinsn
-    (syms : map.rep (map:=symbols)) (i : cinsn (addr:=string)) : maybe (cinsn (addr:=Z)) :=
+    (syms : map.rep (map:=symbols)) (i : cinsn (destination:=string))
+    : maybe (cinsn (destination:=nat)) :=
     match i with
     | Ret => Ok Ret
     | Ecall => Ok Ecall
@@ -510,40 +515,494 @@ Section Build.
     | LoopEnd => Ok LoopEnd
     end.
 
-  Definition link_block (syms : map.rep (map:=symbols)) (b : block string) : maybe (block Z) :=
-    i <- link_cinsn syms (snd b) ;
-    Ok (fst b, i).
-
-  Definition block_size {addr} (b : block addr) : nat := S (length (fst b)).
-
-  Fixpoint link_blocks
-    (syms : map.rep (map:=symbols)) (curr_blocks : list (block string))
-    (all_blocks : blockmap) (pc : Z) : maybe blockmap :=
-    match curr_blocks with
-    | [] => Ok all_blocks
-    | b :: curr_blocks =>
-        (b <- link_block syms b;
-         link_blocks syms curr_blocks
-           (map.put all_blocks pc b)
-           (pc + (4 * Z.of_nat (block_size b))))
+  Definition link_insn
+    (syms : symbols) (i : insn (destination:=string))
+    : maybe (insn (destination:=nat)) :=
+    match i with
+    | Straightline i => Ok (Straightline i)
+    | Control i =>
+        (i <- link_cinsn syms i ;
+         Ok (Control i))
     end.
 
-  Definition link (objs : map.rep (map:=objects))
-    (syms : map.rep (map:=symbols)) : maybe blockmap :=
-    map.fold
-      (fun all_blocks name curr_blocks =>
-         (all_blocks <- all_blocks;
-          pc <- map_err (map.get syms name) ("Symbol " ++ name ++ " not found");
-          link_blocks syms curr_blocks all_blocks pc))
-      (Ok map.empty)
-      objs.
+  Fixpoint link_insns
+    (syms : symbols) (insns : list (insn (destination:=string)))
+    : maybe (list (insn (destination:=nat))) :=
+    match insns with
+    | [] => Ok []
+    | i :: insns =>
+        (i <- link_insn syms i ;
+         insns <- link_insns syms insns ;
+         Ok (i :: insns))
+    end.
 
-  Definition build (program : list function)
-    : maybe blockmap :=
-    let syms := snd (get_symbols program) in
-    objs <- get_objects program ;
-    link objs syms.
+  Definition link'
+    (syms : symbols) (prog : program) (fn : function) : maybe program :=
+    (fn_insns <- link_insns syms (snd fn) ;
+     Ok (prog ++ fn_insns)).
+
+  Definition link (fns : list function) : maybe program :=
+    (syms <- link_symbols fns ;
+     maybe_fold_left (link' syms) fns []).
+
+  Definition get_label_offset
+    (fn : function) (label : string) : option nat :=
+    let fn_name := fst (fst fn) in
+    let fn_syms := snd (fst fn) in
+    if (String.eqb label fn_name)
+    then Some 0%nat
+    else map.get fn_syms label.
+
+  (* Fetch from a function. *)
+  Definition fetch_fn
+    (pc : string * nat) (fn : function) : option insn :=
+    let label := fst pc in
+    let offset := snd pc in
+    let fn_insns := snd fn in
+    match get_label_offset fn label with
+    | None => None
+    | Some label_offset => nth_error fn_insns (label_offset + offset)
+    end.
+
+  (* TODO: actually need fetch from a whole bunch of functions that
+     might link to one another!!!!! maybe need string -> function
+     mapping? Or just global symbols? *)
+  (* consider options here carefully *)
+  (* we want to reason about the program BEFORE LINKING -- should
+     still be OK for functions to appear in any order *)
+  (* option 1: parameterize over final program, have a "linked @"
+     predicate that says for every offset < function length, whole
+     program fetch for fn offset + offset is the same insn as fetch
+     from function (will also need symbol-table predicate for cinsns
+     related) *)
+  (* then prove that if fn is in the list and link succeeds, it's
+     linked after link at the expected PC *)
+
+  (* Fetch from a whole program. *)
+  Definition fetch
+    (pc : nat * nat) (prog : program) : option insn :=
+    let global_offset := fst pc in
+    let fn_offset := snd pc in
+    nth_error prog (global_offset + fn_offset).
+
+  Definition cinsn_equiv (syms : symbols)
+    (i1 : cinsn (destination:=string))
+    (i2 : cinsn (destination:=nat)) : Prop :=
+    match i1, i2 with
+    | Ret, Ret => True
+    | Ecall, Ecall => True
+    | Jal r1 dst1, Jal r2 dst2 =>
+        r1 = r2 /\ map.get syms dst1 = Some dst2
+    | Bne a1 b1 dst1, Bne a2 b2 dst2 =>
+        a1 = a2 /\ b1 = b2 /\ map.get syms dst1 = Some dst2
+    | Beq a1 b1 dst1, Beq a2 b2 dst2 =>
+        a1 = a2 /\ b1 = b2 /\ map.get syms dst1 = Some dst2
+    | Loop r1, Loop r2 => r1 = r2
+    | Loopi n1, Loopi n2 => n1 = n2
+    | LoopEnd, LoopEnd => True
+    | _, _ => False
+    end.
+    
+  (* States that a pre-link instruction and post-link instructions are
+     equivalent under a given symbol mapping. *)
+  Definition insn_equiv (syms : symbols)
+    (i1 : insn (destination:=string))
+    (i2 : insn (destination:=nat)) : Prop :=
+    match i1, i2 with
+    | Straightline i1, Straightline i2 => i1 = i2
+    | Control i1, Control i2 => cinsn_equiv syms i1 i2
+    | _, _ => False
+    end.
+
+  (* States that a particular (pre-link) function is linked into a
+     particular program at the given global offset. *)
+  Definition linked_at
+    (prog : program) (syms : symbols)
+    (fn : function) (global_offset : nat) : Prop :=
+    forall fn_offset : nat,
+      (fn_offset < length (snd fn))%nat ->
+      exists i1 i2,
+        fetch_fn (fst (fst fn), fn_offset) fn = Some i1
+        /\ fetch (global_offset, fn_offset) prog = Some i2
+        /\ insn_equiv syms i1 i2.
+
 End Build.
+
+Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
+
+Section BuildProofs.
+  Import ErrorMonadNotations.
+
+  (* Returns the overall size of the program containing the functions
+     and starting at the given offset. *)
+  Definition program_size (start : nat) (fns : list function) : nat :=
+    fold_left
+      (fun offset fn =>
+         let fn_insns := snd fn in
+          (offset + length fn_insns)%nat)
+      fns start.
+
+  Ltac err_simpl_step :=
+    lazymatch goal with
+    | H : inl ?a = inl ?b |- _ => assert (a = b) by congruence; clear H; subst
+    | H : inl _ = inr _ |- _ => congruence
+    | H : inr _ = inl _ |- _ => congruence
+    | H : (?a, ?b) = (?c, ?d) |- _ =>
+        assert (a = c) by congruence;
+        assert (b = d) by congruence;
+        clear H; subst
+    | H : context [bind ?x] |- _ => destr x; cbn [bind] in H
+    | |- context [bind ?x] => destr x; cbn [bind]
+    | _ => progress cbn [bind] in *
+    end.
+  Ltac err_simpl := repeat err_simpl_step.
+
+  Lemma link_symbols'_step :
+    forall start_syms start_offset fn fns syms1 syms2 end_offset1 end_offset2,
+      link_symbols_for_function (start_syms, start_offset) fn = Ok (syms1, end_offset1) ->
+      link_symbols' syms1 end_offset1 fns = Ok (syms2, end_offset2) ->
+      link_symbols' start_syms start_offset (fn :: fns) = Ok (syms2, end_offset2).
+  Proof.
+    cbv [link_symbols']; intros; cbn [maybe_fold_left bind]; err_simpl; congruence.
+  Qed.
+
+  Lemma link_symbols'_offset :
+    forall fns start_syms start_offset syms end_offset,
+      link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
+      end_offset = program_size start_offset fns.
+  Proof.
+    cbv [link_symbols' program_size]; induction fns; cbn [maybe_fold_left fold_left]; intros;
+      err_simpl; [ reflexivity | ].
+    destruct_products; cbn [fst snd] in *.
+    lazymatch goal with
+    | H : link_symbols_for_function _ _ = _ |- _ => cbv [link_symbols_for_function] in H
+    end.
+    err_simpl; cbn [fst snd] in *. eauto.
+  Qed.
+  
+  Lemma link_symbols'_inv :
+    forall start_syms start_offset fn fns syms2 end_offset2,
+      link_symbols' start_syms start_offset (fn :: fns) = Ok (syms2, end_offset2) ->
+      exists syms1 end_offset1,
+        link_symbols_for_function (start_syms, start_offset) fn = Ok (syms1, end_offset1)
+        /\ end_offset2 = program_size end_offset1 fns
+        /\ link_symbols' syms1 end_offset1 fns = Ok (syms2, end_offset2).
+  Proof.
+    cbv [link_symbols']; cbn [maybe_fold_left bind]; intros; err_simpl.
+    destruct_products; cbn [fst snd] in *.
+    repeat lazymatch goal with
+           | H : context [link_symbols_for_function ?a ?b]
+             |- context [link_symbols_for_function ?a ?b] =>
+               destruct (link_symbols_for_function a b) as [[? ?]|]; cbn [bind]
+           | |- exists _, _ => eexists
+           | |- _ /\ _ => split
+           | _ => solve [eauto using link_symbols'_offset]
+           end.    
+  Qed.
+
+  Lemma link_symbols_for_function_size :
+    forall fn start_syms start_offset syms size,
+      link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, size) ->
+      size = (start_offset + length (snd fn))%nat.
+  Proof.
+    cbv [link_symbols_for_function]; intros; err_simpl; reflexivity.
+  Qed.
+
+  Lemma link_symbols'_size :
+    forall fns start_syms start_offset syms end_offset,
+      link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
+      program_size start_offset fns = end_offset.
+  Proof.
+    cbv [program_size]; induction fns; intros;
+      [ cbn [link_symbols' maybe_fold_left] in *; err_simpl; reflexivity | ].
+    cbn [fold_left].
+    repeat lazymatch goal with
+           | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+               eapply link_symbols'_inv in H
+           | H: link_symbols_for_function _ _ = Ok _ |- _ =>               
+               apply link_symbols_for_function_size in H; subst
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | _ => subst; solve [eauto]
+           end.
+  Qed.
+
+  Lemma add_symbol_no_overwrite start_syms label1 label_offset1 syms :
+    add_symbol start_syms label1 label_offset1 = Ok syms ->
+    (forall label2 label_offset2,
+        map.get start_syms label2 = Some label_offset2 ->
+        map.get syms label2 = Some label_offset2).
+  Proof.
+    cbv [add_symbol]; intros.
+    destr (map.get start_syms label1); [ congruence | ].
+    destr (string_dec label1 label2); subst; [ congruence | ].
+    err_simpl. rewrite map.get_put_diff by congruence.
+    auto.
+  Qed.
+
+  Lemma merge_symbols_no_overwrite fn_syms global_offset global_syms :
+    forall syms,
+      merge_symbols global_offset global_syms fn_syms = Ok syms ->
+      (forall label label_offset,
+          map.get global_syms label = Some label_offset ->
+          map.get syms label = Some label_offset).
+  Proof.
+    cbv [merge_symbols].
+    lazymatch goal with
+    | |- forall syms,
+        map.fold _ _ _ = ?x -> ?Q =>
+        apply (map.fold_spec (fun _ m => forall syms, m = x -> Q))
+    end; intros; err_simpl; eauto using add_symbol_no_overwrite.
+  Qed.
+
+  Lemma link_symbols_for_function_no_overwrite :
+    forall fn start_syms start_offset syms label label_offset end_offset,
+      link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, end_offset) ->
+      map.get start_syms label = Some label_offset ->
+      map.get syms label = Some label_offset.
+  Proof.
+    destruct fn as [[fn_name fn_syms] fn_insns].
+    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros.
+    err_simpl. eauto using add_symbol_no_overwrite, merge_symbols_no_overwrite.
+  Qed.
+
+  Lemma link_symbols'_no_overwrite :
+    forall fns start_syms start_offset syms label label_offset end_offset,
+      link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
+      map.get start_syms label = Some label_offset ->
+      map.get syms label = Some label_offset.
+  Proof.
+    cbv [program_size]; induction fns; intros;
+      [ cbn [link_symbols' maybe_fold_left] in *; err_simpl; solve [auto] | ].
+    repeat lazymatch goal with
+           | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+               eapply link_symbols'_inv in H
+           | H : exists _, _ |- _ => destruct H; subst
+           | H : _ /\ _ |- _ => destruct H; subst
+           | _ => solve [eauto using link_symbols_for_function_no_overwrite]
+           end.
+  Qed.
+
+  Lemma add_symbol_correct start_syms label label_offset syms :
+      add_symbol start_syms label label_offset = Ok syms ->
+      map.get syms label = Some label_offset.
+  Proof.
+    cbv [add_symbol]; destruct_one_match; intros; err_simpl; auto using map.get_put_same.
+  Qed.
+
+  Lemma link_symbols_for_function_correct fn start_syms start_offset syms end_offset :
+      link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, end_offset) ->
+      map.get syms (fst (fst fn)) = Some start_offset.
+  Proof.
+    destruct fn as [[fn_name fn_syms] fn_insns].
+    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros; err_simpl.
+    eauto using add_symbol_correct, merge_symbols_no_overwrite.    
+  Qed.
+
+  Lemma link_symbols'_correct :
+    forall fns1 fns2 fn start_syms start_offset syms end_offset,
+      link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = Ok (syms, end_offset) ->
+      map.get syms (fst (fst fn)) = Some (program_size start_offset fns1).
+  Proof.
+    cbv [link_symbols program_size]; induction fns1; intros.
+    { rewrite ?app_nil_l in *. cbn [link_symbols' maybe_fold_left] in *.
+      err_simpl. destruct_products.
+      eauto using link_symbols'_no_overwrite, link_symbols_for_function_correct. }
+    { rewrite <-?app_comm_cons in *. cbn [fold_left].
+      repeat lazymatch goal with
+             | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+                 eapply link_symbols'_inv in H
+             | H: link_symbols_for_function _ _ = Ok _ |- _ =>               
+                 apply link_symbols_for_function_size in H; subst
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | _ => subst; solve [eauto]                                 
+             end. }
+  Qed.
+
+  Lemma link_cinsn_correct syms i1 i2 : 
+    link_cinsn syms i1 = Ok i2 ->
+    cinsn_equiv syms i1 i2.
+  Proof.
+    cbv [link_cinsn cinsn_equiv]; intros.
+    destruct_one_match; err_simpl; ssplit; auto;
+      lazymatch goal with
+      | H : map_err (map.get ?m ?k) _ = Ok _ |- _ =>
+          destr (map.get m k); cbn [map_err] in H; err_simpl
+      end; reflexivity.
+  Qed.
+
+  Lemma link_insn_correct syms i1 i2 : 
+    link_insn syms i1 = Ok i2 ->
+    insn_equiv syms i1 i2.
+  Proof.
+    cbv [link_insn insn_equiv]; intros.
+    destruct_one_match; err_simpl; eauto using link_cinsn_correct.
+  Qed.
+
+  Lemma link_insns_correct :
+    forall syms fn_insns prog,
+      link_insns syms fn_insns = Ok prog ->
+      forall (fn_offset : nat),
+        (fn_offset < length fn_insns)%nat ->
+        exists i1 i2,
+          nth_error fn_insns fn_offset = Some i1
+          /\ nth_error prog fn_offset = Some i2
+          /\ insn_equiv syms i1 i2.
+  Proof.
+    induction fn_insns; intros; cbn [link_insns length] in *; err_simpl; [ lia | ].
+    destr fn_offset; cbn [nth_error].
+    { do 2 eexists; ssplit; try reflexivity; eauto using link_insn_correct. }
+    { apply IHfn_insns; auto; lia. }
+  Qed.
+
+  Lemma fetch_fn_name offset (fn : function) :
+    fetch_fn (fst (fst fn), offset) fn = nth_error (snd fn) offset.
+  Proof.
+    cbv [fetch_fn get_label_offset]. cbn [fst snd].
+    rewrite String.eqb_refl, Nat.add_0_l. reflexivity.
+  Qed.
+
+  Lemma linked_at_cons i prog syms fn offset :
+    linked_at prog syms fn offset ->
+    linked_at (i :: prog) syms fn (S offset).
+  Proof.
+    cbv [linked_at]; cbn [fst snd]. intro Hlink; intros.
+    specialize (Hlink _ ltac:(eassumption)). destruct_products.
+    eauto.
+  Qed.
+
+  Lemma link'_correct :
+    forall start_prog fn prog syms offset,
+      link' syms start_prog fn = Ok prog ->
+      offset = length start_prog ->
+      linked_at prog syms fn offset.
+  Proof.
+    cbv [link']; induction start_prog; intros; subst.
+    { err_simpl. rewrite app_nil_l in *. cbn [length].
+      cbv [linked_at]; intros.
+      lazymatch goal with H : link_insns _ _ = _ |- _ =>
+                            eapply link_insns_correct in H; eauto end.
+      destruct_products. cbn [fst snd].
+      rewrite fetch_fn_name. cbv [fetch]; cbn [fst snd].
+      eauto. }
+    { err_simpl. rewrite <-app_comm_cons. cbn [length].
+      apply linked_at_cons. apply IHstart_prog; auto; err_simpl.
+      reflexivity. }
+  Qed.
+
+  Lemma link'_no_unlink :
+    forall fn1 fn2 syms offset start_prog prog,
+      link' syms start_prog fn2 = Ok prog ->
+      linked_at start_prog syms fn1 offset ->
+      linked_at prog syms fn1 offset.
+  Proof.
+    cbv [link']; intros. err_simpl. cbv [linked_at]; intros.
+    lazymatch goal with H : linked_at _ _ _ _ |- _ =>
+                          specialize (H _ ltac:(eassumption))
+    end.
+    destruct_products. do 2 eexists; ssplit; eauto; [ ].
+    cbv [fetch] in *; cbn [fst snd] in *.
+    lazymatch goal with
+    | H : nth_error ?l1 ?i = Some _ |- _ =>
+        assert (i < length l1)%nat by eauto using List.nth_error_Some_bound_index
+    end.
+    rewrite nth_error_app1 by lia. auto.
+  Qed.
+
+  Lemma fold_link'_no_unlink :
+    forall fns fn syms offset start_prog prog,
+      maybe_fold_left (link' syms) fns start_prog = Ok prog ->
+      linked_at start_prog syms fn offset ->
+      linked_at prog syms fn offset.
+  Proof.
+    induction fns; cbn [maybe_fold_left]; intros; err_simpl;
+      eauto using link'_no_unlink.
+  Qed.
+
+  Lemma link_insns_length :
+    forall syms insns prog,
+    link_insns syms insns = Ok prog ->
+    length prog = length insns.
+  Proof.
+    induction insns; cbn [link_insns length]; intros; err_simpl; [ reflexivity | ].
+    cbn [length]. rewrite IHinsns; eauto.
+  Qed.
+
+  Lemma link'_length syms start_prog fn prog:
+    link' syms start_prog fn = Ok prog ->
+    length prog = (length start_prog + length (snd fn))%nat.
+  Proof.
+    cbv [link']. destruct fn as [[fn_name fn_syms] fn_insns]. cbn [fst snd].
+    intros; err_simpl. rewrite app_length.
+    lazymatch goal with H : link_insns _ _ = _ |- _ => apply link_insns_length in H end.
+    lia.
+  Qed.
+
+  Lemma link_correct'' :
+    forall fns1 fn fns2 start_syms start_offset start_prog syms prog end_offset,
+      maybe_fold_left (link' syms) (fns1 ++ fn :: fns2) start_prog = inl prog ->
+      link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
+      start_offset = length start_prog ->
+      linked_at prog syms fn (program_size start_offset fns1).
+  Proof.
+    cbv [program_size]. induction fns1; intros; subst.
+    { rewrite app_nil_l in *. cbn [maybe_fold_left fold_left fst snd] in *.
+      err_simpl. eauto using link'_correct, fold_link'_no_unlink. }
+    { rewrite <-?app_comm_cons in *. cbn [fold_left maybe_fold_left] in *.
+      err_simpl.
+      repeat lazymatch goal with
+             | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+                 eapply link_symbols'_inv in H
+             | H: link_symbols_for_function _ _ = Ok _ |- _ =>               
+                 apply link_symbols_for_function_size in H; subst
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | _ => progress subst                           
+             end.
+      eapply IHfns1; eauto; [ ].
+      cbv [function] in *; destruct_products; cbn [fst snd] in *.
+      lazymatch goal with H : link' _ _ _ = _ |- _ => apply link'_length in H end.
+      cbn [fst snd] in *. lia. }
+  Qed.
+
+  Lemma link_correct' fns1 fns2 fn prog syms :
+      link (fns1 ++ fn :: fns2) = Ok prog ->
+      link_symbols (fns1 ++ fn :: fns2) = Ok syms ->
+      linked_at prog syms fn (program_size 0%nat fns1).
+  Proof.
+    cbv [link link_symbols]; intros. err_simpl.
+    destruct_products; cbn [fst snd] in *.
+    eauto using link_correct''.    
+  Qed.
+
+  Lemma link_correct :
+    forall fns fn prog syms,
+      (* If the function is in the input list of functions `fns`... *)
+      In fn fns ->
+      (* ...and `prog` is the result of a successful `link`... *)
+      link fns = Ok prog ->
+      (* ..and `syms` is the symbol table for `fns`... *)
+      link_symbols fns = Ok syms ->
+      (* ...then there exists an `offset` and an index `idx`... *)
+      exists offset idx,
+        (* ...such that `fn` is in the list at index `idx`...  *)
+        nth_error fns idx = Some fn
+        (* ...and `offset` is the size of the program before `fn`... *)
+        /\ offset = program_size 0%nat (firstn idx fns)
+        (* ...and `fn` is linked at `offset`. *)
+        /\ linked_at prog syms fn offset.
+  Proof.
+    intros.
+    lazymatch goal with H : In _ _ |- _ =>
+                          apply in_split in H; destruct H as [fns1 [fns2 ?]]
+    end.
+    subst. eexists; exists (length fns1); ssplit; [ | reflexivity | ].
+    { rewrite nth_error_app2, Nat.sub_diag by lia. reflexivity. }
+    { rewrite List.firstn_app_l by lia. eauto using link_correct'. }
+  Qed.    
+
+End BuildProofs.
 
 Module Test.
   (* Test program 0 : a function that adds two registers.
@@ -560,10 +1019,12 @@ Module Test.
    *)
   Definition add_fn : function :=
     ("add"%string,
-        [(Add x5 x2 x3 : insn);
-         (Ret : insn)]).
+      map.empty,
+      [(Add x5 x2 x3 : insn);
+       (Ret : insn)]).
   Definition test_program0 : list function :=
     [ ("start",
+        map.empty,
         [ (Addi x2 x0 2 : insn);
           (Addi x3 x0 3 : insn);
           (Jal x1 "add" : insn);
@@ -585,6 +1046,7 @@ Module Test.
   *)
   Definition test_program1 : list function :=
     [ ("mul",
+        map.empty,
         [ (Addi x4 x0 0 : insn);
           (Loop x2 : insn);
           (Jal x1 "add" : insn);
@@ -593,19 +1055,14 @@ Module Test.
           (Ret : insn)]);
       add_fn ]%string.
 
-  Compute (get_objects test_program0).
-  Compute (get_symbols test_program0).
-  Compute (build test_program0).
-
-  Compute (get_objects test_program1).
-  Compute (get_symbols test_program1).
-  Compute (build test_program1).
+  Compute (link test_program0).
+  Compute (link test_program1).
 
   Ltac derive_blockmap program :=
     let val := eval vm_compute in (build program) in
     lazymatch val with
-    | inl ?x => exact x
-    | inr ?e => fail e
+    | Ok ?x => exact x
+    | Err ?e => fail e
     end.
 
   Definition blocks0 : blockmap := ltac:(derive_blockmap test_program0).
@@ -695,7 +1152,7 @@ Module Test.
   Definition linked_at
     (ctx : blockmap) (fn : function) (pc : Z) :=
     exists program,
-      build program = inl ctx
+      build program = Ok ctx
       /\ In add_fn program
       /\ (let syms := snd (get_symbols program) in
           map.get syms (fst fn) = Some pc).
