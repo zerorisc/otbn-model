@@ -77,13 +77,29 @@ Section RegisterEquality.
   Proof. derive_eqb r1 r2. Defined.
   Definition csr_eqb (r1 r2 : csr) : bool.
   Proof. derive_eqb r1 r2. Defined.
+  Definition reg_eqb (r1 r2 : reg) : bool :=
+    match r1, r2 with
+    | gpreg r1, gpreg r2 => gpr_eqb r1 r2
+    | csreg r1, csreg r2 => csr_eqb r1 r2
+    | _, _ => false
+    end.
 
+  Print BoolSpec.
+  Print destr.destr.
   Local Ltac prove_eqb_spec r1 r2 :=
-    destruct r1, r2; cbv [gpr_eqb]; constructor; congruence.
-  Lemma gpr_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (gpr_eqb r1 r2).
+    destruct r1, r2; constructor; congruence.
+  Global Instance gpr_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (gpr_eqb r1 r2).
   Proof. prove_eqb_spec r1 r2. Qed.
-  Lemma csr_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (csr_eqb r1 r2).
+  Global Instance csr_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (csr_eqb r1 r2).
   Proof. prove_eqb_spec r1 r2. Qed.
+  Global Instance reg_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (reg_eqb r1 r2).
+  Proof.
+    destruct r1, r2; cbn [reg_eqb];
+      repeat lazymatch goal with
+      | |- BoolSpec _ _ (?eqb ?x ?y) => destr (eqb x y)
+      | _ => constructor; congruence
+      end.
+  Qed.
 End RegisterEquality.
 
 Section Stringify.
@@ -236,7 +252,7 @@ Section Exec.
     | otbn_busy pc regs cstack lstack =>
         exists dst,
         hd_error cstack = Some dst
-        /\ post (otbn_busy dst regs cstack lstack)
+        /\ post (otbn_busy dst regs (tl cstack) lstack)
     | _ => post st
     end.
   (* Push the next (one-advanced) PC onto the call stack. *)
@@ -555,7 +571,7 @@ Section Build.
 
   (* Fetch from a function. *)
   Definition fetch_fn
-    (pc : string * nat) (fn : function) : option insn :=
+    (fn : function) (pc : string * nat) : option insn :=
     let label := fst pc in
     let offset := snd pc in
     let fn_insns := snd fn in
@@ -563,24 +579,21 @@ Section Build.
     | None => None
     | Some label_offset => nth_error fn_insns (label_offset + offset)
     end.
-
-  (* TODO: actually need fetch from a whole bunch of functions that
-     might link to one another!!!!! maybe need string -> function
-     mapping? Or just global symbols? *)
-  (* consider options here carefully *)
-  (* we want to reason about the program BEFORE LINKING -- should
-     still be OK for functions to appear in any order *)
-  (* option 1: parameterize over final program, have a "linked @"
-     predicate that says for every offset < function length, whole
-     program fetch for fn offset + offset is the same insn as fetch
-     from function (will also need symbol-table predicate for cinsns
-     related) *)
-  (* then prove that if fn is in the list and link succeeds, it's
-     linked after link at the expected PC *)
+ 
+  (* Fetch from a collection of functions. *)
+  Definition fetch_ctx
+    (fns : list function) (pc : string * nat) : option insn :=
+    fold_left
+      (fun res fn =>
+         match res, fetch_fn fn pc with
+         | None, Some i => Some i
+         | _,_ => res
+         end)
+      fns None.
 
   (* Fetch from a whole program. *)
   Definition fetch
-    (pc : nat * nat) (prog : program) : option insn :=
+    (prog : program) (pc : nat * nat) : option insn :=
     let global_offset := fst pc in
     let fn_offset := snd pc in
     nth_error prog (global_offset + fn_offset).
@@ -622,8 +635,8 @@ Section Build.
     forall fn_offset : nat,
       (fn_offset < length (snd fn))%nat ->
       exists i1 i2,
-        fetch_fn (fst (fst fn), fn_offset) fn = Some i1
-        /\ fetch (global_offset, fn_offset) prog = Some i2
+        fetch_fn fn (fst (fst fn), fn_offset) = Some i1
+        /\ fetch prog (global_offset, fn_offset) = Some i2
         /\ insn_equiv syms i1 i2.
 
 End Build.
@@ -631,6 +644,7 @@ End Build.
 Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
 
 Section BuildProofs.
+  Context {regfile : map.map reg Z}.
   Import ErrorMonadNotations.
 
   (* Returns the overall size of the program containing the functions
@@ -857,10 +871,21 @@ Section BuildProofs.
   Qed.
 
   Lemma fetch_fn_name offset (fn : function) :
-    fetch_fn (fst (fst fn), offset) fn = nth_error (snd fn) offset.
+    fetch_fn fn (fst (fst fn), offset) = nth_error (snd fn) offset.
   Proof.
     cbv [fetch_fn get_label_offset]. cbn [fst snd].
     rewrite String.eqb_refl, Nat.add_0_l. reflexivity.
+  Qed.
+  
+  Lemma fetch_fn_sym fn label offset label_offset :
+    label <> fst (fst fn) ->
+    map.get (snd (fst fn)) label = Some label_offset ->
+    fetch_fn fn (label, offset) = nth_error (snd fn) (label_offset + offset).
+  Proof.
+    destruct fn as [[fn_name fn_syms] fn_insns].
+    cbv [fetch_fn get_label_offset]; cbn [fst snd]; intros.
+    destr (label =? fn_name)%string; [ congruence | ].
+    destruct_one_match; congruence.
   Qed.
 
   Lemma linked_at_cons i prog syms fn offset :
@@ -1000,11 +1025,144 @@ Section BuildProofs.
     subst. eexists; exists (length fns1); ssplit; [ | reflexivity | ].
     { rewrite nth_error_app2, Nat.sub_diag by lia. reflexivity. }
     { rewrite List.firstn_app_l by lia. eauto using link_correct'. }
-  Qed.    
+  Qed.
 
+  (* Convenience shorthand for defining function specs. *)
+  Definition returns
+    {destination : Type} {fetch:destination * nat -> option insn}
+    (start : destination) regs cstack lstack
+    (spec : regfile -> Prop) : Prop :=
+    forall ret_pc,
+      hd_error cstack = Some ret_pc ->
+      eventually
+        (run1 (fetch:=fetch))
+        (fun st =>
+           match st with
+           | otbn_busy pc regs' cstack' lstack' =>
+               pc = ret_pc
+               /\ spec regs'
+               /\ cstack' = tl cstack
+               /\ lstack' = lstack
+           | _ => False
+           end)
+        (otbn_busy (start, 0%nat) regs cstack lstack).
+  Definition exits_with_errors
+    {destination : Type} {fetch:destination * nat -> option insn}
+    (start : destination) regs cstack lstack
+    (spec : destination * nat -> list string -> Prop) : Prop :=
+    eventually
+      (run1 (fetch:=fetch))
+      (fun st =>
+         match st with
+         | otbn_error pc errs => spec pc errs
+         | _ => False
+         end)
+      (otbn_busy (start, 0%nat) regs cstack lstack).
+  Definition exits
+    {destination : Type} {fetch: destination * nat -> option insn}
+    (start : destination) regs cstack lstack
+    (spec : regfile -> Prop) : Prop :=
+    eventually
+      (run1 (fetch:=fetch))
+      (fun st =>
+         match st with
+         | otbn_done pc regs => spec regs
+         | _ => False
+         end)
+      (otbn_busy (start, 0%nat) regs cstack lstack).
+
+  (* TODO: have a case for error as well. Maybe just require multiple
+  proofs if you want to say something about the error case. *)
+
+  Fixpoint link_call_stack
+    (syms : symbols) (cstack : list (string * nat))
+    (post : list (nat * nat) -> Prop) : Prop :=
+    match cstack with
+    | [] => post []
+    | (name, local_offset) :: cstack =>
+        exists global_offset,
+        map.get syms name = Some global_offset
+        /\ link_call_stack syms cstack
+             (fun cstack => post ((global_offset,local_offset) :: cstack))
+    end.
+
+  Fixpoint link_loop_stack
+    (syms : symbols) (lstack : list (string * nat * nat))
+    (post : list (nat * nat * nat) -> Prop) : Prop :=
+    match lstack with
+    | [] => post []
+    | (name, local_offset, iters) :: lstack =>
+        exists global_offset,
+        map.get syms name = Some global_offset
+        /\ link_loop_stack syms lstack
+             (fun lstack => post ((global_offset,local_offset, iters) :: lstack))
+    end.
+
+  Definition link_state
+    (syms : symbols) (st : otbn_state (destination:=string))
+    (spec : otbn_state (destination:=nat) -> Prop)
+    : Prop :=
+    match st with
+    | otbn_busy pc regs cstack lstack =>
+        exists offset,
+        map.get syms (fst pc) = Some offset
+        /\ link_call_stack syms cstack
+             (fun cstack =>
+                link_loop_stack syms lstack
+                  (fun lstack =>
+                     spec (otbn_busy (offset, snd pc) regs cstack lstack)))
+    | otbn_done pc regs =>
+        exists offset,
+        map.get syms (fst pc) = Some offset
+        /\ spec (otbn_done (offset, snd pc) regs)
+    | otbn_error pc errs =>
+        exists offset,
+        map.get syms (fst pc) = Some offset
+        /\ spec (otbn_error (offset, snd pc) errs)
+    end.
+
+  Definition link_spec
+    (syms : symbols)
+    (spec1 : otbn_state (destination:=string) -> Prop)
+    (spec2 : otbn_state (destination:=nat) -> Prop) : Prop :=
+    forall st, spec1 st -> link_state syms st spec2.
+
+  (* Theorem that connects run1 with a ctx to run1 with a program *)
+  Lemma link_run1 :
+    forall ctx fns prog syms start_fn start_name start_pc pre_ctx post_ctx,
+      (* if all functions from the context are in the input list `fns`... *)
+      incl ctx fns ->
+      (* ...and `prog` is the result of a successful `link fns`... *)
+      link fns = Ok prog ->
+      (* ..and `syms` is the symbol table for `fns`... *)
+      link_symbols fns = Ok syms ->
+      (* ...and the starting function is linked at `start_pc` ... *)
+      linked_at prog syms start_fn start_pc ->
+      (* ...and `start_name is the name of the starting function... *)
+      start_name = fst (fst start_fn) ->
+      (* ...and evaluating the context satisfies the spec for certain states... *)
+      (forall st,
+          pre_ctx st ->
+          eventually (run1 (fetch:=fetch_ctx ctx)) post_ctx st) ->
+      (* ...then for all linked-program pre- and post-conditions... *)
+      (forall pre_prog post_prog,
+          (* ...if the preconditions are related... *)
+          link_spec syms pre_ctx pre_prog ->
+          (* ...and the preconditions are related... *)
+          link_spec syms post_ctx post_prog ->
+          (* ...then for all states satisfying the precondition... *)
+          forall st,
+            pre_prog st ->
+            (* ...the program satisfies the spec. *)
+            eventually (run1 (fetch:=fetch prog)) post_prog st).
+  Proof.
+    (* TODO *)
+  Admitted.
 End BuildProofs.
 
 Module Test.
+  Context {regfile : map.map reg Z}
+    {regfile_ok : map.ok regfile}.
   (* Test program 0 : a function that adds two registers.
 
      start:
@@ -1022,111 +1180,102 @@ Module Test.
       map.empty,
       [(Add x5 x2 x3 : insn);
        (Ret : insn)]).
-  Definition test_program0 : list function :=
-    [ ("start",
-        map.empty,
-        [ (Addi x2 x0 2 : insn);
-          (Addi x3 x0 3 : insn);
-          (Jal x1 "add" : insn);
-          (Ecall : insn)]);
-      add_fn ]%string.
+  Definition start_fn : function :=
+    ("start",
+      map.empty,
+      [ (Addi x2 x0 2 : insn);
+        (Addi x3 x0 3 : insn);
+        (Jal x1 "add" : insn);
+        (Ecall : insn)])%string.
 
   (* Test program 1 : build multiplication out of addition
 
      mul:
        addi   x4, x0, x0
+       beq    x2, x0, _mul_end
        loop   x2, 2
          jal    x1, add
          addi   x4, x5, 0
+       _mul_end:
        ret
 
      add:
        add  x5, x2, x3
        ret
-  *)
-  Definition test_program1 : list function :=
-    [ ("mul",
-        map.empty,
-        [ (Addi x4 x0 0 : insn);
-          (Loop x2 : insn);
-          (Jal x1 "add" : insn);
-          (Addi x4 x5 0 : insn);
-          (LoopEnd : insn);
-          (Ret : insn)]);
-      add_fn ]%string.
+   *)
+  Definition mul_fn : function :=
+    Eval cbn [List.app length] in (
+        let syms := map.empty in
+        let body : list insn :=
+          [ (Addi x4 x0 0 : insn);
+            (Beq x2 x0 "_mul_end" : insn);
+            (Loop x2 : insn);
+            (Jal x1 "add" : insn);
+            (Addi x4 x5 0 : insn);
+            (LoopEnd : insn)] in
+        let syms := map.put syms "_mul_end" (length body) in
+        let body := (body ++  [(Ret : insn)])%list in
+        ("mul", syms, body))%string.
 
-  Compute (link test_program0).
-  Compute (link test_program1).
+  Compute (link [start_fn; add_fn]).
+  Compute (link [mul_fn; add_fn]).
 
-  Ltac derive_blockmap program :=
-    let val := eval vm_compute in (build program) in
+  Ltac link_program fns :=
+    let val := eval vm_compute in (link fns) in
     lazymatch val with
-    | Ok ?x => exact x
-    | Err ?e => fail e
+    | inl ?x => exact x
+    | inr ?e => fail e
     end.
 
-  Definition blocks0 : blockmap := ltac:(derive_blockmap test_program0).
-  Definition blocks1 : blockmap := ltac:(derive_blockmap test_program1).
+  Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
 
   Ltac solve_map_step t :=
     first [ rewrite map.get_put_diff by t
-          | rewrite map.get_put_same by t
-          | reflexivity ].
+          | rewrite map.get_put_same by t                                          
+          | reflexivity
+          | eassumption ].
   Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
   Ltac simplify_side_condition_step :=
-    lazymatch goal with
+    match goal with
     | |- exists _, _ => eexists
     | |- _ /\ _ => split
     | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
+    | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
+    | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
+    | |- context [fetch_fn _ _] =>
+        erewrite fetch_fn_sym by
+        (cbn [fst snd]; first [ congruence | solve_map ])
     | |- map.get _ _ = Some _ => solve_map
+    | |- (_ < _) => lia
+    | |- (_ <= _) => lia                                   
     | |- (_ < _)%nat => lia
     | |- (_ <= _)%nat => lia
     | |- Some _ = Some _ => reflexivity
-    | _ => cbn [run strt1 strt read_gpr write_gpr ctrl1
-                  set_pc set_regs call_stack_pop call_stack_push
-                  length hd_error tl skipn fst snd
-                  repeat_advance_pc advance_pc Z.add Pos.add]
+    | _ => first [ progress
+                     cbn [run1 strt1 read_gpr write_gpr ctrl1
+                            read_gpr_from_state
+                            set_pc set_regs call_stack_pop call_stack_push
+                            length hd_error tl skipn nth_error fold_left
+                            fetch fetch_ctx Nat.add fst snd
+                            repeat_advance_pc advance_pc]
+                 | progress cbv [advance_pc]
+                 | eassumption ]
     end.
   Ltac simplify_side_condition := repeat simplify_side_condition_step.
 
-  (* TODO: need to figure out how to do this so it works right if offset goes past end of block *)
-  Definition get_block (blocks : map.rep (map:=blockmap)) (pc : Z * nat)
-    : option (block Z) :=
-    let start := fst pc in
-    let offset := snd pc in
-    match map.get blocks start with
-    | None => None
-    | Some (sinsns, final) =>
-        if (offset <=? length sinsns)%nat
-        then Some (skipn offset sinsns, final)
-        else (* TODO: what here? need to go to next block... *)
-    end.
-    map.get blocks (fst pc + (4 * Z.of_nat (snd pc))).
-  Definition get_block (blocks : map.rep (map:=objects)) (pc : string * nat)
-    : option (block string) :=
-    match map.get blocks fst pc with
-    | None => None
-    | Some b =>
-        
-    
-
-  (* problem: returning from a jump you need to break to the next block *)
-  (* offset doesn't work here *)
-  Print blocks0.
-  About run.
-  Lemma test_program0_correct (regfile : map.map reg Z) :
+  Lemma prog0_correct (regfile : map.map reg Z) :
     map.ok regfile ->
     eventually
-      (run (get_block:=map.get blocks0))
+      (run1 (fetch:=fetch prog0))
       (fun st =>
          match st with
          | otbn_done _ regs =>
              map.get regs (gpreg x5) = Some 5
          | _ => False
          end)
-      (start_state (0, 0%nat)).
+      (start_state (0%nat, 0%nat)).
   Proof.
-    cbv [blocks0 start_state]; intros.
+    cbv [prog0 start_state]; intros.
     eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
     intros; subst. eapply eventually_step.
@@ -1137,172 +1286,85 @@ Module Test.
     { simplify_side_condition. apply eq_refl. }
     intros; subst. eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
-    intros; subst. apply eventually_done.
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_done.
     solve_map.
   Qed.
 
-  (* Next: prove something about the add block individually, and use
-     that to prove something about the mul program individually *)
-
-  (* TODO: maybe need to represent functions with internal labels too?
-     for e.g. branches -- may need these blocks to be linked
-     sequentially, and it makes loop ends easier too *)
-  (* Could also just say "linked at" with size offset *)
-
-  Definition linked_at
-    (ctx : blockmap) (fn : function) (pc : Z) :=
-    exists program,
-      build program = Ok ctx
-      /\ In add_fn program
-      /\ (let syms := snd (get_symbols program) in
-          map.get syms (fst fn) = Some pc).
-
-
-  (* TODO: can I state the get condition without reimplementing link?
-     maybe the get is the same as if I had linked it from 0? *)
-  (*
-  Lemma linked_at_get ctx fn pc :
-    linked_at ctx fn pc ->
-    map.get ctx pc = *)
-  (* maybe I can talk at the level of objs and syms instead of blockmap? *)
-  (* in that case, need:
-     - a proof linking reasoning about objs/syms with reasoning about blockmap
-     - some way to talk about "running" objs -- technically run just works?
-
-    but what about advance_pc? how can I advance a string?
-    could do it with string * offset
-    could represent pc and addr differently?
-    but then how to do jumps? need extra indirection addr -> Z
-    this could work though, then the indirect is map.get syms
-    for blockmap it's id
-   *)
-  Print run_block.
-  Print objects.
-    
-
-  (* For proofs about the object file, parameterize over the overall program *)
-  Lemma add_fn_correct regfile :
-    map.ok regfile ->
-    forall (ctx : blockmap)
-           (regs : regfile) cstack lstack
-           start_pc a b,
-      linked_at ctx add_fn start_pc ->
+  Lemma add_correct :
+    forall regs cstack lstack a b,
       map.get regs (gpreg x2) = Some a ->
       map.get regs (gpreg x3) = Some b ->
-      eventually
-        (run_block (advance_pc:=advance_pc) ctx)
-        (fun st =>
-           match st with
-           | otbn_done _ regs' =>
-               map.get regs (gpreg x5) = Some (cast32 (a + b))
-               /\ map.only_differ regs (PropSet.of_list [gpreg x5]) regs'
-           | _ => False
-           end)
-        (otbn_busy start_pc regs cstack lstack).
+      returns
+        (fetch:=fetch_ctx [add_fn])
+        "add"%string regs cstack lstack
+        (fun regs' =>
+           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
   Proof.
-    (*
-    cbv [linked_at]; intros.
-    repeat lazymatch goal with
-           | H : exists _, _ |- _ => destruct H
-           | H : _ /\ _ |- _ => destruct H
-           end. *)
-    intros.
-    eapply eventually_step.
-    { simplify_side_condition.
-      Print run_b.
-
+    cbv [add_fn returns].
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. eapply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. eapply eq_refl. }
+    intros; subst. eapply eventually_done.
+    ssplit; reflexivity.
   Qed.
 
-
-  Check add_fn.
-  Print link.
-  Check Forall.
-  Check get_objects.
-  Print objects.
-  Compute (get_objects (label_loop_ends test_program1)).
-  Compute (get_symbols (label_loop_ends test_program1)).
-  Check (fun fn => get_objects (label_loop_ends [fn])).
-  Check label_loop_ends.
-  Print objects.
-  (* given start pc, then for all label, blocks list in objs:
-       blockmap[pc + length so far] = block converted to Z
-       the "converted to Z" is another prop saying the labels correspond to something in the blockmap?
-       maybe we need syms too to state "converted to Z"
-   *)
-  Definition cinsn_is_linked
-    (syms : map.rep (map:=symbols))
-    (syms : map.rep (map:=objects))
-    (i1 : cinsn (addr:=string))
-    (i2 : cinsn (addr:=Z)) : Prop :=
-    match i1, i2 with
-    | Jal r dst1, Jal r dst2 =>
-        map.get syms dst1 = dst2
-        /\ 
-    | _ => True
+  (* Debugging tactic, prints the next instruction to be fetched. *)
+  Ltac print_next_insn :=
+    lazymatch goal with
+    | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
+        let i := eval vm_compute in (fetch pc) in
+          idtac i
     end.
-  (* Ugh, this seems a little ugly. Can we do better? *)
-  Definition is_linked (blocks : blockmap) (fn : string * list insn) : Prop :=
-    let fn := label_loop_ends [fn] in
-    let objs := get_objects fn in
-    Forall
-      (fun label_insns =>
-         let label := fst label_insns in
-         let insns := snd label_insns in
-         map.get label = 
-      ) fn.
-    map.fold
-      (fun P label b =>
-         
 
-  
-  Definition add_obj : map.rep (map:=objects) := Eval vm_compute in get_objects [add_fn].
-
-  (*
-  Print objects.
-
-  (* add zero-offsets to all labels. *)
-  Fixpoint init_offsets_cinsn (i : cinsn (addr:=string)) : cinsn (addr:=string * Z) :=
-    match i with
-    | Ret => Ret
-    | Ecall => Ecall
-    | Jal r dst => Jal r (dst, 0)
-    | Beq r1 r2 dst => Beq r1 r2 (dst, 0)
-    | Bne r1 r2 dst => Bne r1 r2 (dst, 0)
-    | Loop r n => Loop r n
-    | Loopi imm n => Loopi imm n
-    end.
-  Fixpoint init_offsets_block (b : block string) : block (string * Z) :=
-    match snd b with
-    | None => (fst b, None)
-    | Some i => (fst b, Some (init_offsets_cinsn i))
-    end.
-  Print objects.
-  Print map.map.
-  Fixpoint init_offsets (objs : map.rep (map:=objects))
-    : map.rep (string * Z) (block (string * Z)) :=
-    map.fold
-      (fun 
-    *)
-
-  Check run_block.
-  Print add_fn.
-  Eval compute in get_objects [add_fn].
-  Print objects.
-  (* For proofs about the object file, parameterize over the overall blockmap *)
-  Lemma add_fn_correct regfile :
-    map.ok regfile ->
-    forall (ctx : blockmap) (regs : regfile) add_pc a b,
+  Check map.only_differ.
+  Lemma mul_correct :
+    forall regs cstack lstack a b,
       map.get regs (gpreg x2) = Some a ->
       map.get regs (gpreg x3) = Some b ->
-      map.get blockmap add_pc = 
-      eventually
-        (run_block (advance_pc:=advance_pc) ctx)
-        (fun st =>
-           match st with
-           | otbn_done _ regs' =>
-               map.get regs (gpreg x5) = Some 5
-               /\ map.only_differ regs (PropSet.of_list [gpreg x5]) regs'
-           | _ => False
-           end)
-        (start_state 0).
+      0 <= a ->
+      0 <= b ->
+      returns
+        (fetch:=fetch_ctx [mul_fn; add_fn])
+        "mul"%string regs cstack lstack
+        (fun regs' =>
+           map.get regs' (gpreg x4) = Some (cast32 (a * b))
+           /\ map.only_differ regs (PropSet.of_list [gpreg x4; gpreg x5]) regs').
+  Proof.
+    cbv [mul_fn returns].
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. eapply eq_refl. }
+    intros; subst.
+    (* we hit the beq; destruct cases before stepping *)
+    destr (a =? 0).
+    { (* case: a = 0 *)
+      eapply eventually_step.
+      { simplify_side_condition.
+        right. ssplit; [ lia .. | ]. apply eq_refl. }
+      intros; subst. eapply eventually_step.
+      { simplify_side_condition. apply eq_refl. }
+      intros; subst. eapply eventually_done.
+      ssplit; try reflexivity ; [ solve_map | ].
+      (* only_differ clause *)
+      intro r. destr (reg_eqb r (gpreg x4)); [ left | right; solve_map ].
+      apply PropSet.in_of_list. cbn [In]. tauto. }
+    { (* case: a <> 0 *)
+      eapply eventually_step.
+      { simplify_side_condition.
+        left. ssplit; [ lia .. | ]. apply eq_refl. }
+      intros; subst.
+      print_next_insn.
+      intros; subst. eapply eventually_step.
+      { simplify_side_condition.
+        cbv [loop_start].
+        (* TODO: figure out how we handle loops. Probably need
+           induction on a here or an invariant. *)
+        apply eq_refl. }
+      
+  Qed.
+
+  (* Next: try to apply link_run1, then try to prove it if form is OK *)
+
 End Test.
