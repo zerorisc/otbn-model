@@ -237,7 +237,7 @@ Section Exec.
   | otbn_busy (pc : destination * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
   | otbn_error (pc : destination * nat) (errs : list string)
   | otbn_done (pc : destination * nat) (regs : regfile)
-  .  
+  .
   Definition start_state (start_pc : destination * nat) : otbn_state :=
     otbn_busy start_pc map.empty [] [].
   Definition get_pc (st : otbn_state) : destination * nat :=
@@ -466,12 +466,9 @@ Section Build.
   Definition symbols : map.map string nat := SortedListString.map _.
   Import ErrorMonadNotations.
 
-  (* Objects are conceptually just "chunks of instructions that should
-     always be linked sequentially." *)
-  Definition object : Type := list (insn (destination:=string)).
   (* Functions consist of a name, internal labels (map of string ->
      offset within the function), and a list of instructions. *)
-  Definition function : Type := string * symbols * object.
+  Definition function : Type := string * symbols * list (insn (destination:=string)).
   (* Programs are lists of instructions that link to each other with
      offsets within the global program. This represents code
      post-linking. *)
@@ -1188,14 +1185,17 @@ Module Test.
         (Jal x1 "add" : insn);
         (Ecall : insn)])%string.
 
+  Compute (link [start_fn; add_fn]).
+
+  (* TODO: fix this, it is not adding the right thing *)
   (* Test program 1 : build multiplication out of addition
 
      mul:
-       addi   x4, x0, x0
-       beq    x2, x0, _mul_end
-       loop   x2, 2
+       addi   x2, x0, x0
+       beq    x4, x0, _mul_end
+       loop   x4, 2
          jal    x1, add
-         addi   x4, x5, 0
+         addi   x2, x5, 0
        _mul_end:
        ret
 
@@ -1207,17 +1207,16 @@ Module Test.
     Eval cbn [List.app length] in (
         let syms := map.empty in
         let body : list insn :=
-          [ (Addi x4 x0 0 : insn);
-            (Beq x2 x0 "_mul_end" : insn);
-            (Loop x2 : insn);
+          [ (Addi x2 x0 0 : insn);
+            (Beq x4 x0 "_mul_end" : insn);
+            (Loop x4 : insn);
             (Jal x1 "add" : insn);
-            (Addi x4 x5 0 : insn);
+            (Addi x2 x5 0 : insn);
             (LoopEnd : insn)] in
         let syms := map.put syms "_mul_end" (length body) in
         let body := (body ++  [(Ret : insn)])%list in
         ("mul", syms, body))%string.
 
-  Compute (link [start_fn; add_fn]).
   Compute (link [mul_fn; add_fn]).
 
   Ltac link_program fns :=
@@ -1263,8 +1262,7 @@ Module Test.
     end.
   Ltac simplify_side_condition := repeat simplify_side_condition_step.
 
-  Lemma prog0_correct (regfile : map.map reg Z) :
-    map.ok regfile ->
+  Lemma prog0_correct :
     eventually
       (run1 (fetch:=fetch prog0))
       (fun st =>
@@ -1319,49 +1317,155 @@ Module Test.
           idtac i
     end.
 
-  Check map.only_differ.
+  Lemma read_gpr_weaken regs r (P Q : Z -> Prop) :
+    read_gpr regs r P ->
+    (forall v, P v -> Q v) ->
+    read_gpr regs r Q.
+  Proof.
+    cbv [read_gpr]; intros.
+    destruct_one_match; destruct_products; eauto.
+  Qed.
+
+  Lemma eventually_invariant {destination : Type} {fetch : destination * nat -> option insn} :
+    forall (invariant : nat -> otbn_state -> Prop) iters post,
+      (forall i st,
+          (0 <= i < iters)%nat ->
+          invariant (S i) st ->
+          eventually (run1 (fetch:=fetch)) (fun st => invariant i st \/ post st) st) ->
+      (forall st, invariant 0%nat st -> eventually (run1 (fetch:=fetch)) post st) ->
+      forall st,
+        invariant iters st ->
+        eventually (run1 (fetch:=fetch)) post st.
+  Proof.
+    induction iters; intros; [ solve [eauto] | ].
+    apply (eventually_trans _ (fun st => invariant iters st \/ post st));
+      repeat match goal with
+        | H : _ \/ _ |- _ => destruct H
+        | H : context [invariant] |- _ => apply H; auto; lia
+        | _ => eapply IHiters; eauto; [ ]
+        | _ => progress intros
+        | _ => eauto using eventually_done
+        end.
+  Qed.
+
+  Definition get_lstack {destination : Type} (st : otbn_state)
+    : option (list (destination * nat * nat)) :=
+    match st with
+    | otbn_busy _ _ _ lstack => Some lstack
+    | _ => None
+    end.
+
+  (* TODO: in invariant-implies-post, need to actually be at loop end PC *)
+  (* This is maybe a good enough reason to introduce insn counts back! *)
+  Lemma loop_invariant {destination : Type} {fetch : destination * nat -> option insn} :
+    forall (invariant : nat -> otbn_state -> Prop)
+           iters pc r v (regs : regfile) cstack lstack post,
+      fetch pc = Some (Control (Loop r)) ->
+      read_gpr regs r (eq v) ->
+      Z.of_nat iters = v ->
+      loop_start (otbn_busy pc regs cstack lstack) iters (invariant iters) ->
+      (forall i st,
+          (0 <= i < iters)%nat ->
+          invariant (S i) st ->
+          get_pc st = advance_pc pc ->
+          get_lstack st = Some ((advance_pc pc, S i) :: lstack) ->
+          eventually (run1 (fetch:=fetch))
+            (fun st => (invariant i st
+                        /\ get_pc st = advance_pc pc
+                        /\ get_lstack st = Some ((advance_pc pc, i) :: lstack))
+                       \/ post st)
+            st) ->
+      (forall st,
+          invariant 0%nat st ->
+          eventually (run1 (fetch:=fetch)) post st) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    cbv [loop_start]; intros.
+    repeat match goal with H : _ /\ _ |- _ => destruct H end.
+    eapply eventually_step.
+    { simplify_side_condition.
+      eapply read_gpr_weaken; [ eassumption | ].
+      intros; cbv [loop_start]; ssplit; [ lia .. | ].
+      subst. eapply eq_refl. }
+    intros; subst.
+    destruct iters; [ lia | ].
+    eapply eventually_invariant
+      with (iters := S iters)
+           (invariant := fun i st =>
+                           invariant i st
+                           /\ get_pc st = advance_pc pc
+                           /\ get_lstack st = Some ((advance_pc pc, i) :: lstack)).
+    { intros. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      match goal with H : context [eventually] |- _ => apply H; eauto; lia end. }
+    { intros. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      eauto. }
+    { cbn [get_pc get_lstack]; rewrite ?Nat2Z.id. eauto. }
+  Qed.
+ 
   Lemma mul_correct :
     forall regs cstack lstack a b,
-      map.get regs (gpreg x2) = Some a ->
-      map.get regs (gpreg x3) = Some b ->
+      map.get regs (gpreg x3) = Some a ->
+      map.get regs (gpreg x4) = Some b ->
       0 <= a ->
       0 <= b ->
+      (length lstack < 8)%nat ->
       returns
         (fetch:=fetch_ctx [mul_fn; add_fn])
         "mul"%string regs cstack lstack
         (fun regs' =>
-           map.get regs' (gpreg x4) = Some (cast32 (a * b))
-           /\ map.only_differ regs (PropSet.of_list [gpreg x4; gpreg x5]) regs').
+           map.get regs' (gpreg x2) = Some (cast32 (a * b))
+           /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs').
   Proof.
     cbv [mul_fn returns].
     intros; subst. eapply eventually_step.
     { simplify_side_condition. eapply eq_refl. }
     intros; subst.
     (* we hit the beq; destruct cases before stepping *)
-    destr (a =? 0).
-    { (* case: a = 0 *)
+    destr (b =? 0).
+    { (* case: b = 0, exit early *)
       eapply eventually_step.
       { simplify_side_condition.
         right. ssplit; [ lia .. | ]. apply eq_refl. }
       intros; subst. eapply eventually_step.
       { simplify_side_condition. apply eq_refl. }
       intros; subst. eapply eventually_done.
-      ssplit; try reflexivity ; [ solve_map | ].
+      ssplit; try reflexivity ; [ solve_map; repeat (f_equal; try lia) | ].
       (* only_differ clause *)
-      intro r. destr (reg_eqb r (gpreg x4)); [ left | right; solve_map ].
+      intro r. destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
       apply PropSet.in_of_list. cbn [In]. tauto. }
-    { (* case: a <> 0 *)
-      eapply eventually_step.
-      { simplify_side_condition.
-        left. ssplit; [ lia .. | ]. apply eq_refl. }
-      intros; subst.
-      print_next_insn.
-      intros; subst. eapply eventually_step.
-      { simplify_side_condition.
-        cbv [loop_start].
-        (* TODO: figure out how we handle loops. Probably need
-           induction on a here or an invariant. *)
-        apply eq_refl. }
+    (* case: b <> 0, proceed *)
+    eapply eventually_step.
+    { simplify_side_condition.
+      left. ssplit; [ lia .. | ]. apply eq_refl. }
+    intros; subst.
+    (* we hit the loop; use the loop invariant lemma *)
+    eapply loop_invariant with
+      (invariant :=
+         fun i st =>
+           match st with
+           | otbn_busy _ regs' cstack' _ =>
+               map.get regs' (gpreg x2) = Some (cast32 (a * (b - Z.of_nat i)))
+               /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs'
+           | _ => False
+           end).
+    { reflexivity. }
+    { simplify_side_condition; reflexivity. }
+    { apply Z2Nat.id; lia. }
+    { cbn [loop_start]; ssplit; try lia;
+        [ solve_map; repeat (f_equal; try lia) | ].
+      cbv [map.only_differ]. intro r.
+      destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
+      cbn [PropSet.elem_of PropSet.of_list In]. tauto. }
+    { (* invariant step; proceed through loop and prove invariant still holds *)
+      intros.
+      admit.
+    }
+    (* invariant implies postcondition (i.e. post-loop code) *)
+    intro st. destruct st; [ | contradiction .. ].
+    rewrite Z.sub_0_r.
+    intros; repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+    print_next_insn.
+    
       
   Qed.
 
