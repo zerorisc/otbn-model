@@ -1160,168 +1160,57 @@ Section BuildProofs.
   Admitted.
 End BuildProofs.
 
-Module Test.
+Module map.
+  Section __.
+    Context {K V : Type} {map : map.map K V} {map_ok : map.ok map}.
+    Context {key_eqb : K -> K -> bool}
+      {key_eqb_spec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}.
+
+    Lemma only_differ_trans (m1 m2 m3 : map.rep (map:=map)) (s1 s2 s3 : PropSet.set K) :
+      map.only_differ m1 s1 m2 ->
+      map.only_differ m2 s2 m3 ->
+      PropSet.subset (PropSet.union s1 s2) s3 ->
+      map.only_differ m1 s3 m3.
+    Proof using Type.
+      intros. intro k.
+      repeat lazymatch goal with
+             | H : _ /\ _ |- _ => destruct H
+             | H : _ \/ _ |- _ => destruct H
+             | H : map.only_differ _ _ _ |- _ => specialize (H k)
+             | H : PropSet.elem_of _ ?s,
+                 H' : PropSet.subset (PropSet.union _ ?s) ?s'
+               |- PropSet.elem_of _ ?s' \/ _ =>
+                 left; apply H'; apply PropSet.in_union_r; assumption
+             | H : PropSet.elem_of _ ?s,
+                 H' : PropSet.subset (PropSet.union ?s _) ?s'
+               |- PropSet.elem_of _ ?s' \/ _ =>
+                 left; apply H'; apply PropSet.in_union_l; assumption
+             | H : ?a = ?b, H' : ?b = ?c |- _ \/ ?a = ?c => right; congruence
+             end.
+    Qed.
+
+    Lemma only_differ_put (m : map.rep (map:=map)) k v s :
+      PropSet.subset (PropSet.singleton_set k) s ->
+      map.only_differ m s (map.put m k v).
+    Proof using map_ok key_eqb_spec.
+      intros. cbv [map.only_differ PropSet.elem_of PropSet.subset PropSet.singleton_set] in *.
+      intro k'. destr (key_eqb k k'); [ left; solve [auto] | right ].
+      rewrite map.get_put_diff; congruence.
+    Qed.
+  End __.
+End map.
+
+Ltac solve_map_step t :=
+  first [ rewrite map.get_put_diff by t
+        | rewrite map.get_put_same by t                                          
+        | reflexivity
+        | eassumption ].
+Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
+
+(* Helper lemmas for proving things about programs. *)
+Section Helpers.
   Context {regfile : map.map reg Z}
     {regfile_ok : map.ok regfile}.
-  (* Test program 0 : a function that adds two registers.
-
-     start:
-       addi x2, x0, 2
-       addi x3, x0, 3
-       jal  x1, add
-       ecall
-
-     add:
-       add  x5, x2, x3
-       ret
-   *)
-  Definition add_fn : function :=
-    ("add"%string,
-      map.empty,
-      [(Add x5 x2 x3 : insn);
-       (Ret : insn)]).
-  Definition start_fn : function :=
-    ("start",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Jal x1 "add" : insn);
-        (Ecall : insn)])%string.
-
-  Compute (link [start_fn; add_fn]).
-
-  (* TODO: fix this, it is not adding the right thing *)
-  (* Test program 1 : build multiplication out of addition
-
-     mul:
-       addi   x2, x0, x0
-       beq    x4, x0, _mul_end
-       loop   x4, 2
-         jal    x1, add
-         addi   x2, x5, 0
-       _mul_end:
-       ret
-
-     add:
-       add  x5, x2, x3
-       ret
-   *)
-  Definition mul_fn : function :=
-    Eval cbn [List.app length] in (
-        let syms := map.empty in
-        let body : list insn :=
-          [ (Addi x2 x0 0 : insn);
-            (Beq x4 x0 "_mul_end" : insn);
-            (Loop x4 : insn);
-            (Jal x1 "add" : insn);
-            (Addi x2 x5 0 : insn);
-            (LoopEnd : insn)] in
-        let syms := map.put syms "_mul_end" (length body) in
-        let body := (body ++  [(Ret : insn)])%list in
-        ("mul", syms, body))%string.
-
-  Compute (link [mul_fn; add_fn]).
-
-  Ltac link_program fns :=
-    let val := eval vm_compute in (link fns) in
-    lazymatch val with
-    | inl ?x => exact x
-    | inr ?e => fail e
-    end.
-
-  Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
-
-  Ltac solve_map_step t :=
-    first [ rewrite map.get_put_diff by t
-          | rewrite map.get_put_same by t                                          
-          | reflexivity
-          | eassumption ].
-  Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
-  
-  Ltac simplify_side_condition_step :=
-    match goal with
-    | |- exists _, _ => eexists
-    | |- _ /\ _ => split
-    | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
-    | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
-    | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
-    | |- context [fetch_fn _ _] =>
-        erewrite fetch_fn_sym by
-        (cbn [fst snd]; first [ congruence | solve_map ])
-    | |- map.get _ _ = Some _ => solve_map
-    | |- context [advance_pc (?dst, ?off)] =>
-        change (advance_pc (dst, off)) with (dst, S off)
-    | |- (_ < _) => lia
-    | |- (_ <= _) => lia                                   
-    | |- (_ < _)%nat => lia
-    | |- (_ <= _)%nat => lia
-    | |- Some _ = Some _ => reflexivity
-    | _ => first [ progress
-                     cbn [run1 strt1 read_gpr write_gpr ctrl1
-                            read_gpr_from_state
-                            set_pc set_regs call_stack_pop call_stack_push
-                            length hd_error tl skipn nth_error fold_left
-                            fetch fetch_ctx Nat.add fst snd
-                            repeat_advance_pc advance_pc]
-                 | eassumption ]
-    end.
-  Ltac simplify_side_condition := repeat simplify_side_condition_step.
-
-  Lemma prog0_correct :
-    eventually
-      (run1 (fetch:=fetch prog0))
-      (fun st =>
-         match st with
-         | otbn_done _ regs =>
-             map.get regs (gpreg x5) = Some 5
-         | _ => False
-         end)
-      (start_state (0%nat, 0%nat)).
-  Proof.
-    cbv [prog0 start_state]; intros.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_done.
-    solve_map.
-  Qed.
-
-  Lemma add_correct :
-    forall regs cstack lstack a b,
-      map.get regs (gpreg x2) = Some a ->
-      map.get regs (gpreg x3) = Some b ->
-      returns
-        (fetch:=fetch_ctx [add_fn])
-        "add"%string regs cstack lstack
-        (fun regs' =>
-           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
-  Proof.
-    cbv [add_fn returns].
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition; cbv [advance_pc];
-      simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_done.
-    ssplit; reflexivity.
-  Qed.
-
-  (* Debugging tactic, prints the next instruction to be fetched. *)
-  Ltac print_next_insn :=
-    lazymatch goal with
-    | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
-        let i := eval vm_compute in (fetch pc) in
-          idtac i
-    end.
 
   Lemma read_gpr_weaken regs r (P Q : Z -> Prop) :
     read_gpr regs r P ->
@@ -1448,13 +1337,14 @@ Module Test.
       eventually (run1 (fetch:=fetch2)) post (otbn_busy pc regs cstack lstack).
   Proof.
     cbv [returns]; intros.
+    cbn [hd_error] in *.
     eapply eventually_step.
-    { simplify_side_condition.
-      match goal with H : _ |- _ => apply H end.
-      reflexivity. }
+    { cbv [run1]; intros. eexists; split; [ eassumption | ].
+      cbv iota. cbn [ctrl1 call_stack_push set_pc].
+      ssplit; [ lia .. | ]. apply eq_refl. }
     intros; subst.
     eapply eventually_trans;
-      [ eapply fetch_weaken; eassumption | intro st; destruct st; try contradiction ].
+      [ eapply fetch_weaken; eauto | intro st; destruct st; try contradiction ].
     intros; repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end. subst.
     cbn [tl]. eauto.
   Qed.
@@ -1527,7 +1417,8 @@ Module Test.
     repeat match goal with H : _ /\ _ |- _ => destruct H end.
     destruct iters; [ lia | ].      
     eapply eventually_step.
-    { simplify_side_condition.
+    { cbn [run1]. eexists; ssplit; [ eassumption | ].
+      cbv iota. cbn [ctrl1 read_gpr_from_state].
       eapply read_gpr_weaken; [ eassumption | ].
       intros; cbv [loop_start]. ssplit; [ lia .. | ].
       subst. rewrite Nat2Z.id.
@@ -1564,6 +1455,247 @@ Module Test.
       eauto. }
   Qed.
 
+  Lemma eventually_beq {destination : Type} {fetch : destination * nat -> option insn}:
+    forall pc dst r1 r2 regs cstack lstack v1 v2 post,
+      fetch pc = Some (Control (Beq r1 r2 dst)) -> 
+      read_gpr regs r1 (eq v1) ->
+      read_gpr regs r2 (eq v2) ->
+      (* branch case *)
+      (v1 = v2 ->
+       eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
+      (* no-branch case *)
+      (v1 <> v2 ->
+       eventually (run1 (fetch:=fetch)) post (otbn_busy (advance_pc pc) regs cstack lstack)) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    intros.
+    destr (v1 =? v2).
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+        repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
+        cbv [next_pc]. right; ssplit; [ reflexivity | ]. apply eq_refl. }
+      intros; subst. eauto. }
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+        repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
+        cbv [next_pc]. left; ssplit; [ congruence | ]. apply eq_refl. }
+      intros; subst. eauto. }
+  Qed.
+
+  Lemma eventually_bne {destination : Type} {fetch : destination * nat -> option insn}:
+    forall pc dst r1 r2 regs cstack lstack v1 v2 post,
+      fetch pc = Some (Control (Bne r1 r2 dst)) -> 
+      read_gpr regs r1 (eq v1) ->
+      read_gpr regs r2 (eq v2) ->
+      (* branch case *)
+      (v1 <> v2 ->
+       eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
+      (* no-branch case *)
+      (v1 = v2 ->
+       eventually (run1 (fetch:=fetch)) post (otbn_busy (advance_pc pc) regs cstack lstack)) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    intros.
+    destr (v1 =? v2).
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+        repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
+        cbv [next_pc]. left; ssplit; [ reflexivity | ]. apply eq_refl. }
+      intros; subst. eauto. }
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+        repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
+        cbv [next_pc]. right; ssplit; [ congruence | ]. apply eq_refl. }
+      intros; subst. eauto. }
+  Qed.
+
+  Lemma eventually_loop_end {destination : Type} {fetch : destination * nat -> option insn}:
+    forall pc regs cstack lstack loop_start iters post,
+      fetch pc = Some (Control LoopEnd) ->
+      (match iters with
+       | O => eventually (run1 (fetch:=fetch)) post
+                (otbn_busy (advance_pc pc) regs cstack lstack)
+       | S iters => eventually (run1 (fetch:=fetch)) post
+                      (otbn_busy loop_start regs cstack ((loop_start, iters) :: lstack))
+       end) ->
+      eventually (run1 (fetch:=fetch)) post
+        (otbn_busy pc regs cstack ((loop_start, iters) :: lstack)).
+  Proof.
+    intros. destruct iters.
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbn [loop_end hd_error tl ctrl1].
+        do 2 eexists; ssplit; [ reflexivity .. | ].
+        cbv iota. apply eq_refl. }
+      intros; subst. eassumption. }
+    { eapply eventually_step.
+      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbn [loop_end hd_error tl ctrl1].
+        do 2 eexists; ssplit; [ reflexivity .. | ].
+        cbv iota. apply eq_refl. }
+      intros; subst. eassumption. }
+  Qed.
+
+End Helpers.
+
+Ltac simplify_side_condition_step :=
+  match goal with
+  | |- exists _, _ => eexists
+  | |- _ /\ _ => split
+  | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
+  | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
+  | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
+  | |- context [fetch_fn _ _] =>
+      erewrite fetch_fn_sym by
+      (cbn [fst snd]; first [ congruence | solve_map ])
+  | |- map.get _ _ = Some _ => solve_map
+  | |- context [advance_pc (?dst, ?off)] =>
+      change (advance_pc (dst, off)) with (dst, S off)
+  | |- (_ < _) => lia
+  | |- (_ <= _) => lia                                   
+  | |- (_ < _)%nat => lia
+  | |- (_ <= _)%nat => lia
+  | |- Some _ = Some _ => reflexivity
+  | _ => first [ progress
+                   cbn [run1 strt1 read_gpr write_gpr ctrl1
+                          read_gpr_from_state
+                          set_pc set_regs call_stack_pop call_stack_push
+                          length hd_error tl skipn nth_error fold_left
+                          fetch fetch_ctx Nat.add fst snd
+                          repeat_advance_pc advance_pc]
+               | eassumption ]
+  end.
+Ltac simplify_side_condition := repeat simplify_side_condition_step.
+
+Module Test.
+  Context {regfile : map.map reg Z}
+    {regfile_ok : map.ok regfile}.
+  (* Test program 0 : a function that adds two registers.
+
+     start:
+       addi x2, x0, 2
+       addi x3, x0, 3
+       jal  x1, add
+       ecall
+
+     add:
+       add  x5, x2, x3
+       ret
+   *)
+  Definition add_fn : function :=
+    ("add"%string,
+      map.empty,
+      [(Add x5 x2 x3 : insn);
+       (Ret : insn)]).
+  Definition start_fn : function :=
+    ("start",
+      map.empty,
+      [ (Addi x2 x0 2 : insn);
+        (Addi x3 x0 3 : insn);
+        (Jal x1 "add" : insn);
+        (Ecall : insn)])%string.
+
+  Compute (link [start_fn; add_fn]).
+
+  (* TODO: fix this, it is not adding the right thing *)
+  (* Test program 1 : build multiplication out of addition
+
+     mul:
+       addi   x2, x0, x0
+       beq    x4, x0, _mul_end
+       loop   x4, 2
+         jal    x1, add
+         addi   x2, x5, 0
+       _mul_end:
+       ret
+
+     add:
+       add  x5, x2, x3
+       ret
+   *)
+  Definition mul_fn : function :=
+    Eval cbn [List.app length] in (
+        let syms := map.empty in
+        let body : list insn :=
+          [ (Addi x2 x0 0 : insn);
+            (Beq x4 x0 "_mul_end" : insn);
+            (Loop x4 : insn);
+            (Jal x1 "add" : insn);
+            (Addi x2 x5 0 : insn);
+            (LoopEnd : insn)] in
+        let syms := map.put syms "_mul_end" (length body) in
+        let body := (body ++  [(Ret : insn)])%list in
+        ("mul", syms, body))%string.
+
+  Compute (link [mul_fn; add_fn]).
+
+  Ltac link_program fns :=
+    let val := eval vm_compute in (link fns) in
+    lazymatch val with
+    | inl ?x => exact x
+    | inr ?e => fail e
+    end.
+
+  Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
+
+  Lemma prog0_correct :
+    eventually
+      (run1 (fetch:=fetch prog0))
+      (fun st =>
+         match st with
+         | otbn_done _ regs =>
+             map.get regs (gpreg x5) = Some 5
+         | _ => False
+         end)
+      (start_state (0%nat, 0%nat)).
+  Proof.
+    cbv [prog0 start_state]; intros.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_done.
+    solve_map.
+  Qed.
+
+  Lemma add_correct :
+    forall regs cstack lstack a b,
+      map.get regs (gpreg x2) = Some a ->
+      map.get regs (gpreg x3) = Some b ->
+      returns
+        (fetch:=fetch_ctx [add_fn])
+        "add"%string regs cstack lstack
+        (fun regs' =>
+           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
+  Proof.
+    cbv [add_fn returns].
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. eapply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition; cbv [advance_pc];
+      simplify_side_condition. eapply eq_refl. }
+    intros; subst. eapply eventually_done.
+    ssplit; reflexivity.
+  Qed.
+
+  Ltac get_next_insn :=
+    lazymatch goal with
+    | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
+        let i := eval vm_compute in (fetch pc) in
+          i
+    end.
+
+  (* Debugging tactic, prints the next instruction to be fetched. *)
+  Ltac print_next_insn :=
+    let i := ltac:(get_next_insn) in
+    idtac i.
+
   (* Finds the PC that matches the end of the loop. *)
   Ltac find_loop_end' fetch pc :=
     let i := eval vm_compute in (fetch pc) in
@@ -1593,38 +1725,17 @@ Module Test.
   Lemma cast32_mod x : cast32 x = x mod 2^32.
   Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
 
-  Lemma only_differ_trans {K V} {map : map.map K V} {map_ok : map.ok map}
-    (m1 m2 m3 : map.rep (map:=map)) (s1 s2 s3 : PropSet.set K) :
-    map.only_differ m1 s1 m2 ->
-    map.only_differ m2 s2 m3 ->
-    PropSet.subset (PropSet.union s1 s2) s3 ->
-    map.only_differ m1 s3 m3.
-  Proof.
-    cbv [map.only_differ PropSet.subset PropSet.elem_of]; intros.
-    repeat lazymatch goal with
-           | H : _ /\ _ |- _ => destruct H
-           | H : _ \/ _ |- _ => destruct H
-           | H : forall x : K, _ |- _ => specialize (H ltac:(eassumption))
-           | H : ?s ?x, H' : PropSet.union _ ?s ?x -> ?P |- ?P \/ _ =>
-               left; apply H'; apply PropSet.in_union_r; assumption
-           | H : ?s ?x, H' : PropSet.union ?s _ ?x -> ?P |- ?P \/ _ =>
-               left; apply H'; apply PropSet.in_union_l; assumption
-           | H : ?a = ?b, H' : ?b = ?c |- _ \/ ?a = ?c => right; congruence
-           end.
-  Qed.
+  Ltac straightline_step :=
+    let i := get_next_insn in
+    lazymatch i with
+    | Some (Straightline _) =>
+        intros; subst; eapply eventually_step;
+        [ simplify_side_condition; [ .. | try eapply eq_refl]
+        | intros; subst ]
+    | Some ?i => fail "next instruction is not straightline:" i
+    | None => fail "pc is invalid?"
+    end.
 
-  Lemma only_differ_put
-    {K V} {map : map.map K V} {map_ok : map.ok map}
-    {key_eqb : K -> K -> bool}
-    {key_eqb_spec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}
-    (m : map.rep (map:=map)) k v :
-    map.only_differ m (PropSet.singleton_set k) (map.put m k v).
-  Proof.
-    intros. cbv [map.only_differ PropSet.elem_of PropSet.singleton_set] in *.
-    intro k'. destr (key_eqb k k'); [ left; reflexivity | right ].
-    rewrite map.get_put_diff; congruence.
-  Qed.
- 
   Lemma mul_correct :
     forall regs cstack lstack a b,
       map.get regs (gpreg x3) = Some a ->
@@ -1640,30 +1751,27 @@ Module Test.
            map.get regs' (gpreg x2) = Some (cast32 (a * b))
            /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs').
   Proof.
-    cbv [mul_fn returns].
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. eapply eq_refl. }
-    intros; subst.
-    (* we hit the beq; destruct cases before stepping *)
-    destr (b =? 0).
+    cbv [mul_fn returns]. intros; subst.
+    repeat straightline_step.
+    (* branch; use branch helper lemma *)
+    eapply eventually_beq.
+    { reflexivity. }
+    { simplify_side_condition; reflexivity. }
+    { simplify_side_condition; reflexivity. }
     { (* case: b = 0, exit early *)
-      eapply eventually_step.
-      { simplify_side_condition.
-        right. ssplit; [ lia .. | ]. apply eq_refl. }
       intros; subst. eapply eventually_step.
       { simplify_side_condition. apply eq_refl. }
       intros; subst. eapply eventually_done.
       ssplit; try reflexivity ; [ solve_map; repeat (f_equal; try lia) | ].
       (* only_differ clause *)
-      intro r. destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
-      apply PropSet.in_of_list. cbn [In]. tauto. }
+      eapply map.only_differ_put.
+      cbv [PropSet.singleton_set PropSet.subset PropSet.of_list PropSet.elem_of In].
+      intros; subst. tauto. }
     (* case: b <> 0, proceed *)
-    eapply eventually_step.
-    { simplify_side_condition.
-      left. ssplit; [ lia .. | ]. apply eq_refl. }
     intros; subst.
+
+    (* loop; use loop invariant lemma *)
     let loop_end_pc := find_loop_end in
-    (* we hit the loop; use the loop invariant lemma *)
     eapply loop_invariant
       with
       (end_pc:=loop_end_pc)
@@ -1673,7 +1781,7 @@ Module Test.
            /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs').
     { reflexivity. }
     { reflexivity. }
-    { simplify_side_condition. reflexivity. }
+    { simplify_side_condition; reflexivity. }
     { apply Z2Nat.id; lia. }
     { lia. }
     { lia. }
@@ -1686,6 +1794,7 @@ Module Test.
     { (* invariant step; proceed through loop and prove invariant still holds *)
       intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
 
+      (* helper assertion that mul and add don't share symbols *)
       assert (function_symbols_disjoint add_fn mul_fn).
       { cbv [function_symbols_disjoint]; cbn [add_fn mul_fn fst snd].
         ssplit; solve_map; try congruence; [ ].
@@ -1707,58 +1816,47 @@ Module Test.
         rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
         eapply fetch_fn_disjoint; eauto; [ ].
         eapply fetch_ctx_singleton_iff; eauto. }
+
+      (* post-jump; continue *)
       cbv beta. intros; subst.
-      intros; subst. eapply eventually_step.
-      { simplify_side_condition. eapply eq_refl. }
-      intros; subst.
-      lazymatch goal with
-      | |- eventually _ _ (otbn_busy _ _ _ ((_, ?i) :: _)) =>
-          destruct i
-      end.
-      { (* i = 0 *)
-        eapply eventually_step.
-        { simplify_side_condition.
-          cbv [loop_end]. cbn [hd_error].
-          do 2 eexists; ssplit; [ reflexivity | ].
-          cbv iota. apply eq_refl. }
-        cbn [tl].
+      repeat straightline_step.
+
+      (* end of loop; use loop-end helper lemma *)
+      eapply eventually_loop_end; [ reflexivity .. | ].
+      destruct_one_match.
+      { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
         { rewrite !cast32_mod.
           (* TODO: need a push_pull_modulo here *)
-          change (Z.of_nat 1) with 1.
-          change (Z.of_nat 0) with 0.
+          change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
           rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
           rewrite Z.add_mod_idemp_l by lia.
           repeat (f_equal; try lia). }
         { repeat lazymatch goal with
                  | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
                  | |- map.only_differ _ _ (map.put _ _ _) =>
-                     eapply only_differ_trans; [ | eapply only_differ_put | ]
-                 end; [ reflexivity | ].
-          cbv; intros. tauto. } }
-      { (* i > 0 *)
-        eapply eventually_step.
-        { simplify_side_condition.
-          cbv [loop_end]. cbn [hd_error].
-          do 2 eexists; ssplit; [ reflexivity | ].
-          cbv iota. apply eq_refl. }
-        cbn [tl].
+                     eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
+                 | |- PropSet.subset _ _ => reflexivity
+                 end; [ ].
+          cbv; intros; tauto. } }
+      { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
-        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
+        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
         { rewrite !cast32_mod.
           (* TODO: need a push_pull_modulo here *)
-          change (Z.of_nat 1) with 1.
-          change (Z.of_nat 0) with 0.
+          change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
           rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
           rewrite Z.add_mod_idemp_l by lia.
           repeat (f_equal; try lia). }
         { repeat lazymatch goal with
                  | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
                  | |- map.only_differ _ _ (map.put _ _ _) =>
-                     eapply only_differ_trans; [ | eapply only_differ_put | ]
-                 end; [ reflexivity | ].
-          cbv; intros. tauto. } } }
+                     eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
+                 | |- PropSet.subset _ _ => reflexivity
+                 end; [ ].
+          cbv; intros; tauto. } } }
+ 
     (* invariant implies postcondition (i.e. post-loop code) *)
     rewrite Z.sub_0_r; intros.
     repeat lazymatch goal with
@@ -1766,10 +1864,11 @@ Module Test.
            | H : Some _ = Some _ |- _ => inversion H; clear H; subst
            end.
     simplify_side_condition.
+    repeat straightline_step.
     intros; subst. eapply eventually_step.
     { simplify_side_condition. eapply eq_refl. }
     intros; subst. eapply eventually_done.
-    ssplit; eauto.  
+    ssplit; eauto.
   Qed.
 
   (* Next: try to apply link_run1, then try to prove it if form is OK *)
