@@ -1540,6 +1540,7 @@ Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
   | |- _ /\ _ => split
+  | x := _ |- _ => subst x
   | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
@@ -1595,7 +1596,6 @@ Module Test.
 
   Compute (link [start_fn; add_fn]).
 
-  (* TODO: fix this, it is not adding the right thing *)
   (* Test program 1 : build multiplication out of addition
 
      mul:
@@ -1725,13 +1725,19 @@ Module Test.
   Lemma cast32_mod x : cast32 x = x mod 2^32.
   Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
 
+  Ltac remember_registers := 
+    lazymatch goal with
+    | |- ?P (otbn_busy _ ?regs _ _) =>
+        let regs' := fresh "regs" in
+        set (regs':=regs)
+    end.
   Ltac straightline_step :=
     let i := get_next_insn in
     lazymatch i with
     | Some (Straightline _) =>
         intros; subst; eapply eventually_step;
         [ simplify_side_condition; [ .. | try eapply eq_refl]
-        | intros; subst ]
+        | intros; subst; try remember_registers ]
     | Some ?i => fail "next instruction is not straightline:" i
     | None => fail "pc is invalid?"
     end.
@@ -1753,6 +1759,7 @@ Module Test.
   Proof.
     cbv [mul_fn returns]. intros; subst.
     repeat straightline_step.
+ 
     (* branch; use branch helper lemma *)
     eapply eventually_beq.
     { reflexivity. }
@@ -1787,8 +1794,8 @@ Module Test.
     { lia. }
     { (* prove invariant holds at start *)
       ssplit; [ | ].
-      { solve_map. repeat (f_equal; try lia). }
-      { cbv [map.only_differ]. intro r.
+      { simplify_side_condition. repeat (f_equal; try lia). }
+      { simplify_side_condition. cbv [map.only_differ]. intro r.
         destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
         cbn [PropSet.elem_of PropSet.of_list In]. tauto. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
@@ -1827,35 +1834,39 @@ Module Test.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
-        { rewrite !cast32_mod.
+        { simplify_side_condition. rewrite !cast32_mod.
           (* TODO: need a push_pull_modulo here *)
           change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
           rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
           rewrite Z.add_mod_idemp_l by lia.
           repeat (f_equal; try lia). }
-        { repeat lazymatch goal with
+        { simplify_side_condition.
+          repeat lazymatch goal with
                  | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
                  | |- map.only_differ _ _ (map.put _ _ _) =>
                      eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
                  | |- PropSet.subset _ _ => reflexivity
                  end; [ ].
-          cbv; intros; tauto. } }
+          cbv [PropSet.subset PropSet.union PropSet.of_list In PropSet.elem_of
+                 PropSet.singleton_set]. tauto. } }
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
-        { rewrite !cast32_mod.
+        { simplify_side_condition. rewrite !cast32_mod.
           (* TODO: need a push_pull_modulo here *)
           change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
           rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
           rewrite Z.add_mod_idemp_l by lia.
           repeat (f_equal; try lia). }
-        { repeat lazymatch goal with
+        { simplify_side_condition.
+          repeat lazymatch goal with
                  | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
                  | |- map.only_differ _ _ (map.put _ _ _) =>
                      eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
                  | |- PropSet.subset _ _ => reflexivity
                  end; [ ].
-          cbv; intros; tauto. } } }
+          cbv [PropSet.subset PropSet.union PropSet.of_list In PropSet.elem_of
+                 PropSet.singleton_set]. tauto. } } }
  
     (* invariant implies postcondition (i.e. post-loop code) *)
     rewrite Z.sub_0_r; intros.
