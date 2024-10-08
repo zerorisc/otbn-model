@@ -293,13 +293,16 @@ Section Exec.
   (* Begin a new loop. *)
   Definition loop_start
     (st : otbn_state) (iters : nat) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack =>
-        let start_pc := advance_pc pc in
-        (length lstack < 8)%nat
-        /\ iters <> 0%nat
-        /\ post (otbn_busy start_pc regs cstack ((start_pc, iters) :: lstack))
-    | _ => False
+    match iters with
+    | O => False (* iters cannot be zero *)
+    | S iters =>
+        match st with
+        | otbn_busy pc regs cstack lstack =>          
+            let start_pc := advance_pc pc in
+            (length lstack < 8)%nat
+            /\ post (otbn_busy start_pc regs cstack ((start_pc, iters) :: lstack))
+        | _ => False
+        end
     end.
 
   (* Finish a loop iteration (and potentially the entire loop).
@@ -1328,22 +1331,132 @@ Module Test.
     cbv [read_gpr]; intros.
     destruct_one_match; destruct_products; eauto.
   Qed.
+  
+  Lemma fetch_weaken_run1
+    {destination : Type}
+    {fetch1 : destination * nat -> option insn}
+    {fetch2 : destination * nat -> option insn} :
+    forall st P,
+      run1 (fetch:=fetch1) st P ->
+      (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
+      run1 (fetch:=fetch2) st P.
+  Proof.
+    induction st; cbn [run1]; intros; auto; [ ].
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           end.
+    eauto.
+  Qed.
 
-  Check linked_at.
-  Print returns.
-  Lemma eventually_jump_ctx
-    {destination : Type} {fetch : destination * nat -> option insn} :
+  Lemma fetch_weaken
+    {destination : Type}
+    {fetch1 : destination * nat -> option insn}
+    {fetch2 : destination * nat -> option insn} :
+    forall st P,
+      eventually (run1 (fetch:=fetch1)) P st ->
+      (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
+      eventually (run1 (fetch:=fetch2)) P st.
+  Proof.
+    induction 1; intros; [ auto using eventually_done | ].
+    eapply eventually_step; eauto using fetch_weaken_run1.
+  Qed.
+
+  Lemma fetch_ctx_done :
+    forall fns dst i,
+      fold_left (fun res fn =>
+                   match res, fetch_fn fn dst with
+                   | None, Some i => Some i
+                   | _, _ => res
+                   end) fns (Some i) = Some i.
+  Proof.
+    induction fns; cbn [fold_left]; [ reflexivity | ].
+    intros. apply IHfns.
+  Qed.
+
+  Definition function_symbols_disjoint (fn1 fn2 : function) : Prop :=
+    let name1 := fst (fst fn1) in
+    let name2 := fst (fst fn2) in
+    let syms1 := snd (fst fn1) in
+    let syms2 := snd (fst fn2) in
+    map.disjoint syms1 syms2
+    /\ map.get syms1 name2 = None
+    /\ map.get syms2 name1 = None
+    /\ name1 <> name2.    
+
+  Lemma fetch_fn_disjoint fn1 fn2 dst i :
+    fetch_fn fn1 dst = Some i ->
+    function_symbols_disjoint fn1 fn2 ->
+    fetch_fn fn2 dst = None.
+  Proof.
+    cbv [function_symbols_disjoint].
+    destruct fn1 as [[name1 syms1] insns1].
+    destruct fn2 as [[name2 syms2] insns2].
+    destruct dst as [dst offset].
+    cbv [fetch_fn get_label_offset]. cbn [fst snd].
+    repeat lazymatch goal with
+           | |- context [String.eqb ?x ?y] => destr (String.eqb x y); subst; try congruence
+           | |- context [match _ with _ => _ end] => destruct_one_match; try congruence
+           | H0 : map.disjoint ?m1 ?m2,
+               H1 : map.get ?m1 ?k = Some _,
+                 H2 : map.get ?m2 ?k = Some _ |- _ =>
+               exfalso; eapply H0; eauto
+           | H : _ /\ _ |- _ => destruct H
+           | H : ?x <> ?x |- _ => congruence
+           | H : Some _ = None |- _ => congruence
+           | _ => progress intros
+           end.
+  Qed.
+
+  Lemma fetch_ctx_singleton_iff fn dst i :
+    fetch_ctx [fn] dst = Some i <-> fetch_fn fn dst = Some i.
+  Proof.
+    cbn [fetch_ctx fold_left]. destruct_one_match; split; congruence.
+  Qed.
+
+  Lemma fetch_ctx_weaken_cons_eq fns fn dst i :
+      fetch_ctx [fn] dst = Some i ->
+      fetch_ctx (fn :: fns) dst = Some i.
+  Proof.
+    cbn [fetch_ctx fold_left]; intro Hfn.
+    rewrite Hfn. eauto using fetch_ctx_done.
+  Qed.
+
+  (* TODO: rework this lemma so it's easier -- not just fetch_fn =
+     None, but fn is disjoint from the symbol table *)
+  Lemma fetch_ctx_weaken_cons_ne fns fn dst :
+    fetch_fn fn dst = None ->
+    fetch_ctx (fn :: fns) dst = fetch_ctx fns dst.
+  Proof.
+    cbn [fetch_ctx fetch_fn fold_left]; intro Hfn.
+    rewrite Hfn. eauto.
+  Qed.
+
+  Lemma eventually_jump
+    {destination : Type}
+    {fetch1 : destination * nat -> option insn}
+    {fetch2 : destination * nat -> option insn} :
     forall dst pc (regs : regfile) cstack lstack spec post,
-      fetch pc = Some (Control (Jal x1 dst)) ->
+      fetch2 pc = Some (Control (Jal x1 dst)) ->
       (length cstack < 8)%nat ->
-      returns (fetch:=fetch) dst regs cstack lstack spec ->
+      returns (fetch:=fetch1) dst regs (advance_pc pc :: cstack) lstack spec ->
+      (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
       (forall regs,
           spec regs ->
-          eventually (run1 (fetch:=fetch))
+          eventually (run1 (fetch:=fetch2))
             post (otbn_busy (advance_pc pc) regs cstack lstack)) ->
-      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+      eventually (run1 (fetch:=fetch2)) post (otbn_busy pc regs cstack lstack).
   Proof.
-
+    cbv [returns]; intros.
+    eapply eventually_step.
+    { simplify_side_condition.
+      match goal with H : _ |- _ => apply H end.
+      reflexivity. }
+    intros; subst.
+    eapply eventually_trans;
+      [ eapply fetch_weaken; eassumption | intro st; destruct st; try contradiction ].
+    intros; repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end. subst.
+    cbn [tl]. eauto.
   Qed.
     
   Lemma eventually_invariant {destination : Type} {fetch : destination * nat -> option insn} :
@@ -1398,12 +1511,12 @@ Module Test.
           (fun st => (exists regs,
                          invariant i regs
                          /\ st = match i with
-                                 | S _ => otbn_busy (advance_pc pc) regs cstack
+                                 | S i => otbn_busy (advance_pc pc) regs cstack
                                             ((advance_pc pc, i) :: lstack)
                                  | O => otbn_busy (advance_pc end_pc) regs cstack lstack
                                  end)
                      \/ post st)
-            (otbn_busy (advance_pc pc) regs cstack ((advance_pc pc, S i) :: lstack))) ->
+            (otbn_busy (advance_pc pc) regs cstack ((advance_pc pc, i) :: lstack))) ->
       (forall regs,
           invariant 0%nat regs ->
           eventually (run1 (fetch:=fetch)) post
@@ -1412,13 +1525,14 @@ Module Test.
   Proof.
     cbv [loop_start]; intros.
     repeat match goal with H : _ /\ _ |- _ => destruct H end.
+    destruct iters; [ lia | ].      
     eapply eventually_step.
     { simplify_side_condition.
       eapply read_gpr_weaken; [ eassumption | ].
-      intros; cbv [loop_start]; ssplit; [ lia .. | ].
-      subst. eapply eq_refl. }
+      intros; cbv [loop_start]. ssplit; [ lia .. | ].
+      subst. rewrite Nat2Z.id.
+      ssplit; [ lia .. | ]. eapply eq_refl. }
     intros; subst.
-    destruct iters; [ lia | ].
     eapply eventually_invariant
       with (iters := S iters)
            (invariant :=
@@ -1426,17 +1540,15 @@ Module Test.
                 (exists regs,
                     invariant i regs
                     /\ st = match i with
-                            | S _ => otbn_busy (advance_pc pc) regs cstack
+                            | S i => otbn_busy (advance_pc pc) regs cstack
                                        ((advance_pc pc, i) :: lstack)
                             | O => otbn_busy (advance_pc end_pc) regs cstack lstack
                             end)).
-    { intros. subst. rewrite Nat2Z.id. cbn [get_pc get_lstack]. ssplit; eauto. }
+    { intros. subst. eexists; ssplit; eauto. }
     { intros. subst.
       repeat match goal with
              | H : _ /\ _ |- _ => destruct H
              | H : exists _, _ |- _ => destruct H
-             | H : get_lstack ?st = Some _ |- _ =>
-                 destruct st; cbn [get_lstack get_pc] in *; subst; try congruence
              | H : Some _ = Some _ |- _ => inversion H; clear H; subst
              | H : context [eventually run1 (fun st => _ \/ post st)] |- _ =>
                  apply H; eauto; lia
@@ -1446,8 +1558,6 @@ Module Test.
       repeat match goal with
              | H : _ /\ _ |- _ => destruct H
              | H : exists _, _ |- _ => destruct H
-             | H : get_lstack ?st = Some _ |- _ =>
-                 destruct st; cbn [get_lstack get_pc] in *; subst; try congruence
              | H : Some _ = Some _ |- _ => inversion H; clear H; subst
              | _ => progress subst
              end.
@@ -1479,7 +1589,41 @@ Module Test.
           end
     | _ => fail "could not determine fetch and pc from goal"
     end.
-    
+
+  Lemma cast32_mod x : cast32 x = x mod 2^32.
+  Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
+
+  Lemma only_differ_trans {K V} {map : map.map K V} {map_ok : map.ok map}
+    (m1 m2 m3 : map.rep (map:=map)) (s1 s2 s3 : PropSet.set K) :
+    map.only_differ m1 s1 m2 ->
+    map.only_differ m2 s2 m3 ->
+    PropSet.subset (PropSet.union s1 s2) s3 ->
+    map.only_differ m1 s3 m3.
+  Proof.
+    cbv [map.only_differ PropSet.subset PropSet.elem_of]; intros.
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : _ \/ _ |- _ => destruct H
+           | H : forall x : K, _ |- _ => specialize (H ltac:(eassumption))
+           | H : ?s ?x, H' : PropSet.union _ ?s ?x -> ?P |- ?P \/ _ =>
+               left; apply H'; apply PropSet.in_union_r; assumption
+           | H : ?s ?x, H' : PropSet.union ?s _ ?x -> ?P |- ?P \/ _ =>
+               left; apply H'; apply PropSet.in_union_l; assumption
+           | H : ?a = ?b, H' : ?b = ?c |- _ \/ ?a = ?c => right; congruence
+           end.
+  Qed.
+
+  Lemma only_differ_put
+    {K V} {map : map.map K V} {map_ok : map.ok map}
+    {key_eqb : K -> K -> bool}
+    {key_eqb_spec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}
+    (m : map.rep (map:=map)) k v :
+    map.only_differ m (PropSet.singleton_set k) (map.put m k v).
+  Proof.
+    intros. cbv [map.only_differ PropSet.elem_of PropSet.singleton_set] in *.
+    intro k'. destr (key_eqb k k'); [ left; reflexivity | right ].
+    rewrite map.get_put_diff; congruence.
+  Qed.
  
   Lemma mul_correct :
     forall regs cstack lstack a b,
@@ -1540,16 +1684,81 @@ Module Test.
         destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
         cbn [PropSet.elem_of PropSet.of_list In]. tauto. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
+      intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+
+      assert (function_symbols_disjoint add_fn mul_fn).
+      { cbv [function_symbols_disjoint]; cbn [add_fn mul_fn fst snd].
+        ssplit; solve_map; try congruence; [ ].
+        cbv [map.disjoint]; intros *. rewrite map.get_empty; congruence. }
+
+      (* jump to "add" function *)
+      eapply eventually_jump.
+      { reflexivity. }
+      { lia. }
+      { apply add_correct; eauto; [ ].
+        lazymatch goal with H : map.only_differ _ _ ?regs |- context [map.get ?regs ?k]=>
+                              let H' := fresh in
+                              destruct (H k) as [? | H']; [ | rewrite <-H'; eauto ] end.
+        cbn [PropSet.elem_of PropSet.of_list In] in *.
+        repeat lazymatch goal with
+               | H : _ \/ _ |- _ => destruct H; try congruence; try contradiction
+               end. }
+      { intros.
+        rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+        eapply fetch_fn_disjoint; eauto; [ ].
+        eapply fetch_ctx_singleton_iff; eauto. }
+      cbv beta. intros; subst.
+      intros; subst. eapply eventually_step.
+      { simplify_side_condition. eapply eq_refl. }
       intros; subst.
-      print_next_insn.
-
-      (* TODO: need a jump lemma here *)
-
-      intros; subst. eapply eventually_step.
-      { simplify_side_condition. eapply eq_refl. }
-      intros; subst. eapply eventually_step.
-      { simplify_side_condition. eapply eq_refl. }
-    }
+      lazymatch goal with
+      | |- eventually _ _ (otbn_busy _ _ _ ((_, ?i) :: _)) =>
+          destruct i
+      end.
+      { (* i = 0 *)
+        eapply eventually_step.
+        { simplify_side_condition.
+          cbv [loop_end]. cbn [hd_error].
+          do 2 eexists; ssplit; [ reflexivity | ].
+          cbv iota. apply eq_refl. }
+        cbn [tl].
+        intros; subst. eapply eventually_done.
+        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
+        { rewrite !cast32_mod.
+          (* TODO: need a push_pull_modulo here *)
+          change (Z.of_nat 1) with 1.
+          change (Z.of_nat 0) with 0.
+          rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
+          rewrite Z.add_mod_idemp_l by lia.
+          repeat (f_equal; try lia). }
+        { repeat lazymatch goal with
+                 | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
+                 | |- map.only_differ _ _ (map.put _ _ _) =>
+                     eapply only_differ_trans; [ | eapply only_differ_put | ]
+                 end; [ reflexivity | ].
+          cbv; intros. tauto. } }
+      { (* i > 0 *)
+        eapply eventually_step.
+        { simplify_side_condition.
+          cbv [loop_end]. cbn [hd_error].
+          do 2 eexists; ssplit; [ reflexivity | ].
+          cbv iota. apply eq_refl. }
+        cbn [tl].
+        intros; subst. eapply eventually_done.
+        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
+        { rewrite !cast32_mod.
+          (* TODO: need a push_pull_modulo here *)
+          change (Z.of_nat 1) with 1.
+          change (Z.of_nat 0) with 0.
+          rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
+          rewrite Z.add_mod_idemp_l by lia.
+          repeat (f_equal; try lia). }
+        { repeat lazymatch goal with
+                 | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
+                 | |- map.only_differ _ _ (map.put _ _ _) =>
+                     eapply only_differ_trans; [ | eapply only_differ_put | ]
+                 end; [ reflexivity | ].
+          cbv; intros. tauto. } } }
     (* invariant implies postcondition (i.e. post-loop code) *)
     rewrite Z.sub_0_r; intros.
     repeat lazymatch goal with
@@ -1560,7 +1769,7 @@ Module Test.
     intros; subst. eapply eventually_step.
     { simplify_side_condition. eapply eq_refl. }
     intros; subst. eapply eventually_done.
-    ssplit; eauto.      
+    ssplit; eauto.  
   Qed.
 
   (* Next: try to apply link_run1, then try to prove it if form is OK *)
