@@ -22,7 +22,7 @@ Section Registers.
   Inductive gpr : Type :=
   | x0 | x1 | x2 | x3 | x4 | x5 | x6 | x7.
 
-  (* Control and status registers, 32-bits each. *)
+  (* Control and status registers, 32 bits each. *)
   Inductive csr : Type :=
   | CSR_RND
   .
@@ -171,13 +171,6 @@ Section Exec.
     {destination_eqb_spec :
       forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (destination_eqb d1 d2)}.
   Definition advance_pc (pc : destination * nat) := (fst pc, S (snd pc)).
-
-  (* error values for cases that should be unreachable (these can be
-     any value and exist mostly to help debugging -- it's easier to
-     understand that something went wrong when you see "error_Z" than
-     an unexpected 0). *)
-  Context {error_Z : Z}.
-
   (* Parameterize over the map implementation. *)
   Context {regfile : map.map reg Z}
     {fetch : destination * nat -> option (insn (destination:=destination))}.
@@ -191,40 +184,81 @@ Section Exec.
      need to process through, come out with a Prop in the end via cps style passing
      the prop gives you rnd reasoning much easier
    *)
-  Definition is_valid_addi_imm (imm : Z) : Prop :=
-    -2048 <= imm <= 2047.
+  Definition is_valid_addi_imm (imm : Z) : bool :=
+    (-2048 <=? imm) && (imm <=? 2047).
 
-  Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> Prop) : Prop :=
-    match r with
-    | x0 => P 0 (* x0 always reads as 0 *)
-    | x1 =>
-        (* TODO: call stack reads are rare in practice; for now, don't model *)
-        False
-    | _ => exists v, map.get regs (gpreg r) = Some v /\ P v
-    end.
-
-  Definition read_csr (regs : regfile) (r : csr) (P : Z -> Prop) : Prop :=
-    match r with
-    | CSR_RND => forall v, P v
-    end.
-
+  (* Convenience definition to cast to 32 bits *)
   Definition cast32 (v : Z) : Z := v &' Z.ones 32.
 
-  Definition write_gpr (regs : regfile) (r : gpr) (v : Z) (P : regfile -> Prop) : Prop :=
-    match r with
-    | x0 => P regs
-    | x1 =>
-        (* TODO: this should push to the call stack, but is
-           practically never used. For now, don't model this behavior
-           and treat it as an error. *)
-        False
-    | _ => P (map.put regs (gpreg r) (cast32 v))
-    end.
 
-  Definition write_csr (regs : regfile) (r : csr) (v : Z) (P : regfile -> Prop) : Prop :=
+  (* Code in this section can be used either for execution or for
+     omnisemantics-style proofs depending on the parameters. *) 
+  Section ExecOrOmni.
+    Context
+      (* return type: option otbn_state for exec, Prop for omni *)
+      {T}
+        (* error case: None for exec, False for omni *)
+        (err : T)
+        (* construction of randomness: list fetch for exec, (forall v, P v) for omni *)
+        (random : (Z -> T) -> T).
+
+    Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> T) : T :=
+      match r with
+      | x0 => P 0 (* x0 always reads as 0 *)
+      | x1 =>
+          (* TODO: call stack reads are rare in practice; for now, don't model *)
+          err
+      | _ => match map.get regs (gpreg r) with
+             | Some v => P v
+             | None => err
+             end
+      end.
+
+    Definition read_csr (regs : regfile) (r : csr) (P : Z -> T) : T :=
+      match r with
+      | CSR_RND => random P
+      end.
+
+    Definition write_gpr (regs : regfile) (r : gpr) (v : Z) (P : regfile -> T) : T :=
+      match r with
+      | x0 => P regs
+      | x1 =>
+          (* TODO: this should push to the call stack, but is
+             practically never used. For now, don't model this behavior
+             and treat it as an error. *)
+          err
+      | _ => P (map.put regs (gpreg r) (cast32 v))
+      end.
+
+  Definition write_csr (regs : regfile) (r : csr) (v : Z) (P : regfile -> T) : T :=
     match r with
     | CSR_RND => P regs (* writes ignored *)
     end.
+
+  Definition strt1
+    (regs : regfile) (i : sinsn) (post : regfile -> T) : T :=
+    match i with
+    | Addi d x imm =>
+        if is_valid_addi_imm imm
+        then 
+          read_gpr regs x
+            (fun vx =>
+               write_gpr regs d (vx + imm) post)
+        else err
+    | Add d x y =>
+        read_gpr regs x
+          (fun vx =>
+             read_gpr regs y
+               (fun vy =>
+                  write_gpr regs d (vx + vy) post))
+    | Csrrs d x =>
+        read_gpr regs x
+          (fun vx =>
+             read_csr regs d
+               (fun vd =>
+                  write_csr regs d (Z.lxor vd vx) post))
+    end.
+  End ExecOrOmni.
 
   Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
     match n with
@@ -287,7 +321,7 @@ Section Exec.
     end.
   Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : Z -> Prop) : Prop :=
     match st with
-    | otbn_busy _ regs _ _ => read_gpr regs r post
+    | otbn_busy _ regs _ _ => read_gpr False regs r post
     | _ => False
     end.
 
@@ -321,28 +355,6 @@ Section Exec.
                        ((start_addr, iters) :: tl lstack))
            end
     | _ => False
-    end.
-
-  Definition strt1
-    (regs : regfile) (i : sinsn) (post : regfile -> Prop) : Prop :=
-    match i with
-    | Addi d x imm =>
-        is_valid_addi_imm imm /\
-          read_gpr regs x
-            (fun vx =>
-               write_gpr regs d (vx + imm) post)
-    | Add d x y =>
-        read_gpr regs x
-          (fun vx =>
-             read_gpr regs y
-               (fun vy =>
-                  write_gpr regs d (vx + vy) post))
-    | Csrrs d x =>
-        read_gpr regs x
-          (fun vx =>
-             read_csr regs d
-               (fun vd =>
-                  write_csr regs d (Z.lxor vd vx) post))
     end.
 
   (* TODO: is it possible to simplify the address logic here so we can
@@ -395,7 +407,7 @@ Section Exec.
         fetch pc = Some i
         /\ match i with
            | Straightline i =>
-               strt1 regs i
+               strt1 False (fun P => forall v, P v) regs i
                  (fun regs =>
                     set_regs st regs
                       (fun st => set_pc st (advance_pc pc) post))
@@ -1217,12 +1229,12 @@ Section Helpers.
     {regfile_ok : map.ok regfile}.
 
   Lemma read_gpr_weaken regs r (P Q : Z -> Prop) :
-    read_gpr regs r P ->
+    read_gpr False regs r P ->
     (forall v, P v -> Q v) ->
-    read_gpr regs r Q.
+    read_gpr False regs r Q.
   Proof.
     cbv [read_gpr]; intros.
-    destruct_one_match; destruct_products; eauto.
+    repeat destruct_one_match; eauto.
   Qed.
   
   Lemma fetch_weaken_run1
@@ -1392,7 +1404,7 @@ Section Helpers.
            iters pc r v (regs : regfile) cstack lstack post,
       fetch pc = Some (Control (Loop r)) ->
       fetch end_pc = Some (Control LoopEnd) ->
-      read_gpr regs r (eq v) ->
+      read_gpr False regs r (eq v) ->
       Z.of_nat iters = v ->
       (length lstack < 8)%nat ->
       iters <> 0%nat ->
@@ -1462,8 +1474,8 @@ Section Helpers.
   Lemma eventually_beq {destination : Type} {fetch : destination * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
       fetch pc = Some (Control (Beq r1 r2 dst)) -> 
-      read_gpr regs r1 (eq v1) ->
-      read_gpr regs r2 (eq v2) ->
+      read_gpr False regs r1 (eq v1) ->
+      read_gpr False regs r2 (eq v2) ->
       (* branch case *)
       (v1 = v2 ->
        eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
@@ -1489,8 +1501,8 @@ Section Helpers.
   Lemma eventually_bne {destination : Type} {fetch : destination * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
       fetch pc = Some (Control (Bne r1 r2 dst)) -> 
-      read_gpr regs r1 (eq v1) ->
-      read_gpr regs r2 (eq v2) ->
+      read_gpr False regs r1 (eq v1) ->
+      read_gpr False regs r2 (eq v2) ->
       (* branch case *)
       (v1 <> v2 ->
        eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
@@ -1538,6 +1550,20 @@ Section Helpers.
       intros; subst. eassumption. }
   Qed.
 
+  Lemma eventually_ret {destination : Type} {fetch : destination * nat -> option insn}:
+    forall pc regs cstack lstack ret_pc post,
+      fetch pc = Some (Control Ret) ->
+      hd_error cstack = Some ret_pc ->
+      post (otbn_busy ret_pc regs (tl cstack) lstack) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    intros. eapply eventually_step.
+    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+      cbn [ctrl1 call_stack_pop]. eexists; ssplit; [ eassumption .. | ].
+      apply eq_refl. }
+    intros; subst. eauto using eventually_done.
+  Qed.
+
   Lemma cast32_mod x : cast32 x = x mod 2^32.
   Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
 
@@ -1574,6 +1600,9 @@ Ltac simplify_side_condition_step :=
       erewrite fetch_fn_sym by
       (cbn [fst snd]; first [ congruence | solve_map ])
   | |- map.get _ _ = Some _ => solve_map
+  | H : map.get ?m ?k = Some _ |- context [match map.get ?m ?k with _ => _ end] =>
+      rewrite H
+  | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
   | |- (_ < _) => lia
@@ -1690,26 +1719,6 @@ Module Test.
     solve_map.
   Qed.
 
-  Lemma add_correct :
-    forall regs cstack lstack a b,
-      map.get regs (gpreg x2) = Some a ->
-      map.get regs (gpreg x3) = Some b ->
-      returns
-        (fetch:=fetch_ctx [add_fn])
-        "add"%string regs cstack lstack
-        (fun regs' =>
-           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
-  Proof.
-    cbv [add_fn returns].
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition; cbv [advance_pc];
-      simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_done.
-    ssplit; reflexivity.
-  Qed.
-
   Ltac get_next_insn :=
     lazymatch goal with
     | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
@@ -1773,6 +1782,23 @@ Module Test.
     end.
   Ltac subst_lets := repeat subst_lets_step.
 
+  Lemma add_correct :
+    forall regs cstack lstack a b,
+      map.get regs (gpreg x2) = Some a ->
+      map.get regs (gpreg x3) = Some b ->
+      returns
+        (fetch:=fetch_ctx [add_fn])
+        "add"%string regs cstack lstack
+        (fun regs' =>
+           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
+  Proof.
+    cbv [add_fn returns]. intros; subst.
+    repeat straightline_step.
+    eapply eventually_ret; [ reflexivity | eassumption | ].
+    ssplit; try reflexivity; [ ].
+    subst_lets. simplify_cast. reflexivity.
+  Qed.
+
   Lemma mul_correct :
     forall regs cstack lstack a b,
       map.get regs (gpreg x3) = Some a ->
@@ -1794,7 +1820,7 @@ Module Test.
     (* branch; use branch helper lemma *)
     eapply eventually_beq.
     { reflexivity. }
-    { simplify_side_condition; reflexivity. }
+    { simplify_side_condition. reflexivity. }
     { simplify_side_condition; reflexivity. }
     { (* case: b = 0, exit early *)
       intros; subst. eapply eventually_step.
