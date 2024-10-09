@@ -7,6 +7,7 @@ Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
+Require Import coqutil.Z.PushPullMod.
 Require Coq.Strings.HexString.
 Import ListNotations.
 Local Open Scope Z_scope.
@@ -1202,9 +1203,12 @@ End map.
 
 Ltac solve_map_step t :=
   first [ rewrite map.get_put_diff by t
-        | rewrite map.get_put_same by t                                          
+        | rewrite map.get_put_same by t                       
         | reflexivity
-        | eassumption ].
+        | eassumption
+        | lazymatch goal with m := _ : map.rep |- _ =>
+                                lazymatch goal with |- context [m] => subst m end end
+    ].
 Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
 
 (* Helper lemmas for proving things about programs. *)
@@ -1534,13 +1538,35 @@ Section Helpers.
       intros; subst. eassumption. }
   Qed.
 
+  Lemma cast32_mod x : cast32 x = x mod 2^32.
+  Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
+
 End Helpers.
+
+Ltac simplify_cast_step :=
+  lazymatch goal with
+  | |- context [cast32 ?x] => rewrite !cast32_mod
+  | |- context [_ + 0] => rewrite Z.add_0_r
+  | |- context [0 + _] => rewrite Z.add_0_l
+  | |- context [_ - 0] => rewrite Z.sub_0_r
+  | |- context [?x - ?x] => rewrite Z.sub_diag
+  | |- context [_ * 0] => rewrite Z.mul_0_r
+  | |- context [0 * _] => rewrite Z.mul_0_l
+  | |- context [_ * 1] => rewrite Z.mul_1_r
+  | |- context [1 * _] => rewrite Z.mul_1_l
+  | |- context [0 mod _] => rewrite Z.mod_0_l by lia
+  | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
+  | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
+  | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
+  | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
+  | _ => progress Z.push_pull_mod
+  end.
+Ltac simplify_cast := repeat simplify_cast_step.
 
 Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
   | |- _ /\ _ => split
-  | x := _ |- _ => subst x
   | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
@@ -1722,25 +1748,30 @@ Module Test.
     | _ => fail "could not determine fetch and pc from goal"
     end.
 
-  Lemma cast32_mod x : cast32 x = x mod 2^32.
-  Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
-
   Ltac remember_registers := 
     lazymatch goal with
-    | |- ?P (otbn_busy _ ?regs _ _) =>
+    | |- ?P (otbn_busy _ (map.put ?regs ?k ?v) _ _) =>
+        let v' := fresh "v" in
         let regs' := fresh "regs" in
-        set (regs':=regs)
+        set (v':= v);
+        set (regs':=map.put regs k v')
     end.
   Ltac straightline_step :=
     let i := get_next_insn in
     lazymatch i with
     | Some (Straightline _) =>
         intros; subst; eapply eventually_step;
-        [ simplify_side_condition; [ .. | try eapply eq_refl]
+        [ simplify_side_condition; [ .. | simplify_cast; try eapply eq_refl]
         | intros; subst; try remember_registers ]
     | Some ?i => fail "next instruction is not straightline:" i
     | None => fail "pc is invalid?"
     end.
+
+  Ltac subst_lets_step :=
+    multimatch goal with
+    | x := _ |- _ => lazymatch goal with |- context [x] => subst x end
+    end.
+  Ltac subst_lets := repeat subst_lets_step.
 
   Lemma mul_correct :
     forall regs cstack lstack a b,
@@ -1769,7 +1800,8 @@ Module Test.
       intros; subst. eapply eventually_step.
       { simplify_side_condition. apply eq_refl. }
       intros; subst. eapply eventually_done.
-      ssplit; try reflexivity ; [ solve_map; repeat (f_equal; try lia) | ].
+      simplify_cast.
+      ssplit; try reflexivity; [ solve_map; reflexivity | ].
       (* only_differ clause *)
       eapply map.only_differ_put.
       cbv [PropSet.singleton_set PropSet.subset PropSet.of_list PropSet.elem_of In].
@@ -1794,7 +1826,7 @@ Module Test.
     { lia. }
     { (* prove invariant holds at start *)
       ssplit; [ | ].
-      { simplify_side_condition. repeat (f_equal; try lia). }
+      { simplify_side_condition. simplify_cast. reflexivity. }
       { simplify_side_condition. cbv [map.only_differ]. intro r.
         destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
         cbn [PropSet.elem_of PropSet.of_list In]. tauto. } }
@@ -1834,11 +1866,7 @@ Module Test.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
-        { simplify_side_condition. rewrite !cast32_mod.
-          (* TODO: need a push_pull_modulo here *)
-          change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
-          rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
-          rewrite Z.add_mod_idemp_l by lia.
+        { simplify_side_condition. subst_lets. simplify_cast.
           repeat (f_equal; try lia). }
         { simplify_side_condition.
           repeat lazymatch goal with
@@ -1852,11 +1880,7 @@ Module Test.
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
-        { simplify_side_condition. rewrite !cast32_mod.
-          (* TODO: need a push_pull_modulo here *)
-          change (Z.of_nat 1) with 1. change (Z.of_nat 0) with 0.
-          rewrite ?Z.add_0_r, ?Z.sub_0_r, ?Z.mod_mod by lia.
-          rewrite Z.add_mod_idemp_l by lia.
+        { simplify_side_condition. subst_lets; simplify_cast.
           repeat (f_equal; try lia). }
         { simplify_side_condition.
           repeat lazymatch goal with
@@ -1882,6 +1906,45 @@ Module Test.
     ssplit; eauto.
   Qed.
 
+  (* Test scaling with a large codegen. *)
+  Definition repeat_add (n : nat) : function :=
+    (("add" ++ String.of_nat n)%string,
+      map.empty,
+      (Addi x2 x0 0 : insn) :: repeat (Add x2 x2 x3 : insn) n ++ [(Ret : insn)]).
+  Definition add100 : function := Eval vm_compute in (repeat_add 100).
+
+  Lemma add100_correct :
+    forall regs cstack lstack a,
+      map.get regs (gpreg x3) = Some a ->
+      0 <= a ->
+      returns
+        (fetch:=fetch_ctx [add100])
+        "add100"%string regs cstack lstack
+        (fun regs' =>
+           map.get regs' (gpreg x2) = Some (cast32 (a * 100))
+           /\ map.only_differ regs (PropSet.of_list [gpreg x2]) regs').
+  Proof.
+    cbv [add100 returns]; intros.
+    straightline_step.
+    (* almost all the time here is currently taken in solving the map
+       to get the value of x3, which requires substing all the
+       map-lets since the beginning because x3 doesn't change *)
+    (* can we do this better? instead of map.put, maybe we have a new
+       map such that x2 = new value and otherwise no changes *)
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+    Time do 10 straightline_step.
+  Qed.
+
+  
   (* Next: try to apply link_run1, then try to prove it if form is OK *)
+  (* Next: try to add more realistic error conditions for e.g. loop errors *)
 
 End Test.
