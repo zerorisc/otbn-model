@@ -193,14 +193,20 @@ Section Exec.
 
   (* Code in this section can be used either for execution or for
      omnisemantics-style proofs depending on the parameters. *) 
-  Section ExecOrOmni.
+  Section ExecOrProof.
     Context
-      (* return type: option otbn_state for exec, Prop for omni *)
+      (* return type: option otbn_state for exec, Prop for proof *)
       {T}
-        (* error case: None for exec, False for omni *)
+        (* error case: None for exec, False for proof *)
         (err : T)
-        (* construction of randomness: list fetch for exec, (forall v, P v) for omni *)
-        (random : (Z -> T) -> T).
+        (* construction of randomness: list fetch for exec, (forall v, P v) for proof *)
+        (random : (Z -> T) -> T)
+        (* construction for option types:
+             - for exec: match x with | Some x => P x | None => None end
+             - for proof: exists v, x = Some v /\ P v
+        *)
+        (option_bind : forall A, option A -> (A -> T) -> T).
+    Local Arguments option_bind {_}.
 
     Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> T) : T :=
       match r with
@@ -208,10 +214,7 @@ Section Exec.
       | x1 =>
           (* TODO: call stack reads are rare in practice; for now, don't model *)
           err
-      | _ => match map.get regs (gpreg r) with
-             | Some v => P v
-             | None => err
-             end
+      | _ => option_bind (map.get regs (gpreg r)) P
       end.
 
     Definition read_csr (regs : regfile) (r : csr) (P : Z -> T) : T :=
@@ -258,7 +261,10 @@ Section Exec.
                (fun vd =>
                   write_csr regs d (Z.lxor vd vx) post))
     end.
-  End ExecOrOmni.
+  End ExecOrProof.
+  Definition prop_random (P : Z -> Prop) : Prop := forall v, P v.
+  Definition prop_option_bind (A : Type) (x : option A) (P : A -> Prop) : Prop :=
+    exists v, x = Some v /\ P v.
 
   Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
     match n with
@@ -321,7 +327,7 @@ Section Exec.
     end.
   Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : Z -> Prop) : Prop :=
     match st with
-    | otbn_busy _ regs _ _ => read_gpr False regs r post
+    | otbn_busy _ regs _ _ => read_gpr False prop_option_bind regs r post
     | _ => False
     end.
 
@@ -407,10 +413,11 @@ Section Exec.
         fetch pc = Some i
         /\ match i with
            | Straightline i =>
-               strt1 False (fun P => forall v, P v) regs i
-                 (fun regs =>
-                    set_regs st regs
-                      (fun st => set_pc st (advance_pc pc) post))
+               strt1 False prop_random prop_option_bind
+                     regs i
+                     (fun regs =>
+                        set_regs st regs
+                          (fun st => set_pc st (advance_pc pc) post))
            | Control i => ctrl1 st i post
            end
     | _ => post st
@@ -1228,13 +1235,22 @@ Section Helpers.
   Context {regfile : map.map reg Z}
     {regfile_ok : map.ok regfile}.
 
+  Definition gpr_has_value (regs : regfile) (r : gpr) (v : Z) : Prop :=
+    read_gpr False prop_option_bind regs r (eq v).
+
   Lemma read_gpr_weaken regs r (P Q : Z -> Prop) :
-    read_gpr False regs r P ->
+    read_gpr False prop_option_bind regs r P ->
     (forall v, P v -> Q v) ->
-    read_gpr False regs r Q.
+    read_gpr False prop_option_bind regs r Q.
   Proof.
-    cbv [read_gpr]; intros.
-    repeat destruct_one_match; eauto.
+    cbv [read_gpr prop_option_bind]; intros.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | |- exists _, _ => eexists
+           | _ => first [ destruct_one_match; eauto
+                        | solve [eauto] ]
+           end.
   Qed.
   
   Lemma fetch_weaken_run1
@@ -1404,7 +1420,7 @@ Section Helpers.
            iters pc r v (regs : regfile) cstack lstack post,
       fetch pc = Some (Control (Loop r)) ->
       fetch end_pc = Some (Control LoopEnd) ->
-      read_gpr False regs r (eq v) ->
+      gpr_has_value regs r v ->
       Z.of_nat iters = v ->
       (length lstack < 8)%nat ->
       iters <> 0%nat ->
@@ -1473,9 +1489,9 @@ Section Helpers.
 
   Lemma eventually_beq {destination : Type} {fetch : destination * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
-      fetch pc = Some (Control (Beq r1 r2 dst)) -> 
-      read_gpr False regs r1 (eq v1) ->
-      read_gpr False regs r2 (eq v2) ->
+      fetch pc = Some (Control (Beq r1 r2 dst)) ->
+      gpr_has_value regs r1 v1 ->
+      gpr_has_value regs r2 v2 ->
       (* branch case *)
       (v1 = v2 ->
        eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
@@ -1501,8 +1517,8 @@ Section Helpers.
   Lemma eventually_bne {destination : Type} {fetch : destination * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
       fetch pc = Some (Control (Bne r1 r2 dst)) -> 
-      read_gpr False regs r1 (eq v1) ->
-      read_gpr False regs r2 (eq v2) ->
+      gpr_has_value regs r1 v1 ->
+      gpr_has_value regs r2 v2 ->
       (* branch case *)
       (v1 <> v2 ->
        eventually (run1 (fetch:=fetch)) post (otbn_busy (dst, 0%nat) regs cstack lstack)) ->
@@ -1564,6 +1580,23 @@ Section Helpers.
     intros; subst. eauto using eventually_done.
   Qed.
 
+  (* TODO: maybe strt1 should return a function args -> result? need
+     more detail here, need to express new map *)
+  Lemma eventually_straightline
+    {destination : Type} {fetch : destination * nat -> option insn}:
+    forall pc regs cstack lstack i post,
+      fetch pc = Some (Straightline i) ->
+      strt1 False prop_random prop_option_bind regs i
+        (fun regs => eventually (run1 (fetch:=fetch)) post
+                       (otbn_busy (advance_pc pc) regs cstack lstack)) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    intros. eapply eventually_step.
+    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+      cbv iota. cbv [set_regs set_pc]. eassumption. }
+    intros; subst. eauto.
+  Qed.
+
   Lemma cast32_mod x : cast32 x = x mod 2^32.
   Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
 
@@ -1593,9 +1626,11 @@ Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
   | |- _ /\ _ => split
-  | |- is_valid_addi_imm _ => cbv [is_valid_addi_imm]; lia
+  | |- context [if is_valid_addi_imm ?v then _ else _] =>
+        replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
+  | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
   | |- context [fetch_fn _ _] =>
       erewrite fetch_fn_sym by
       (cbn [fst snd]; first [ congruence | solve_map ])
@@ -1617,6 +1652,8 @@ Ltac simplify_side_condition_step :=
                           length hd_error tl skipn nth_error fold_left
                           fetch fetch_ctx Nat.add fst snd
                           repeat_advance_pc advance_pc]
+               | progress cbv [prop_random prop_option_bind
+                                 gpr_has_value]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -1793,7 +1830,9 @@ Module Test.
            regs' = map.put regs (gpreg x5) (cast32 (a + b))).
   Proof.
     cbv [add_fn returns]. intros; subst.
-    repeat straightline_step.
+    eapply eventually_step.
+    { simplify_side_condition. simplify_cast. apply eq_refl. }
+    intros; subst. remember_registers.
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ ].
     subst_lets. simplify_cast. reflexivity.
@@ -1820,7 +1859,7 @@ Module Test.
     (* branch; use branch helper lemma *)
     eapply eventually_beq.
     { reflexivity. }
-    { simplify_side_condition. reflexivity. }
+    { simplify_side_condition; reflexivity. }
     { simplify_side_condition; reflexivity. }
     { (* case: b = 0, exit early *)
       intros; subst. eapply eventually_step.
@@ -1950,7 +1989,7 @@ Module Test.
            map.get regs' (gpreg x2) = Some (cast32 (a * 100))
            /\ map.only_differ regs (PropSet.of_list [gpreg x2]) regs').
   Proof.
-    cbv [add100 returns]; intros.
+    cbv [returns]; intros.
     straightline_step.
     (* almost all the time here is currently taken in solving the map
        to get the value of x3, which requires substing all the
@@ -1969,7 +2008,7 @@ Module Test.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
-    Time do 10 straightline_step. (* 28.6s *)
+    Time do 10 straightline_step. (* 4.9s *)
     
     intros; subst. eapply eventually_step.
     { simplify_side_condition. eapply eq_refl. }
@@ -1991,7 +2030,8 @@ Module Test.
       cbv. tauto. }
   Time Qed.
 
-  
+
+  (* Next: make ctrl1/run1 executable, test exec *)
   (* Next: try to apply link_run1, then try to prove it if form is OK *)
   (* Next: try to add more realistic error conditions for e.g. loop errors *)
 
