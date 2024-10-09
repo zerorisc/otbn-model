@@ -1807,7 +1807,7 @@ Module Test.
     lazymatch i with
     | Some (Straightline _) =>
         intros; subst; eapply eventually_step;
-        [ simplify_side_condition; [ .. | simplify_cast; try eapply eq_refl]
+        [ simplify_side_condition; [ .. | try eapply eq_refl]
         | intros; subst; try remember_registers ]
     | Some ?i => fail "next instruction is not straightline:" i
     | None => fail "pc is invalid?"
@@ -2008,12 +2008,9 @@ Module Test.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
-    Time do 10 straightline_step. (* 4.9s *)
-    
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_done.
-    simplify_cast.
+    Time do 10 straightline_step. (* 28s *)
+
+    eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
     { solve_map. subst_lets. simplify_cast.
       f_equal. f_equal. lia. }
