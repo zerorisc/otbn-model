@@ -1931,6 +1931,9 @@ Module Test.
        map-lets since the beginning because x3 doesn't change *)
     (* can we do this better? instead of map.put, maybe we have a new
        map such that x2 = new value and otherwise no changes *)
+    (* maybe we always have a state such that we forget everything except:
+       - the values of live registers
+       - the only_differ from the original state *)
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
@@ -1940,8 +1943,27 @@ Module Test.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
-    Time do 10 straightline_step.
-  Qed.
+    Time do 10 straightline_step. (* 28.6s *)
+    
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. eapply eq_refl. }
+    intros; subst. eapply eventually_done.
+    simplify_cast.
+    ssplit; try reflexivity; [ | ].
+    { solve_map. subst_lets. simplify_cast.
+      f_equal. f_equal. lia. }
+    { (* only_differ clause *)
+      solve_map.
+      repeat lazymatch goal with
+             | |- map.only_differ ?m _ (map.put ?m _ _) =>
+                 eapply map.only_differ_put
+             | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
+             | |- map.only_differ _ _ (map.put _ _ _) =>
+                 eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
+             | |- PropSet.subset _ _ => reflexivity
+             end; [ ].
+      cbv. tauto. }
+  Time Qed.
 
   
   (* Next: try to apply link_run1, then try to prove it if form is OK *)
