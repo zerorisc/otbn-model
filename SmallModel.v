@@ -1217,6 +1217,26 @@ Module map.
       intro k'. destr (key_eqb k k'); [ left; solve [auto] | right ].
       rewrite map.get_put_diff; congruence.
     Qed.
+
+    Lemma only_differ_subset (m1 m2 : map.rep (map:=map)) s1 s2 :
+      PropSet.subset s1 s2 ->
+      map.only_differ m1 s1 m2 ->
+      map.only_differ m1 s2 m2.
+    Proof using Type.
+      clear key_eqb key_eqb_spec.
+      intros. cbv [map.only_differ PropSet.elem_of PropSet.subset] in *.
+      intro k.
+      repeat lazymatch goal with
+             | H : _ /\ _ |- _ => destruct H
+             | H : _ \/ _ |- _ => destruct H
+             | H : forall x : K, _ |- _ => specialize (H k)
+             | _ => tauto
+             end.
+    Qed.
+
+    Lemma only_differ_same (m : map.rep (map:=map)) s :
+      map.only_differ m s m.
+    Proof using Type. right; reflexivity. Qed.
   End __.
 End map.
 
@@ -1225,6 +1245,9 @@ Ltac solve_map_step t :=
         | rewrite map.get_put_same by t                       
         | reflexivity
         | eassumption
+        | lazymatch goal with
+          | H : map.get ?m ?k = _ |- context [map.get ?m ?k] =>
+              rewrite H end
         | lazymatch goal with m := _ : map.rep |- _ =>
                                 lazymatch goal with |- context [m] => subst m end end
     ].
@@ -1794,21 +1817,162 @@ Module Test.
     | _ => fail "could not determine fetch and pc from goal"
     end.
 
-  Ltac remember_registers := 
+  Definition clobbers (l : list reg) (regs regs' : regfile) : Prop :=
+    map.only_differ regs (PropSet.of_list l) regs'.
+
+  Lemma clobbers_step_in l k v r1 r2 :
+    clobbers l r1 r2 ->
+    In k l ->
+    clobbers l r1 (map.put r2 k v).
+  Proof.
+    cbv [clobbers PropSet.of_list]; intros.
+    intro k'; cbv [map.only_differ PropSet.elem_of] in *.
+    lazymatch goal with H : forall k : reg, _ |- _ => specialize (H k') end.
+    destr (reg_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
+    all:tauto.
+  Qed.
+
+  Lemma clobbers_step l k v r1 r2 :
+    clobbers l r1 r2 ->
+    clobbers (k :: l) r1 (map.put r2 k v).
+  Proof.
+    cbv [clobbers PropSet.of_list]; intros.
+    intro k'; cbv [map.only_differ PropSet.elem_of] in *. cbn [In].
+    lazymatch goal with H : forall k : reg, _ |- _ => specialize (H k') end.
+    destr (reg_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
+    all:tauto.
+  Qed.
+
+  Lemma clobbers_not_in l (r1 r2 : regfile) x v :
+    clobbers l r1 r2 ->
+    map.get r1 x = Some v ->
+    ~ (In x l) ->
+    map.get r2 x = Some v.
+  Proof.
+    cbv [clobbers map.only_differ PropSet.of_list PropSet.elem_of]; intros.
+    lazymatch goal with H : forall x : reg, _ \/ _ |- _ =>
+                          destruct (H ltac:(eassumption)) end.
+    all:try tauto; congruence.
+  Qed.
+
+  Lemma clobbers_trans :
+    forall l1 l2 (r1 r2 r3 : regfile),
+      clobbers l1 r1 r2 ->
+      clobbers l2 r2 r3 ->
+      clobbers (l1 ++ l2) r1 r3.
+  Proof.
+    cbv [clobbers]; intros.
+    eapply map.only_differ_trans; eauto; [ ].
+    rewrite PropSet.of_list_app_eq. reflexivity.
+  Qed.
+
+  Lemma clobbers_trans_dedup l1 l2 l3 (r1 r2 r3 : regfile) :
+      clobbers l1 r1 r2 ->
+      clobbers l2 r2 r3 ->
+      l3 = List.dedup reg_eqb (l1 ++ l2) ->
+      clobbers l3 r1 r3.
+  Proof.
+    intros; subst.
+    eapply map.only_differ_subset;
+      [ | eapply map.only_differ_trans; eauto; reflexivity ].
+    cbv [PropSet.of_list PropSet.subset PropSet.union PropSet.elem_of].
+    intros. rewrite <-List.dedup_preserves_In.
+    auto using in_or_app.
+  Qed.
+
+  Lemma clobbers_incl l1 l2 (r1 r2 : regfile) :
+    clobbers l1 r1 r2 ->
+    incl l1 l2 ->
+    clobbers l2 r1 r2.
+  Proof.
+    cbv [incl clobbers map.only_differ PropSet.elem_of PropSet.of_list].
+    intros; subst. repeat lazymatch goal with H : forall x : reg, _ |- _ =>
+                                                specialize (H ltac:(eassumption)) end.
+    intuition idtac.
+  Qed.
+
+  (* register tracking initialize *)
+  Ltac track_registers_init :=
+    let regs := lazymatch goal with
+                | |- context [otbn_busy _ ?regs] => regs end in
+    let regs' := fresh "regs" in
+    let H := fresh in
+    remember regs as regs' eqn:H;
+    assert (clobbers [] regs regs')
+      by (cbv [clobbers]; subst regs'; right; reflexivity);
+    (* rewrite back in postcondition but not state *)
+    rewrite H;
     lazymatch goal with
-    | |- ?P (otbn_busy _ (map.put ?regs ?k ?v) _ _) =>
+    | |- context [otbn_busy ?pc regs] =>
+        replace (otbn_busy pc regs) with (otbn_busy pc regs')
+        by (rewrite H; reflexivity)
+    end;
+    clear H.
+
+  Ltac track_registers_update_step :=    
+    lazymatch goal with
+    | H : clobbers ?l ?regs ?regs0
+      |- context [otbn_busy _ (map.put ?regs0 ?k ?v)] =>
         let v' := fresh "v" in
-        let regs' := fresh "regs" in
         set (v':= v);
-        set (regs':=map.put regs k v')
+        (* try clobbers_step_in first, then more generic clobbers_step *)
+        first [ (let Hin := fresh in
+                 assert (In k l) as Hin by (cbv [In]; tauto);
+                 pose proof (clobbers_step_in l k v' _ _ H Hin))
+              | pose proof (clobbers_step l k v' _ _ H) ];
+        let regs1 := fresh "regs" in
+        let Hregs1 := fresh in
+        remember (map.put regs0 k v') as regs1 eqn:Hregs1;
+        assert (map.get regs1 k = Some v') by (subst regs1; apply map.get_put_same);
+        repeat lazymatch goal with
+          | H : map.get regs0 k = Some _ |- _ => clear H
+          | H : map.get regs0 ?r = Some ?v |- _ =>
+              assert (map.get regs1 r = Some v)
+              by (subst regs1; rewrite map.get_put_diff by congruence; eauto);
+              clear H
+          end;
+        clear Hregs1 H regs0
     end.
+  Ltac track_registers_update :=
+    track_registers_update_step; repeat track_registers_update_step.
+
+  (* use after a jump to combine the postconditions *)
+  Ltac track_registers_combine :=
+    lazymatch goal with
+    | H0 : clobbers ?l0 ?regs ?regs0,
+        H1 : clobbers ?l1 ?regs0 ?regs1
+      |- context [otbn_busy _ ?regs1] =>
+        repeat lazymatch goal with
+          | H : map.get regs0 ?r = _ |- _ =>
+              try (let Hnin := fresh in
+                   assert (~ In r l1) as Hnin by (cbv [In]; intuition congruence);
+                   pose proof (clobbers_not_in l1 _ _ _ _ H1 H Hnin);
+                   clear Hnin);
+              clear H
+          end;
+        let l2 := (eval vm_compute in (List.dedup reg_eqb (l0 ++ l1))) in
+        pose proof (clobbers_trans_dedup _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
+        clear H0 H1; try clear regs0
+    end.
+
+  Ltac check_register_tracking :=
+    lazymatch goal with
+    | H : clobbers _ _ ?regs0 |- context [?regs0] => idtac
+    | _ => fail "cannot find register tracking; did you run track_registers_init?"
+    end.
+
+  Ltac init_register_tracking_if_missing :=
+    first [ check_register_tracking
+          | track_registers_init ].
+
   Ltac straightline_step :=
+    init_register_tracking_if_missing;
     let i := get_next_insn in
     lazymatch i with
     | Some (Straightline _) =>
         intros; subst; eapply eventually_step;
         [ simplify_side_condition; [ .. | try eapply eq_refl]
-        | intros; subst; try remember_registers ]
+        | intros; subst; track_registers_update ]
     | Some ?i => fail "next instruction is not straightline:" i
     | None => fail "pc is invalid?"
     end.
@@ -1819,6 +1983,10 @@ Module Test.
     end.
   Ltac subst_lets := repeat subst_lets_step.
 
+  Lemma singleton_subset_add {E} (x : E) s :
+    PropSet.subset (PropSet.singleton_set x) (PropSet.add s x).
+  Proof. cbv. tauto. Qed.
+
   Lemma add_correct :
     forall regs cstack lstack a b,
       map.get regs (gpreg x2) = Some a ->
@@ -1827,15 +1995,21 @@ Module Test.
         (fetch:=fetch_ctx [add_fn])
         "add"%string regs cstack lstack
         (fun regs' =>
-           regs' = map.put regs (gpreg x5) (cast32 (a + b))).
+           map.get regs' (gpreg x5) = Some (cast32 (a + b))
+           /\ clobbers [gpreg x5] regs regs').
   Proof.
     cbv [add_fn returns]. intros; subst.
+    track_registers_init.
+    
     eapply eventually_step.
     { simplify_side_condition. simplify_cast. apply eq_refl. }
-    intros; subst. remember_registers.
+    intros; subst.    
+    track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ ].
-    subst_lets. simplify_cast. reflexivity.
+    ssplit; try reflexivity; [ | ].
+    { solve_map. subst_lets. simplify_cast. reflexivity. }
+    { eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
   Qed.
 
   Lemma mul_correct :
@@ -1851,9 +2025,9 @@ Module Test.
         "mul"%string regs cstack lstack
         (fun regs' =>
            map.get regs' (gpreg x2) = Some (cast32 (a * b))
-           /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs').
+           /\ clobbers [gpreg x2; gpreg x5] regs regs').
   Proof.
-    cbv [mul_fn returns]. intros; subst.
+    cbv [mul_fn returns]. intros; subst. 
     repeat straightline_step.
  
     (* branch; use branch helper lemma *)
@@ -1862,18 +2036,15 @@ Module Test.
     { simplify_side_condition; reflexivity. }
     { simplify_side_condition; reflexivity. }
     { (* case: b = 0, exit early *)
-      intros; subst. eapply eventually_step.
-      { simplify_side_condition. apply eq_refl. }
-      intros; subst. eapply eventually_done.
+      intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
       simplify_cast.
       ssplit; try reflexivity; [ solve_map; reflexivity | ].
       (* only_differ clause *)
-      eapply map.only_differ_put.
-      cbv [PropSet.singleton_set PropSet.subset PropSet.of_list PropSet.elem_of In].
-      intros; subst. tauto. }
+      eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
     (* case: b <> 0, proceed *)
     intros; subst.
-
+ 
     (* loop; use loop invariant lemma *)
     let loop_end_pc := find_loop_end in
     eapply loop_invariant
@@ -1882,7 +2053,9 @@ Module Test.
       (invariant :=
          fun i regs' =>
            map.get regs' (gpreg x2) = Some (cast32 (a * (b - Z.of_nat i)))
-           /\ map.only_differ regs (PropSet.of_list [gpreg x2; gpreg x5]) regs').
+           /\ map.get regs' (gpreg x3) = Some a
+           /\ map.get regs' (gpreg x4) = Some b
+           /\ clobbers [gpreg x2; gpreg x5] regs regs').
     { reflexivity. }
     { reflexivity. }
     { simplify_side_condition; reflexivity. }
@@ -1890,11 +2063,8 @@ Module Test.
     { lia. }
     { lia. }
     { (* prove invariant holds at start *)
-      ssplit; [ | ].
-      { simplify_side_condition. simplify_cast. reflexivity. }
-      { simplify_side_condition. cbv [map.only_differ]. intro r.
-        destr (reg_eqb r (gpreg x2)); [ left | right; solve_map ].
-        cbn [PropSet.elem_of PropSet.of_list In]. tauto. } }
+      ssplit; simplify_side_condition; simplify_cast; [ reflexivity | ].
+      eapply clobbers_incl; eauto. cbv [incl In]; tauto. }
     { (* invariant step; proceed through loop and prove invariant still holds *)
       intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
 
@@ -1908,14 +2078,7 @@ Module Test.
       eapply eventually_jump.
       { reflexivity. }
       { lia. }
-      { apply add_correct; eauto; [ ].
-        lazymatch goal with H : map.only_differ _ _ ?regs |- context [map.get ?regs ?k]=>
-                              let H' := fresh in
-                              destruct (H k) as [? | H']; [ | rewrite <-H'; eauto ] end.
-        cbn [PropSet.elem_of PropSet.of_list In] in *.
-        repeat lazymatch goal with
-               | H : _ \/ _ |- _ => destruct H; try congruence; try contradiction
-               end. }
+      { apply add_correct; eauto. }
       { intros.
         rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
         eapply fetch_fn_disjoint; eauto; [ ].
@@ -1923,6 +2086,9 @@ Module Test.
 
       (* post-jump; continue *)
       cbv beta. intros; subst.
+      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      track_registers_combine.
+
       repeat straightline_step.
 
       (* end of loop; use loop-end helper lemma *)
@@ -1930,32 +2096,14 @@ Module Test.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
-        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.        
+        left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
         { simplify_side_condition. subst_lets. simplify_cast.
-          repeat (f_equal; try lia). }
-        { simplify_side_condition.
-          repeat lazymatch goal with
-                 | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
-                 | |- map.only_differ _ _ (map.put _ _ _) =>
-                     eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
-                 | |- PropSet.subset _ _ => reflexivity
-                 end; [ ].
-          cbv [PropSet.subset PropSet.union PropSet.of_list In PropSet.elem_of
-                 PropSet.singleton_set]. tauto. } }
+          repeat (f_equal; try lia). } }
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
         { simplify_side_condition. subst_lets; simplify_cast.
-          repeat (f_equal; try lia). }
-        { simplify_side_condition.
-          repeat lazymatch goal with
-                 | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
-                 | |- map.only_differ _ _ (map.put _ _ _) =>
-                     eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
-                 | |- PropSet.subset _ _ => reflexivity
-                 end; [ ].
-          cbv [PropSet.subset PropSet.union PropSet.of_list In PropSet.elem_of
-                 PropSet.singleton_set]. tauto. } } }
+          repeat (f_equal; try lia). } } }
  
     (* invariant implies postcondition (i.e. post-loop code) *)
     rewrite Z.sub_0_r; intros.
@@ -1965,9 +2113,7 @@ Module Test.
            end.
     simplify_side_condition.
     repeat straightline_step.
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. eapply eq_refl. }
-    intros; subst. eapply eventually_done.
+    intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; eauto.
   Qed.
 
@@ -1987,7 +2133,7 @@ Module Test.
         "add100"%string regs cstack lstack
         (fun regs' =>
            map.get regs' (gpreg x2) = Some (cast32 (a * 100))
-           /\ map.only_differ regs (PropSet.of_list [gpreg x2]) regs').
+           /\ clobbers [gpreg x2] regs regs').
   Proof.
     cbv [returns]; intros.
     straightline_step.
@@ -2008,24 +2154,19 @@ Module Test.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
-    Time do 10 straightline_step. (* 28s *)
+    Time do 10 straightline_step. (* .4s *)
 
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
-    { solve_map. subst_lets. simplify_cast.
+    { solve_map. subst_lets. rewrite !cast32_mod.
+      assert (0 < 2^32) by lia.
+      generalize dependent (2^32). intros.
+      Z.push_pull_mod.
       f_equal. f_equal. lia. }
     { (* only_differ clause *)
-      solve_map.
-      repeat lazymatch goal with
-             | |- map.only_differ ?m _ (map.put ?m _ _) =>
-                 eapply map.only_differ_put
-             | H : map.only_differ ?m1 _ ?m2 |- map.only_differ ?m1 _ ?m2 => apply H 
-             | |- map.only_differ _ _ (map.put _ _ _) =>
-                 eapply map.only_differ_trans; [ | eapply map.only_differ_put | ]
-             | |- PropSet.subset _ _ => reflexivity
-             end; [ ].
+      eapply clobbers_incl; eauto.
       cbv. tauto. }
-  Time Qed.
+  Time Qed. (* 1.2s *)
 
 
   (* Next: make ctrl1/run1 executable, test exec *)
