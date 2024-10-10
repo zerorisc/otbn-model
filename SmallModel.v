@@ -85,8 +85,6 @@ Section RegisterEquality.
     | _, _ => false
     end.
 
-  Print BoolSpec.
-  Print destr.destr.
   Local Ltac prove_eqb_spec r1 r2 :=
     destruct r1, r2; constructor; congruence.
   Global Instance gpr_eqb_spec : forall r1 r2, BoolSpec (r1 = r2) (r1 <> r2) (gpr_eqb r1 r2).
@@ -126,6 +124,12 @@ Section Stringify.
     end.
   Local Coercion csr_to_string : csr >-> string.
 
+  Definition reg_to_string (r : reg) : string :=
+    match r with
+    | gpreg r => r
+    | csreg r => r
+    end.
+
   Definition sinsn_to_string (i : sinsn) : string :=
     match i with
     | Addi rd rs imm =>
@@ -163,8 +167,7 @@ Local Infix "<<" := Z.shiftl (at level 40, only parsing) : Z_scope.
 Local Infix ">>" := Z.shiftr (at level 40, only parsing) : Z_scope.
 Local Coercion Z.b2z : bool >-> Z.
 
-(* Executable model of OTBN. *)
-Section Exec.
+Section Semantics.
   (* Parameterize over the representation of jump locations. *)
   Context {destination : Type}
     {destination_eqb : destination -> destination -> bool}
@@ -190,6 +193,30 @@ Section Exec.
   (* Convenience definition to cast to 32 bits *)
   Definition cast32 (v : Z) : Z := v &' Z.ones 32.
 
+  Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
+    match n with
+    | O => pc
+    | S n => advance_pc (repeat_advance_pc pc n)
+    end.
+
+  (* OTBN state definition *)
+  Local Notation call_stack := (list (destination * nat)) (only parsing).
+  Local Notation loop_stack := (list (destination * nat * nat)) (only parsing).
+  Inductive otbn_state : Type :=
+  | otbn_busy (pc : destination * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
+  | otbn_error (pc : destination * nat) (errs : list string)
+  | otbn_done (pc : destination * nat) (regs : regfile)
+  .
+  
+  Definition start_state (start_pc : destination * nat) : otbn_state :=
+    otbn_busy start_pc map.empty [] [].
+  
+  Definition get_pc (st : otbn_state) : destination * nat :=
+    match st with
+    | otbn_busy pc _ _ _ => pc
+    | otbn_error pc _ => pc
+    | otbn_done pc _ => pc
+    end.
 
   (* Code in this section can be used either for execution or for
      omnisemantics-style proofs depending on the parameters. *) 
@@ -233,138 +260,115 @@ Section Exec.
       | _ => P (map.put regs (gpreg r) (cast32 v))
       end.
 
-  Definition write_csr (regs : regfile) (r : csr) (v : Z) (P : regfile -> T) : T :=
-    match r with
-    | CSR_RND => P regs (* writes ignored *)
-    end.
+    Definition write_csr (regs : regfile) (r : csr) (v : Z) (P : regfile -> T) : T :=
+      match r with
+      | CSR_RND => P regs (* writes ignored *)
+      end.
 
-  Definition strt1
-    (regs : regfile) (i : sinsn) (post : regfile -> T) : T :=
-    match i with
-    | Addi d x imm =>
-        if is_valid_addi_imm imm
-        then 
+    Definition strt1
+      (regs : regfile) (i : sinsn) (post : regfile -> T) : T :=
+      match i with
+      | Addi d x imm =>
+          if is_valid_addi_imm imm
+          then
+            read_gpr regs x
+              (fun vx =>
+                 write_gpr regs d (vx + imm) post)
+          else err
+      | Add d x y =>
           read_gpr regs x
             (fun vx =>
-               write_gpr regs d (vx + imm) post)
-        else err
-    | Add d x y =>
-        read_gpr regs x
-          (fun vx =>
-             read_gpr regs y
-               (fun vy =>
-                  write_gpr regs d (vx + vy) post))
-    | Csrrs d x =>
-        read_gpr regs x
-          (fun vx =>
-             read_csr regs d
-               (fun vd =>
-                  write_csr regs d (Z.lxor vd vx) post))
-    end.
-  End ExecOrProof.
-  Definition prop_random (P : Z -> Prop) : Prop := forall v, P v.
-  Definition prop_option_bind (A : Type) (x : option A) (P : A -> Prop) : Prop :=
-    exists v, x = Some v /\ P v.
+               read_gpr regs y
+                 (fun vy =>
+                    write_gpr regs d (vx + vy) post))
+      | Csrrs d x =>
+          read_gpr regs x
+            (fun vx =>
+               read_csr regs d
+                 (fun vd =>
+                    write_csr regs d (Z.lxor vd vx)
+                      (fun regs =>
+                         write_gpr regs x vd post)))
+      end.
 
-  Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
-    match n with
-    | O => pc
-    | S n => advance_pc (repeat_advance_pc pc n)
-    end.
+    (* Pop an address off the call stack and jump to that location. *)
+    Definition call_stack_pop (st : otbn_state) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc regs cstack lstack =>
+          option_bind (hd_error cstack)
+                      (fun dst => post (otbn_busy dst regs (tl cstack) lstack))
+      | _ => post st
+      end.
 
-  Local Notation call_stack := (list (destination * nat)) (only parsing).
-  Local Notation loop_stack := (list (destination * nat * nat)) (only parsing).
-  Inductive otbn_state : Type :=
-  | otbn_busy (pc : destination * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
-  | otbn_error (pc : destination * nat) (errs : list string)
-  | otbn_done (pc : destination * nat) (regs : regfile)
-  .
-  Definition start_state (start_pc : destination * nat) : otbn_state :=
-    otbn_busy start_pc map.empty [] [].
-  Definition get_pc (st : otbn_state) : destination * nat :=
-    match st with
-    | otbn_busy pc _ _ _ => pc
-    | otbn_error pc _ => pc
-    | otbn_done pc _ => pc
-    end.
-  (* Pop an address off the call stack and jump to that location. *)
-  Definition call_stack_pop (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack =>
-        exists dst,
-        hd_error cstack = Some dst
-        /\ post (otbn_busy dst regs (tl cstack) lstack)
-    | _ => post st
-    end.
-  (* Push the next (one-advanced) PC onto the call stack. *)
-  Definition call_stack_push (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack =>
-        (length cstack < 8)%nat
-        /\ post (otbn_busy pc regs ((advance_pc pc) :: cstack) lstack)
-    | _ => post st
-    end.
-  Definition program_exit (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack => post (otbn_done pc regs)
-    | _ => post st
-    end.
-  Definition set_pc
-    (st : otbn_state) (pc : destination * nat) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
-    | _ => post st
-    end.
-  Definition set_regs (st : otbn_state) (regs : regfile) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc _ cstack lstack => post (otbn_busy pc regs cstack lstack)
-    | _ => post st
-    end.
-  Definition next_pc (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack => post (otbn_busy (advance_pc pc) regs cstack lstack)
-    | _ => post st
-    end.
-  Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : Z -> Prop) : Prop :=
-    match st with
-    | otbn_busy _ regs _ _ => read_gpr False prop_option_bind regs r post
-    | _ => False
-    end.
+    (* Push the next (one-advanced) PC onto the call stack. *)
+    Definition call_stack_push (st : otbn_state) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc regs cstack lstack =>
+          if (length cstack <? 8)%nat
+          then post (otbn_busy pc regs ((advance_pc pc) :: cstack) lstack)
+          else err
+      | _ => post st
+      end.
+    Definition program_exit (st : otbn_state) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc regs cstack lstack => post (otbn_done pc regs)
+      | _ => post st
+      end.
+    Definition set_pc
+      (st : otbn_state) (pc : destination * nat) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
+      | _ => post st
+      end.
+    Definition set_regs (st : otbn_state) (regs : regfile) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc _ cstack lstack => post (otbn_busy pc regs cstack lstack)
+      | _ => post st
+      end.
+    Definition next_pc (st : otbn_state) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc regs cstack lstack => post (otbn_busy (advance_pc pc) regs cstack lstack)
+      | _ => post st
+      end.
+    Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : Z -> T) : T :=
+      match st with
+      | otbn_busy _ regs _ _ => read_gpr regs r post
+      | _ => err
+      end.
 
-  (* Begin a new loop. *)
-  Definition loop_start
-    (st : otbn_state) (iters : nat) (post : otbn_state -> Prop) : Prop :=
-    match iters with
-    | O => False (* iters cannot be zero *)
-    | S iters =>
-        match st with
-        | otbn_busy pc regs cstack lstack =>          
-            let start_pc := advance_pc pc in
-            (length lstack < 8)%nat
-            /\ post (otbn_busy start_pc regs cstack ((start_pc, iters) :: lstack))
-        | _ => False
-        end
-    end.
+    (* Begin a new loop. *)
+    Definition loop_start
+      (st : otbn_state) (iters : nat) (post : otbn_state -> T) : T :=
+      match iters with
+      | O => err (* iters cannot be zero *)
+      | S iters =>
+          match st with
+          | otbn_busy pc regs cstack lstack =>          
+              let start_pc := advance_pc pc in
+              if (length lstack <? 8)%nat
+              then post (otbn_busy start_pc regs cstack ((start_pc, iters) :: lstack))
+              else err
+          | _ => err
+          end
+      end.
 
-  (* Finish a loop iteration (and potentially the entire loop).
-    Expects that the current PC matches the loop-body end PC of the
-    first loop stack entry. *)
-  Definition loop_end (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack =>
-        exists start_addr iters,
-        hd_error lstack = Some (start_addr, iters)
-        /\ match iters with
-           | O => post (otbn_busy (advance_pc pc) regs cstack (tl lstack))
-           | S iters =>
-               post (otbn_busy start_addr regs cstack
-                       ((start_addr, iters) :: tl lstack))
-           end
-    | _ => False
-    end.
-
-  (* TODO: is it possible to simplify the address logic here so we can
-    directly link "dst" as a block, even if it means repeated terms? *)
+    (* Finish a loop iteration (and potentially the entire loop).
+       Expects that the current PC matches the loop-body end PC of the
+       first loop stack entry. *)
+    Definition loop_end (st : otbn_state) (post : otbn_state -> T) : T :=
+      match st with
+      | otbn_busy pc regs cstack lstack =>
+          option_bind (hd_error lstack)
+                      (fun start_iters =>
+                             match (snd start_iters) with
+                             | O => post (otbn_busy (advance_pc pc) regs cstack (tl lstack))
+                             | S iters =>
+                                 post (otbn_busy (fst start_iters) regs cstack
+                                         ((fst start_iters, iters) :: tl lstack))
+                             end)
+      | _ => err
+      end.
+    
   (* TODO: is it necessary to simulate some error conditions? There
      should be a difference between "OTBN had an error", which
      sometimes should in fact happen on some inputs, and "this program
@@ -372,7 +376,7 @@ Section Exec.
      encoded). *)
   Definition ctrl1
     (st : otbn_state) (i : cinsn (destination:=destination))
-    (post : otbn_state -> Prop) : Prop :=
+    (post : otbn_state -> T) : T :=
     match i with
     | Ret =>  call_stack_pop st post
     | Ecall => program_exit st post
@@ -384,28 +388,35 @@ Section Exec.
             (* technically it is possible to write the PC to other
                registers but practically this is almost never done, so
                for now we don't model it *)
-            False
+            err
         end
     | Bne r1 r2 dst =>
         read_gpr_from_state st r1
           (fun v1 =>
              read_gpr_from_state st r2
                (fun v2 =>
-                  (v1 = v2 /\ next_pc st post)
-                  \/ (v1 <> v2 /\ set_pc st (dst, 0%nat) post)))
+                  if (v1 =? v2)
+                  then next_pc st post
+                  else set_pc st (dst, 0%nat) post))
     | Beq r1 r2 dst =>
         read_gpr_from_state st r1
           (fun v1 =>
              read_gpr_from_state st r2
                (fun v2 =>
-                  (v1 <> v2 /\ next_pc st post)
-                  \/ (v1 = v2 /\ set_pc st (dst, 0%nat) post)))
+                  if (v1 =? v2)
+                  then set_pc st (dst, 0%nat) post
+                  else next_pc st post))
     | Loopi v => loop_start st v post
     | Loop r => read_gpr_from_state st r
-                  (fun v => 0 < v /\ loop_start st (Z.to_nat v) post)
+                  (fun v => loop_start st (Z.to_nat v) post)
     | LoopEnd => loop_end st post
     end.
+  End ExecOrProof.
+  Definition prop_random (P : Z -> Prop) : Prop := forall v, P v.
+  Definition prop_option_bind (A : Type) (x : option A) (P : A -> Prop) : Prop :=
+    exists v, x = Some v /\ P v.
 
+  (* Prop model for proofs *)
   Definition run1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs cstack lstack =>
@@ -414,15 +425,62 @@ Section Exec.
         /\ match i with
            | Straightline i =>
                strt1 False prop_random prop_option_bind
-                     regs i
-                     (fun regs =>
-                        set_regs st regs
-                          (fun st => set_pc st (advance_pc pc) post))
-           | Control i => ctrl1 st i post
+                 regs i
+                 (fun regs =>
+                    set_regs st regs
+                      (fun st => set_pc st (advance_pc pc) post))
+           | Control i => ctrl1 False prop_option_bind st i post
            end
     | _ => post st
     end.
-End Exec.
+
+  (* For now, we don't model RND in the executable model. It would
+     theoretically be possible by e.g. plugging in a "next random" at
+     every exec1. *)
+  Definition exec_random (P : Z -> option otbn_state)
+    : option otbn_state := None.
+  Definition exec_option_bind
+    (A : Type) (x : option A) (P : A -> option otbn_state) : option otbn_state :=
+    match x with
+    | Some v => P v
+    | None => None
+    end.
+
+  (* Fully executable model. *)
+  Definition exec1 (st : otbn_state) : option otbn_state :=
+    match st with
+    | otbn_busy pc regs cstack lstack =>
+        match fetch pc with
+        | Some (Straightline i) =>
+            strt1 None exec_random exec_option_bind
+              regs i
+              (fun regs =>
+                 set_regs st regs
+                   (fun st => set_pc st (advance_pc pc) Some))
+        | Some (Control i) => ctrl1 None exec_option_bind st i Some
+        | None => None
+        end
+    | _ => Some st
+    end.
+
+  Definition is_busy (st : otbn_state) : bool :=
+    match st with
+    | otbn_busy _ _ _ _ => true
+    | _ => false
+    end.
+  Fixpoint exec (st : otbn_state) (fuel : nat) : option otbn_state :=
+    match fuel with
+    | O => None
+    | S fuel =>
+        match exec1 st with
+        | Some st =>
+            if is_busy st
+            then exec st fuel
+            else Some st
+        | None => None
+        end        
+    end.
+End Semantics.
 
 Section ErrorMonad.
   (* returns either a value or an error message, helpful for debugging *)
@@ -472,6 +530,11 @@ Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
 Local Coercion Straightline : sinsn >-> insn.
 Local Coercion Control : cinsn >-> insn.
+
+(* Contains proofs linking the executable and proof versions. *)
+Section Exec.
+  (* TODO *)
+End Exec.
  
 
 (* Contains a way to link programs. *)
@@ -1396,7 +1459,7 @@ Section Helpers.
     eapply eventually_step.
     { cbv [run1]; intros. eexists; split; [ eassumption | ].
       cbv iota. cbn [ctrl1 call_stack_push set_pc].
-      ssplit; [ lia .. | ]. apply eq_refl. }
+      destruct_one_match; try lia; apply eq_refl. }
     intros; subst.
     eapply eventually_trans;
       [ eapply fetch_weaken; eauto | intro st; destruct st; try contradiction ].
@@ -1477,7 +1540,7 @@ Section Helpers.
       eapply read_gpr_weaken; [ eassumption | ].
       intros; cbv [loop_start]. ssplit; [ lia .. | ].
       subst. rewrite Nat2Z.id.
-      ssplit; [ lia .. | ]. eapply eq_refl. }
+      destruct_one_match; try lia; eapply eq_refl. }
     intros; subst.
     eapply eventually_invariant
       with (iters := S iters)
@@ -1528,12 +1591,12 @@ Section Helpers.
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        cbv [next_pc]. right; ssplit; [ reflexivity | ]. apply eq_refl. }
+        destruct_one_match; try lia; [ ]. cbv [set_pc]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        cbv [next_pc]. left; ssplit; [ congruence | ]. apply eq_refl. }
+        destruct_one_match; try lia; [ ]. apply eq_refl. }
       intros; subst. eauto. }
   Qed.
 
@@ -1555,12 +1618,12 @@ Section Helpers.
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        cbv [next_pc]. left; ssplit; [ reflexivity | ]. apply eq_refl. }
+        destruct_one_match; try lia; [ ]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        cbv [next_pc]. right; ssplit; [ congruence | ]. apply eq_refl. }
+        destruct_one_match; try lia; [ ]. apply eq_refl. }
       intros; subst. eauto. }
   Qed.
 
@@ -1622,200 +1685,6 @@ Section Helpers.
 
   Lemma cast32_mod x : cast32 x = x mod 2^32.
   Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
-
-End Helpers.
-
-Ltac simplify_cast_step :=
-  lazymatch goal with
-  | |- context [cast32 ?x] => rewrite !cast32_mod
-  | |- context [_ + 0] => rewrite Z.add_0_r
-  | |- context [0 + _] => rewrite Z.add_0_l
-  | |- context [_ - 0] => rewrite Z.sub_0_r
-  | |- context [?x - ?x] => rewrite Z.sub_diag
-  | |- context [_ * 0] => rewrite Z.mul_0_r
-  | |- context [0 * _] => rewrite Z.mul_0_l
-  | |- context [_ * 1] => rewrite Z.mul_1_r
-  | |- context [1 * _] => rewrite Z.mul_1_l
-  | |- context [0 mod _] => rewrite Z.mod_0_l by lia
-  | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
-  | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
-  | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
-  | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
-  | _ => progress Z.push_pull_mod
-  end.
-Ltac simplify_cast := repeat simplify_cast_step.
-
-Ltac simplify_side_condition_step :=
-  match goal with
-  | |- exists _, _ => eexists
-  | |- _ /\ _ => split
-  | |- context [if is_valid_addi_imm ?v then _ else _] =>
-        replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
-  | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
-  | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
-  | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
-  | |- context [fetch_fn _ _] =>
-      erewrite fetch_fn_sym by
-      (cbn [fst snd]; first [ congruence | solve_map ])
-  | |- map.get _ _ = Some _ => solve_map
-  | H : map.get ?m ?k = Some _ |- context [match map.get ?m ?k with _ => _ end] =>
-      rewrite H
-  | |- context [match map.get _ _ with _ => _ end] => solve_map
-  | |- context [advance_pc (?dst, ?off)] =>
-      change (advance_pc (dst, off)) with (dst, S off)
-  | |- (_ < _) => lia
-  | |- (_ <= _) => lia                                   
-  | |- (_ < _)%nat => lia
-  | |- (_ <= _)%nat => lia
-  | |- Some _ = Some _ => reflexivity
-  | _ => first [ progress
-                   cbn [run1 strt1 read_gpr write_gpr ctrl1
-                          read_gpr_from_state
-                          set_pc set_regs call_stack_pop call_stack_push
-                          length hd_error tl skipn nth_error fold_left
-                          fetch fetch_ctx Nat.add fst snd
-                          repeat_advance_pc advance_pc]
-               | progress cbv [prop_random prop_option_bind
-                                 gpr_has_value]
-               | eassumption ]
-  end.
-Ltac simplify_side_condition := repeat simplify_side_condition_step.
-
-Module Test.
-  Context {regfile : map.map reg Z}
-    {regfile_ok : map.ok regfile}.
-  (* Test program 0 : a function that adds two registers.
-
-     start:
-       addi x2, x0, 2
-       addi x3, x0, 3
-       jal  x1, add
-       ecall
-
-     add:
-       add  x5, x2, x3
-       ret
-   *)
-  Definition add_fn : function :=
-    ("add"%string,
-      map.empty,
-      [(Add x5 x2 x3 : insn);
-       (Ret : insn)]).
-  Definition start_fn : function :=
-    ("start",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Jal x1 "add" : insn);
-        (Ecall : insn)])%string.
-
-  Compute (link [start_fn; add_fn]).
-
-  (* Test program 1 : build multiplication out of addition
-
-     mul:
-       addi   x2, x0, x0
-       beq    x4, x0, _mul_end
-       loop   x4, 2
-         jal    x1, add
-         addi   x2, x5, 0
-       _mul_end:
-       ret
-
-     add:
-       add  x5, x2, x3
-       ret
-   *)
-  Definition mul_fn : function :=
-    Eval cbn [List.app length] in (
-        let syms := map.empty in
-        let body : list insn :=
-          [ (Addi x2 x0 0 : insn);
-            (Beq x4 x0 "_mul_end" : insn);
-            (Loop x4 : insn);
-            (Jal x1 "add" : insn);
-            (Addi x2 x5 0 : insn);
-            (LoopEnd : insn)] in
-        let syms := map.put syms "_mul_end" (length body) in
-        let body := (body ++  [(Ret : insn)])%list in
-        ("mul", syms, body))%string.
-
-  Compute (link [mul_fn; add_fn]).
-
-  Ltac link_program fns :=
-    let val := eval vm_compute in (link fns) in
-    lazymatch val with
-    | inl ?x => exact x
-    | inr ?e => fail e
-    end.
-
-  Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
-
-  Lemma prog0_correct :
-    eventually
-      (run1 (fetch:=fetch prog0))
-      (fun st =>
-         match st with
-         | otbn_done _ regs =>
-             map.get regs (gpreg x5) = Some 5
-         | _ => False
-         end)
-      (start_state (0%nat, 0%nat)).
-  Proof.
-    cbv [prog0 start_state]; intros.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_done.
-    solve_map.
-  Qed.
-
-  Ltac get_next_insn :=
-    lazymatch goal with
-    | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
-        let i := eval vm_compute in (fetch pc) in
-          i
-    end.
-
-  (* Debugging tactic, prints the next instruction to be fetched. *)
-  Ltac print_next_insn :=
-    let i := ltac:(get_next_insn) in
-    idtac i.
-
-  (* Finds the PC that matches the end of the loop. *)
-  Ltac find_loop_end' fetch pc :=
-    let i := eval vm_compute in (fetch pc) in
-      match i with
-      | Some (Control LoopEnd) => pc
-      | Some (Control (Loop _)) =>
-          let end_pc := find_loop_end' fetch (advance_pc pc) in
-          find_loop_end' fetch (advance_pc end_pc)
-      | Some (Control (Loopi _)) =>
-          let end_pc := find_loop_end' fetch (advance_pc pc) in
-          find_loop_end' fetch (advance_pc end_pc)
-      | Some _ => find_loop_end' fetch (advance_pc pc)
-      | None => fail "reached end of function without finding loop end"
-      end.
-  Ltac find_loop_end :=
-    lazymatch goal with
-    | |- context [eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _)] =>
-        let i := eval vm_compute in (fetch pc) in
-          match i with
-          | Some (Control (Loop _)) => find_loop_end' fetch (advance_pc pc)
-          | Some (Control (Loopi _)) => find_loop_end' fetch (advance_pc pc)
-          | ?x => fail "expected a loop insn at " pc ", got " x
-          end
-    | _ => fail "could not determine fetch and pc from goal"
-    end.
 
   Definition clobbers (l : list reg) (regs regs' : regfile) : Prop :=
     map.only_differ regs (PropSet.of_list l) regs'.
@@ -1891,101 +1760,292 @@ Module Test.
     intuition idtac.
   Qed.
 
-  (* register tracking initialize *)
-  Ltac track_registers_init :=
-    let regs := lazymatch goal with
-                | |- context [otbn_busy _ ?regs] => regs end in
-    let regs' := fresh "regs" in
-    let H := fresh in
-    remember regs as regs' eqn:H;
-    assert (clobbers [] regs regs')
-      by (cbv [clobbers]; subst regs'; right; reflexivity);
-    (* rewrite back in postcondition but not state *)
-    rewrite H;
-    lazymatch goal with
-    | |- context [otbn_busy ?pc regs] =>
-        replace (otbn_busy pc regs) with (otbn_busy pc regs')
-        by (rewrite H; reflexivity)
-    end;
-    clear H.
+End Helpers.
 
-  Ltac track_registers_update_step :=    
-    lazymatch goal with
-    | H : clobbers ?l ?regs ?regs0
-      |- context [otbn_busy _ (map.put ?regs0 ?k ?v)] =>
-        let v' := fresh "v" in
-        set (v':= v);
-        (* try clobbers_step_in first, then more generic clobbers_step *)
-        first [ (let Hin := fresh in
-                 assert (In k l) as Hin by (cbv [In]; tauto);
-                 pose proof (clobbers_step_in l k v' _ _ H Hin))
-              | pose proof (clobbers_step l k v' _ _ H) ];
-        let regs1 := fresh "regs" in
-        let Hregs1 := fresh in
-        remember (map.put regs0 k v') as regs1 eqn:Hregs1;
-        assert (map.get regs1 k = Some v') by (subst regs1; apply map.get_put_same);
-        repeat lazymatch goal with
-          | H : map.get regs0 k = Some _ |- _ => clear H
-          | H : map.get regs0 ?r = Some ?v |- _ =>
-              assert (map.get regs1 r = Some v)
-              by (subst regs1; rewrite map.get_put_diff by congruence; eauto);
-              clear H
-          end;
-        clear Hregs1 H regs0
-    end.
-  Ltac track_registers_update :=
-    track_registers_update_step; repeat track_registers_update_step.
+Ltac simplify_cast_step :=
+  lazymatch goal with
+  | |- context [cast32 ?x] => rewrite !cast32_mod
+  | |- context [_ + 0] => rewrite Z.add_0_r
+  | |- context [0 + _] => rewrite Z.add_0_l
+  | |- context [_ - 0] => rewrite Z.sub_0_r
+  | |- context [?x - ?x] => rewrite Z.sub_diag
+  | |- context [_ * 0] => rewrite Z.mul_0_r
+  | |- context [0 * _] => rewrite Z.mul_0_l
+  | |- context [_ * 1] => rewrite Z.mul_1_r
+  | |- context [1 * _] => rewrite Z.mul_1_l
+  | |- context [0 mod _] => rewrite Z.mod_0_l by lia
+  | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
+  | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
+  | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
+  | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
+  | _ => progress Z.push_pull_mod
+  end.
+Ltac simplify_cast := repeat simplify_cast_step.
 
-  (* use after a jump to combine the postconditions *)
-  Ltac track_registers_combine :=
-    lazymatch goal with
-    | H0 : clobbers ?l0 ?regs ?regs0,
-        H1 : clobbers ?l1 ?regs0 ?regs1
-      |- context [otbn_busy _ ?regs1] =>
-        repeat lazymatch goal with
-          | H : map.get regs0 ?r = _ |- _ =>
-              try (let Hnin := fresh in
-                   assert (~ In r l1) as Hnin by (cbv [In]; intuition congruence);
-                   pose proof (clobbers_not_in l1 _ _ _ _ H1 H Hnin);
-                   clear Hnin);
-              clear H
-          end;
-        let l2 := (eval vm_compute in (List.dedup reg_eqb (l0 ++ l1))) in
-        pose proof (clobbers_trans_dedup _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
-        clear H0 H1; try clear regs0
-    end.
+Ltac simplify_side_condition_step :=
+  match goal with
+  | |- exists _, _ => eexists
+  | |- _ /\ _ => split
+  | |- context [if is_valid_addi_imm ?v then _ else _] =>
+        replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
+  | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
+  | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
+  | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
+  | |- context [fetch_fn _ _] =>
+      erewrite fetch_fn_sym by
+      (cbn [fst snd]; first [ congruence | solve_map ])
+  | |- map.get _ _ = Some _ => solve_map
+  | H : map.get ?m ?k = Some _ |- context [match map.get ?m ?k with _ => _ end] =>
+      rewrite H
+  | |- context [match map.get _ _ with _ => _ end] => solve_map
+  | |- context [advance_pc (?dst, ?off)] =>
+      change (advance_pc (dst, off)) with (dst, S off)
+  | |- (_ < _) => lia
+  | |- (_ <= _) => lia                                   
+  | |- (_ < _)%nat => lia
+  | |- (_ <= _)%nat => lia
+  | |- Some _ = Some _ => reflexivity
+  | _ => first [ progress
+                   cbn [run1 strt1 read_gpr write_gpr ctrl1
+                          read_gpr_from_state
+                          set_pc set_regs call_stack_pop call_stack_push
+                          length hd_error tl skipn nth_error fold_left
+                          fetch fetch_ctx Nat.add fst snd
+                          repeat_advance_pc advance_pc]
+               | progress cbv [prop_random prop_option_bind
+                                 gpr_has_value]
+               | eassumption ]
+  end.
+Ltac simplify_side_condition := repeat simplify_side_condition_step.
 
-  Ltac check_register_tracking :=
-    lazymatch goal with
-    | H : clobbers _ _ ?regs0 |- context [?regs0] => idtac
-    | _ => fail "cannot find register tracking; did you run track_registers_init?"
+(* Run the linker to compute the fully linked version of a program *)
+Ltac link_program fns :=
+  let val := eval vm_compute in (link fns) in
+    lazymatch val with
+    | inl ?x => exact x
+    | inr ?e => fail e
     end.
 
-  Ltac init_register_tracking_if_missing :=
-    first [ check_register_tracking
-          | track_registers_init ].
+Ltac get_next_insn :=
+  lazymatch goal with
+  | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
+      let i := eval vm_compute in (fetch pc) in
+        i
+  end.
 
-  Ltac straightline_step :=
-    init_register_tracking_if_missing;
-    let i := get_next_insn in
-    lazymatch i with
-    | Some (Straightline _) =>
-        intros; subst; eapply eventually_step;
-        [ simplify_side_condition; [ .. | try eapply eq_refl]
-        | intros; subst; track_registers_update ]
-    | Some ?i => fail "next instruction is not straightline:" i
-    | None => fail "pc is invalid?"
+(* Debugging tactic, prints the next instruction to be fetched. *)
+Ltac print_next_insn :=
+  let i := ltac:(get_next_insn) in
+  idtac i.
+
+(* Finds the PC that matches the end of the loop. *)
+Ltac find_loop_end' fetch pc :=
+  let i := eval vm_compute in (fetch pc) in
+    match i with
+    | Some (Control LoopEnd) => pc
+    | Some (Control (Loop _)) =>
+        let end_pc := find_loop_end' fetch (advance_pc pc) in
+        find_loop_end' fetch (advance_pc end_pc)
+    | Some (Control (Loopi _)) =>
+        let end_pc := find_loop_end' fetch (advance_pc pc) in
+        find_loop_end' fetch (advance_pc end_pc)
+    | Some _ => find_loop_end' fetch (advance_pc pc)
+    | None => fail "reached end of function without finding loop end"
     end.
+Ltac find_loop_end :=
+  lazymatch goal with
+  | |- context [eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _)] =>
+      let i := eval vm_compute in (fetch pc) in
+        match i with
+        | Some (Control (Loop _)) => find_loop_end' fetch (advance_pc pc)
+        | Some (Control (Loopi _)) => find_loop_end' fetch (advance_pc pc)
+        | ?x => fail "expected a loop insn at " pc ", got " x
+        end
+  | _ => fail "could not determine fetch and pc from goal"
+  end.
 
-  Ltac subst_lets_step :=
-    multimatch goal with
-    | x := _ |- _ => lazymatch goal with |- context [x] => subst x end
-    end.
-  Ltac subst_lets := repeat subst_lets_step.
+(* register tracking initialize *)
+Ltac track_registers_init :=
+  let regs := lazymatch goal with
+              | |- context [otbn_busy _ ?regs] => regs end in
+  let regs' := fresh "regs" in
+  let H := fresh in
+  remember regs as regs' eqn:H;
+  assert (clobbers [] regs regs')
+    by (cbv [clobbers]; subst regs'; right; reflexivity);
+  (* rewrite back in postcondition but not state *)
+  rewrite H;
+  lazymatch goal with
+  | |- context [otbn_busy ?pc regs] =>
+      replace (otbn_busy pc regs) with (otbn_busy pc regs')
+      by (rewrite H; reflexivity)
+  end;
+  clear H.
 
-  Lemma singleton_subset_add {E} (x : E) s :
-    PropSet.subset (PropSet.singleton_set x) (PropSet.add s x).
-  Proof. cbv. tauto. Qed.
+Ltac track_registers_update_step :=    
+  lazymatch goal with
+  | H : clobbers ?l ?regs ?regs0
+    |- context [otbn_busy _ (map.put ?regs0 ?k ?v)] =>
+      let v' := fresh "v" in
+      set (v':= v);
+      (* try clobbers_step_in first, then more generic clobbers_step *)
+      first [ (let Hin := fresh in
+               assert (In k l) as Hin by (cbv [In]; tauto);
+               pose proof (clobbers_step_in l k v' _ _ H Hin))
+            | pose proof (clobbers_step l k v' _ _ H) ];
+      let regs1 := fresh "regs" in
+      let Hregs1 := fresh in
+      remember (map.put regs0 k v') as regs1 eqn:Hregs1;
+      assert (map.get regs1 k = Some v') by (subst regs1; apply map.get_put_same);
+      repeat lazymatch goal with
+        | H : map.get regs0 k = Some _ |- _ => clear H
+        | H : map.get regs0 ?r = Some ?v |- _ =>
+            assert (map.get regs1 r = Some v)
+            by (subst regs1; rewrite map.get_put_diff by congruence; eauto);
+            clear H
+        end;
+      clear Hregs1 H regs0
+  end.
+Ltac track_registers_update :=
+  track_registers_update_step; repeat track_registers_update_step.
+
+(* use after a jump to combine the postconditions *)
+Ltac track_registers_combine :=
+  lazymatch goal with
+  | H0 : clobbers ?l0 ?regs ?regs0,
+      H1 : clobbers ?l1 ?regs0 ?regs1
+    |- context [otbn_busy _ ?regs1] =>
+      repeat lazymatch goal with
+        | H : map.get regs0 ?r = _ |- _ =>
+            try (let Hnin := fresh in
+                 assert (~ In r l1) as Hnin by (cbv [In]; intuition congruence);
+                 pose proof (clobbers_not_in l1 _ _ _ _ H1 H Hnin);
+                 clear Hnin);
+            clear H
+        end;
+      let l2 := (eval vm_compute in (List.dedup reg_eqb (l0 ++ l1))) in
+      pose proof (clobbers_trans_dedup _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
+      clear H0 H1; try clear regs0
+  end.
+
+Ltac check_register_tracking :=
+  lazymatch goal with
+  | H : clobbers _ _ ?regs0 |- context [?regs0] => idtac
+  | _ => fail "cannot find register tracking; did you run track_registers_init?"
+  end.
+
+Ltac init_register_tracking_if_missing :=
+  first [ check_register_tracking
+        | track_registers_init ].
+
+Ltac straightline_step :=
+  init_register_tracking_if_missing;
+  let i := get_next_insn in
+  lazymatch i with
+  | Some (Straightline _) =>
+      intros; subst; eapply eventually_step;
+      [ simplify_side_condition; [ .. | try eapply eq_refl]
+      | intros; subst; track_registers_update ]
+  | Some ?i => fail "next instruction is not straightline:" i
+  | None => fail "pc is invalid?"
+  end.
+
+Ltac subst_lets_step :=
+  multimatch goal with
+  | x := _ |- _ => lazymatch goal with |- context [x] => subst x end
+  end.
+Ltac subst_lets := repeat subst_lets_step.
+
+Module Test.  
+  Context {regfile : map.map reg Z}
+    {regfile_ok : map.ok regfile}.
+  (* Test program 0 : a function that adds two registers.
+
+     start:
+       addi x2, x0, 2
+       addi x3, x0, 3
+       jal  x1, add
+       ecall
+
+     add:
+       add  x5, x2, x3
+       ret
+   *)
+  Definition add_fn : function :=
+    ("add"%string,
+      map.empty,
+      [(Add x5 x2 x3 : insn);
+       (Ret : insn)]).
+  Definition start_fn : function :=
+    ("start",
+      map.empty,
+      [ (Addi x2 x0 2 : insn);
+        (Addi x3 x0 3 : insn);
+        (Jal x1 "add" : insn);
+        (Ecall : insn)])%string.
+
+  Compute (link [start_fn; add_fn]).
+
+  (* Test program 1 : build multiplication out of addition
+
+     mul:
+       addi   x2, x0, x0
+       beq    x4, x0, _mul_end
+       loop   x4, 2
+         jal    x1, add
+         addi   x2, x5, 0
+       _mul_end:
+       ret
+
+     add:
+       add  x5, x2, x3
+       ret
+   *)
+  Definition mul_fn : function :=
+    Eval cbn [List.app length] in (
+        let syms := map.empty in
+        let body : list insn :=
+          [ (Addi x2 x0 0 : insn);
+            (Beq x4 x0 "_mul_end" : insn);
+            (Loop x4 : insn);
+            (Jal x1 "add" : insn);
+            (Addi x2 x5 0 : insn);
+            (LoopEnd : insn)] in
+        let syms := map.put syms "_mul_end" (length body) in
+        let body := (body ++  [(Ret : insn)])%list in
+        ("mul", syms, body))%string.
+
+  Compute (link [mul_fn; add_fn]).
+
+  Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
+
+  Lemma prog0_correct :
+    eventually
+      (run1 (fetch:=fetch prog0))
+      (fun st =>
+         match st with
+         | otbn_done _ regs =>
+             map.get regs (gpreg x5) = Some 5
+         | _ => False
+         end)
+      (start_state (0%nat, 0%nat)).
+  Proof.
+    cbv [prog0 start_state]; intros.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst. eapply eventually_done.
+    solve_map.
+  Qed.
 
   Lemma add_correct :
     forall regs cstack lstack a b,
@@ -2122,14 +2182,14 @@ Module Test.
     (("add" ++ String.of_nat n)%string,
       map.empty,
       (Addi x2 x0 0 : insn) :: repeat (Add x2 x2 x3 : insn) n ++ [(Ret : insn)]).
-  Definition add100 : function := Eval vm_compute in (repeat_add 100).
+  Definition add100_fn : function := Eval vm_compute in (repeat_add 100).
 
   Lemma add100_correct :
     forall regs cstack lstack a,
       map.get regs (gpreg x3) = Some a ->
       0 <= a ->
       returns
-        (fetch:=fetch_ctx [add100])
+        (fetch:=fetch_ctx [add100_fn])
         "add100"%string regs cstack lstack
         (fun regs' =>
            map.get regs' (gpreg x2) = Some (cast32 (a * 100))
@@ -2137,14 +2197,6 @@ Module Test.
   Proof.
     cbv [returns]; intros.
     straightline_step.
-    (* almost all the time here is currently taken in solving the map
-       to get the value of x3, which requires substing all the
-       map-lets since the beginning because x3 doesn't change *)
-    (* can we do this better? instead of map.put, maybe we have a new
-       map such that x2 = new value and otherwise no changes *)
-    (* maybe we always have a state such that we forget everything except:
-       - the values of live registers
-       - the only_differ from the original state *)
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
@@ -2168,9 +2220,56 @@ Module Test.
       cbv. tauto. }
   Time Qed. (* 1.2s *)
 
-
-  (* Next: make ctrl1/run1 executable, test exec *)
-  (* Next: try to apply link_run1, then try to prove it if form is OK *)
-  (* Next: try to add more realistic error conditions for e.g. loop errors *)
-
 End Test.
+
+Module SortedListRegs.
+  Definition ltb (r1 r2 : reg) := String.ltb (reg_to_string r1) (reg_to_string r2).
+  Definition Build_parameters (T : Type) : SortedList.parameters.parameters :=
+    {|
+      SortedList.parameters.key := reg;
+      SortedList.parameters.value := T;
+      SortedList.parameters.ltb := ltb;
+    |}.
+  Definition reg_strict_order : SortedList.parameters.strict_order ltb.
+  Proof.
+    cbv [ltb reg_to_string gpr_to_string csr_to_string]; constructor; intros.
+    { abstract (repeat destruct_one_match; apply eq_refl). }
+    { abstract (repeat destruct_one_match; try apply eq_refl;
+                repeat destruct_one_match_hyp; assumption). }
+    { abstract (repeat destruct_one_match_hyp; try reflexivity;
+                exfalso; cbv in *; try congruence). }
+  Defined.
+
+  Global Instance reg_map : map.map reg Z :=
+    SortedList.map (Build_parameters Z) reg_strict_order.
+
+End SortedListRegs.
+
+Module ExecTest.
+  (* Check that exec works *)
+  Eval vm_compute in
+    (exec1 (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat))).
+  Eval vm_compute in
+    (exec (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat)) 100).
+
+  (* scaling factor; create a program with ~n instructions *)
+  Definition n := 10000.
+  Definition add_fn : function := Eval vm_compute in (Test.repeat_add 10000).
+  Definition start_fn : function :=
+    ("start",
+      map.empty,
+      [ (Addi x3 x0 23 : insn);
+        (Jal x1 (fst (fst add_fn)) : insn);
+        (Ecall : insn)])%string.
+
+  (* Check that exec completes in a reasonable amount of time *)
+  Definition prog : program := ltac:(link_program [start_fn; add_fn]).
+  Time
+    Eval vm_compute in
+    (exec (fetch:=fetch prog) (start_state (0%nat, 0%nat)) (length prog)).
+
+End ExecTest.
+
+(* Next: use the maybe monad in exec model for better error messages *)
+(* Next: try to apply link_run1, then try to prove it if form is OK *)
+(* Next: try to add more realistic error conditions for e.g. loop errors *)
