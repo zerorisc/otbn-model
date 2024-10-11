@@ -887,7 +887,64 @@ Section BuildProofs.
     cbv [add_symbol]; destruct_one_match; intros; err_simpl; auto using map.get_put_same.
   Qed.
 
-  Lemma link_symbols_for_function_correct fn start_syms start_offset syms end_offset :
+  Lemma merge_symbols_correct fn_syms global_offset global_syms :
+    forall syms,
+      merge_symbols global_offset global_syms fn_syms = Ok syms ->
+      (forall label label_offset,
+          map.get fn_syms label = Some label_offset ->
+          map.get syms label = Some (global_offset + label_offset)%nat).
+  Proof.
+    cbv [merge_symbols]. intros *.
+    (*
+    apply (map.fold_spec
+            (fun (fn_syms : symbols) (syms : maybe symbols) =>
+               exists syms',
+                 syms = inl syms'
+                 /\ (forall label label_offset,
+                        map.get fn_syms label = Some label_offset ->
+                        map.get syms' label = Some (global_offset + label_offset)%nat))). *)
+    apply map.fold_spec.
+    { intros. rewrite map.get_empty in *. congruence. }
+    { intros. err_simpl.
+      repeat lazymatch goal with
+             | H : map.get (map.put _ ?x _) ?y = Some _ |- _ =>
+                 destr (String.eqb x y);
+                 [ rewrite map.get_put_same in H
+                 | rewrite map.get_put_diff in H by congruence ]
+             | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+             end.
+      { eauto using add_symbol_correct. }
+      { eapply H0.
+        eapply add_symbol_no_overwrite. [ | eassumption ].
+        eapply H0.
+        
+
+
+    
+    apply (map.fold_spec (fun fn_syms syms =>
+                            forall label label_offset,
+                              map.get fn_syms label = Some label_offset ->
+                              map.get syms label = Some (global_offset + label_offset)%nat)).
+    Check map.fold_spec.
+    lazymatch goal with
+    | |- forall syms,
+        map.fold _ _ _ = ?x -> ?Q =>
+        apply (map.fold_spec (fun fn_syms syms => forall m = x -> Q))
+    end; intros; err_simpl; eauto using add_symbol_no_overwrite.
+  Qed.
+
+  Lemma link_symbols_for_function_correct
+    fn start_syms start_offset syms end_offset dst fn_offset :
+      link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, end_offset) ->
+      get_label_offset fn dst = Some fn_offset ->
+      map.get syms dst = Some (start_offset + fn_offset)%nat.
+  Proof.
+    destruct fn as [[fn_name fn_syms] fn_insns].
+    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros; err_simpl.
+    eauto using add_symbol_correct, merge_symbols_no_overwrite.    
+  Qed.
+
+  Lemma link_symbols_for_function_name fn start_syms start_offset syms end_offset :
       link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, end_offset) ->
       map.get syms (fst (fst fn)) = Some start_offset.
   Proof.
@@ -895,6 +952,27 @@ Section BuildProofs.
     cbv [link_symbols_for_function]; cbn [bind fst snd]; intros; err_simpl.
     eauto using add_symbol_correct, merge_symbols_no_overwrite.    
   Qed.
+
+  Lemma link_symbols'_correct :
+    forall fns1 fns2 fn start_syms start_offset syms end_offset fn_offset dst,
+    link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
+    get_label_offset fn dst = Some fn_offset ->
+    map.get syms dst = Some (program_size start_offset fns1 + fn_offset)%nat.
+  Proof.
+    cbv [program_size]; induction fns1; intros.
+    { rewrite ?app_nil_l in *. cbn [link_symbols' maybe_fold_left] in *.
+      err_simpl. destruct_products.
+      eauto using link_symbols'_no_overwrite, link_symbols_for_function_correct. }
+    { rewrite <-?app_comm_cons in *. cbn [fold_left].
+      repeat lazymatch goal with
+             | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+                 eapply link_symbols'_inv in H
+             | H: link_symbols_for_function _ _ = Ok _ |- _ =>               
+                 apply link_symbols_for_function_size in H; subst
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | _ => subst; solve [eauto]                                 
+             end. }
 
   Lemma link_symbols'_correct :
     forall fns1 fns2 fn start_syms start_offset syms end_offset,
@@ -1208,6 +1286,19 @@ Section BuildProofs.
              end.
       eexists; ssplit; eauto using in_cons. }
   Qed.
+
+  Lemma link_symbols'_label
+    fns1 fns2 fn start_syms start_offset syms end_offset fn_offset dst :
+    link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
+    get_label_offset fn dst = Some fn_offset ->
+    map.get syms dst = Some (program_size start_offset fns1 + fn_offset)%nat.
+  Proof.
+    intros
+    fns1 fns2 fn start_syms start_offset syms end_offset fn_offset dst :
+    link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
+    get_label_offset fn dst = Some fn_offset ->
+    map.get syms dst = Some (program_size start_offset fns1 + fn_offset)%nat.
+  Qed.
     
   Lemma link_fetch syms prog fns pc1 pc2 i1 :
     link fns = Ok prog ->
@@ -1229,7 +1320,29 @@ Section BuildProofs.
            | H : _ /\ _ |- _ => destruct H; subst
            | H : exists _, _ |- _ => destruct H
            | H : fetch_fn ?fn (fst (fst ?fn), _) = Some _ |- _ => rewrite fetch_fn_name in H
+    
+           | H : fetch_fn _ _ = Some _ |- _ => apply fetch_fn_Some in H
+           | H : @nth_error insn _ ?n = Some _, H' : linked_at _ _ _ _ |- _ =>
+               specialize (H' n ltac:(eauto using List.nth_error_Some_bound_index))
            end.
+
+    lazymatch goal with
+    | H : nth_error ?l ?i = Some ?x, H' : nth_error ?l ?i = Some ?y |- _ =>
+        assert (x = y) by congruence; subst
+    end.
+    cbv [fetch] in *. cbn [fst snd] in *.
+
+    (* fetch prog (global, local) = nth_error prog (global + local) *)
+    (* it feels like we do have enough information in linked_at... *)
+    (* need to say map.get syms (fst pc1) = Some (fst pc2)
+       implies that pc2 = global offset + fn offset -- fundamentally about link_symbols! *)
+
+    Print link_symbols.
+    Search link_symbols.
+    Search link_symbols'.
+    Search link_symbols_for_function.
+
+    
            | H : fetch_fn _ _ = Some _ |- _ => apply fetch_fn_Some in H
            | H : @nth_error insn _ ?n = Some _, H' : linked_at _ _ _ _ |- _ =>
                specialize (H' n ltac:(eauto using List.nth_error_Some_bound_index))
