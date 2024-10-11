@@ -43,13 +43,13 @@ Section ISA.
   .
 
   (* Control-flow instructions *)
-  Inductive cinsn {destination : Type} : Type :=
+  Inductive cinsn {label : Type} : Type :=
   (* TODO: technically ret is a special case of JALR, but only RET is used in practice *)
   | Ret : cinsn
   | Ecall : cinsn
-  | Jal : gpr -> destination -> cinsn
-  | Bne : gpr -> gpr -> destination -> cinsn
-  | Beq : gpr -> gpr -> destination -> cinsn
+  | Jal : gpr -> label -> cinsn
+  | Bne : gpr -> gpr -> label -> cinsn
+  | Beq : gpr -> gpr -> label -> cinsn
   (* Note: loops here use an end instruction instead of an iteration
      count to make codegen and processing easier. *)
   | Loop : gpr -> cinsn
@@ -57,9 +57,9 @@ Section ISA.
   | LoopEnd : cinsn
   .
 
-  Inductive insn {destination : Type} : Type :=
+  Inductive insn {label : Type} : Type :=
   | Straightline : sinsn -> insn
-  | Control : cinsn (destination:=destination) -> insn
+  | Control : cinsn (label:=label) -> insn
   .
 End ISA.
 
@@ -102,8 +102,8 @@ Section RegisterEquality.
 End RegisterEquality.
 
 Section Stringify.
-  Context {destination : Type} {destination_to_string : destination -> string}.
-  Local Coercion destination_to_string : destination >-> string.
+  Context {label : Type} {label_to_string : label -> string}.
+  Local Coercion label_to_string : label >-> string.
 
   Definition gpr_to_string (r : gpr) : string :=
     match r with
@@ -140,7 +140,7 @@ Section Stringify.
         "csrrs " ++ rd ++ ", " ++ rs ++ ", "
     end.
 
-  Definition cinsn_to_string (i : cinsn (destination:=destination)) : string :=
+  Definition cinsn_to_string (i : cinsn (label:=label)) : string :=
     match i with
     | Ret => "ret"
     | Ecall => "ecall"
@@ -169,14 +169,14 @@ Local Coercion Z.b2z : bool >-> Z.
 
 Section Semantics.
   (* Parameterize over the representation of jump locations. *)
-  Context {destination : Type}
-    {destination_eqb : destination -> destination -> bool}
-    {destination_eqb_spec :
-      forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (destination_eqb d1 d2)}.
-  Definition advance_pc (pc : destination * nat) := (fst pc, S (snd pc)).
+  Context {label : Type}
+    {label_eqb : label -> label -> bool}
+    {label_eqb_spec :
+      forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (label_eqb d1 d2)}.
+  Definition advance_pc (pc : label * nat) := (fst pc, S (snd pc)).
   (* Parameterize over the map implementation. *)
   Context {regfile : map.map reg Z}
-    {fetch : destination * nat -> option (insn (destination:=destination))}.
+    {fetch : label * nat -> option (insn (label:=label))}.
 
   (* Really, I want to talk about terminal states -- either a return
      from the subroutine, the end of the program, or an error.
@@ -193,25 +193,25 @@ Section Semantics.
   (* Convenience definition to cast to 32 bits *)
   Definition cast32 (v : Z) : Z := v &' Z.ones 32.
 
-  Fixpoint repeat_advance_pc (pc : destination * nat) (n : nat) : destination * nat :=
+  Fixpoint repeat_advance_pc (pc : label * nat) (n : nat) : label * nat :=
     match n with
     | O => pc
     | S n => advance_pc (repeat_advance_pc pc n)
     end.
 
   (* OTBN state definition *)
-  Local Notation call_stack := (list (destination * nat)) (only parsing).
-  Local Notation loop_stack := (list (destination * nat * nat)) (only parsing).
+  Local Notation call_stack := (list (label * nat)) (only parsing).
+  Local Notation loop_stack := (list (label * nat * nat)) (only parsing).
   Inductive otbn_state : Type :=
-  | otbn_busy (pc : destination * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
-  | otbn_error (pc : destination * nat) (errs : list string)
-  | otbn_done (pc : destination * nat) (regs : regfile)
+  | otbn_busy (pc : label * nat) (regs : regfile) (cstack : call_stack) (lstack : loop_stack)
+  | otbn_error (pc : label * nat) (errs : list string)
+  | otbn_done (pc : label * nat) (regs : regfile)
   .
   
-  Definition start_state (start_pc : destination * nat) : otbn_state :=
+  Definition start_state (start_pc : label * nat) : otbn_state :=
     otbn_busy start_pc map.empty [] [].
   
-  Definition get_pc (st : otbn_state) : destination * nat :=
+  Definition get_pc (st : otbn_state) : label * nat :=
     match st with
     | otbn_busy pc _ _ _ => pc
     | otbn_error pc _ => pc
@@ -315,7 +315,7 @@ Section Semantics.
       | _ => post st
       end.
     Definition set_pc
-      (st : otbn_state) (pc : destination * nat) (post : otbn_state -> T) : T :=
+      (st : otbn_state) (pc : label * nat) (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy _ regs cstack lstack => post (otbn_busy pc regs cstack lstack)
       | _ => post st
@@ -375,7 +375,7 @@ Section Semantics.
      is not valid" (e.g. out-of-bounds immediate value that cannot be
      encoded). *)
   Definition ctrl1
-    (st : otbn_state) (i : cinsn (destination:=destination))
+    (st : otbn_state) (i : cinsn (label:=label))
     (post : otbn_state -> T) : T :=
     match i with
     | Ret =>  call_stack_pop st post
@@ -540,7 +540,7 @@ End Exec.
 (* Contains a way to link programs. *)
 Section Build.
   (* TODO: how should we now represent programs? All we need is fetch. *)
-  (* option: map from string -> list insn, so that all destinations
+  (* option: map from string -> list insn, so that all labels
      that are jumped to need an entry. The list insns can
      overlap. Execution should not pass the end. *)
   (* Can this cause problems with cycles or too much redundancy? *)
@@ -554,11 +554,11 @@ Section Build.
 
   (* Functions consist of a name, internal labels (map of string ->
      offset within the function), and a list of instructions. *)
-  Definition function : Type := string * symbols * list (insn (destination:=string)).
+  Definition function : Type := string * symbols * list (insn (label:=string)).
   (* Programs are lists of instructions that link to each other with
      offsets within the global program. This represents code
      post-linking. *)
-  Definition program : Type := list (insn (destination:=nat)).
+  Definition program : Type := list (insn (label:=nat)).
 
   Definition add_symbol (syms : symbols) (label : string) (offset : nat)
     : maybe symbols :=
@@ -595,19 +595,19 @@ Section Build.
      Ok (fst syms_offset)).
 
   Definition link_cinsn
-    (syms : map.rep (map:=symbols)) (i : cinsn (destination:=string))
-    : maybe (cinsn (destination:=nat)) :=
+    (syms : map.rep (map:=symbols)) (i : cinsn (label:=string))
+    : maybe (cinsn (label:=nat)) :=
     match i with
     | Ret => Ok Ret
     | Ecall => Ok Ecall
     | Jal r dst =>
-        (dst <- map_err (map.get syms dst) ("Destination " ++ dst ++ " not found (jal)");
+        (dst <- map_err (map.get syms dst) ("Label " ++ dst ++ " not found (jal)");
          Ok (Jal r dst))
     | Bne r1 r2 dst =>
-        (dst <- map_err (map.get syms dst) ("Destination " ++ dst ++ " not found (bne)");
+        (dst <- map_err (map.get syms dst) ("Label " ++ dst ++ " not found (bne)");
          Ok (Bne r1 r2 dst))
     | Beq r1 r2 dst =>
-        (dst <- map_err (map.get syms dst) ("Destination " ++ dst ++ " not found (beq)");
+        (dst <- map_err (map.get syms dst) ("Label " ++ dst ++ " not found (beq)");
          Ok (Beq r1 r2 dst))
     | Loop r => Ok (Loop r)
     | Loopi imm => Ok (Loopi imm)
@@ -615,8 +615,8 @@ Section Build.
     end.
 
   Definition link_insn
-    (syms : symbols) (i : insn (destination:=string))
-    : maybe (insn (destination:=nat)) :=
+    (syms : symbols) (i : insn (label:=string))
+    : maybe (insn (label:=nat)) :=
     match i with
     | Straightline i => Ok (Straightline i)
     | Control i =>
@@ -625,8 +625,8 @@ Section Build.
     end.
 
   Fixpoint link_insns
-    (syms : symbols) (insns : list (insn (destination:=string)))
-    : maybe (list (insn (destination:=nat))) :=
+    (syms : symbols) (insns : list (insn (label:=string)))
+    : maybe (list (insn (label:=nat))) :=
     match insns with
     | [] => Ok []
     | i :: insns =>
@@ -682,8 +682,8 @@ Section Build.
     nth_error prog (global_offset + fn_offset).
 
   Definition cinsn_equiv (syms : symbols)
-    (i1 : cinsn (destination:=string))
-    (i2 : cinsn (destination:=nat)) : Prop :=
+    (i1 : cinsn (label:=string))
+    (i2 : cinsn (label:=nat)) : Prop :=
     match i1, i2 with
     | Ret, Ret => True
     | Ecall, Ecall => True
@@ -702,8 +702,8 @@ Section Build.
   (* States that a pre-link instruction and post-link instructions are
      equivalent under a given symbol mapping. *)
   Definition insn_equiv (syms : symbols)
-    (i1 : insn (destination:=string))
-    (i2 : insn (destination:=nat)) : Prop :=
+    (i1 : insn (label:=string))
+    (i2 : insn (label:=nat)) : Prop :=
     match i1, i2 with
     | Straightline i1, Straightline i2 => i1 = i2
     | Control i1, Control i2 => cinsn_equiv syms i1 i2
@@ -1112,8 +1112,8 @@ Section BuildProofs.
 
   (* Convenience shorthand for defining function specs. *)
   Definition returns
-    {destination : Type} {fetch:destination * nat -> option insn}
-    (start : destination) regs cstack lstack
+    {label : Type} {fetch:label * nat -> option insn}
+    (start : label) regs cstack lstack
     (spec : regfile -> Prop) : Prop :=
     forall ret_pc,
       hd_error cstack = Some ret_pc ->
@@ -1129,93 +1129,207 @@ Section BuildProofs.
            | _ => False
            end)
         (otbn_busy (start, 0%nat) regs cstack lstack).
-  Definition exits_with_errors
-    {destination : Type} {fetch:destination * nat -> option insn}
-    (start : destination) regs cstack lstack
-    (spec : destination * nat -> list string -> Prop) : Prop :=
-    eventually
-      (run1 (fetch:=fetch))
-      (fun st =>
-         match st with
-         | otbn_error pc errs => spec pc errs
-         | _ => False
-         end)
-      (otbn_busy (start, 0%nat) regs cstack lstack).
   Definition exits
-    {destination : Type} {fetch: destination * nat -> option insn}
-    (start : destination) regs cstack lstack
-    (spec : regfile -> Prop) : Prop :=
+    {label : Type} {fetch: label * nat -> option insn}
+    (start : label) regs cstack lstack
+    (spec : regfile -> Prop) (err_spec : _ -> Prop)
+    : Prop :=
     eventually
       (run1 (fetch:=fetch))
       (fun st =>
          match st with
          | otbn_done pc regs => spec regs
+         | otbn_error pc errs => err_spec errs
          | _ => False
          end)
       (otbn_busy (start, 0%nat) regs cstack lstack).
 
-  (* TODO: have a case for error as well. Maybe just require multiple
-  proofs if you want to say something about the error case. *)
-
-  Fixpoint link_call_stack
-    (syms : symbols) (cstack : list (string * nat))
-    (post : list (nat * nat) -> Prop) : Prop :=
-    match cstack with
-    | [] => post []
-    | (name, local_offset) :: cstack =>
-        exists global_offset,
-        map.get syms name = Some global_offset
-        /\ link_call_stack syms cstack
-             (fun cstack => post ((global_offset,local_offset) :: cstack))
+  Definition pcs_related (syms : symbols) (pc1 : string * nat) (pc2 : nat * nat) : Prop :=
+    map.get syms (fst pc1) = Some (fst pc2) /\ snd pc1 = snd pc2.
+  Definition loop_stack_entries_related (syms : symbols) (e1 : _ * nat) (e2 : _ * nat) : Prop :=
+    pcs_related syms (fst e1) (fst e2) /\ snd e1 = snd e2.
+  Definition states_related (syms : symbols)
+    (st1 : otbn_state (label:=string)) (st2 : otbn_state (label:=nat)) : Prop :=
+    match st1, st2 with
+    | otbn_busy pc1 regs1 cstack1 lstack1, otbn_busy pc2 regs2 cstack2 lstack2 =>
+        pcs_related syms pc1 pc2
+        /\ regs1 = regs2
+        /\ Forall2 (pcs_related syms) cstack1 cstack2
+        /\ Forall2 (loop_stack_entries_related syms) lstack1 lstack2
+    | otbn_done pc1 regs1, otbn_done pc2 regs2 =>
+        pcs_related syms pc1 pc2
+        /\ regs1 = regs2
+    | otbn_error pc1 errs1, otbn_error pc2 errs2 =>
+        pcs_related syms pc1 pc2
+        /\ errs1 = errs2
+    | _, _ => False
     end.
 
-  Fixpoint link_loop_stack
-    (syms : symbols) (lstack : list (string * nat * nat))
-    (post : list (nat * nat * nat) -> Prop) : Prop :=
-    match lstack with
-    | [] => post []
-    | (name, local_offset, iters) :: lstack =>
-        exists global_offset,
-        map.get syms name = Some global_offset
-        /\ link_loop_stack syms lstack
-             (fun lstack => post ((global_offset,local_offset, iters) :: lstack))
-    end.
+  Lemma fetch_ctx_done :
+    forall fns dst i,
+      fold_left (fun res fn =>
+                   match res, fetch_fn fn dst with
+                   | None, Some i => Some i
+                   | _, _ => res
+                   end) fns (Some i) = Some i.
+  Proof.
+    induction fns; cbn [fold_left]; [ reflexivity | ].
+    intros. apply IHfns.
+  Qed.
 
-  Definition link_state
-    (syms : symbols) (st : otbn_state (destination:=string))
-    (spec : otbn_state (destination:=nat) -> Prop)
-    : Prop :=
-    match st with
-    | otbn_busy pc regs cstack lstack =>
-        exists offset,
-        map.get syms (fst pc) = Some offset
-        /\ link_call_stack syms cstack
-             (fun cstack =>
-                link_loop_stack syms lstack
-                  (fun lstack =>
-                     spec (otbn_busy (offset, snd pc) regs cstack lstack)))
-    | otbn_done pc regs =>
-        exists offset,
-        map.get syms (fst pc) = Some offset
-        /\ spec (otbn_done (offset, snd pc) regs)
-    | otbn_error pc errs =>
-        exists offset,
-        map.get syms (fst pc) = Some offset
-        /\ spec (otbn_error (offset, snd pc) errs)
-    end.
+  Lemma fetch_fn_Some fn pc i :
+      fetch_fn fn pc = Some i ->
+      exists offset,
+        get_label_offset fn (fst pc) = Some offset
+        /\ nth_error (snd fn) (offset + snd pc) = Some i.
+  Proof.
+    cbv [fetch_fn]. destruct_one_match; [ | congruence ].
+    intros. eexists; ssplit; [ reflexivity .. | ].
+    assumption.
+  Qed.
 
-  Definition link_spec
-    (syms : symbols)
-    (spec1 : otbn_state (destination:=string) -> Prop)
-    (spec2 : otbn_state (destination:=nat) -> Prop) : Prop :=
-    forall st, spec1 st -> link_state syms st spec2.
+  Lemma fetch_ctx_Some :
+    forall fns pc i,
+      fetch_ctx fns pc = Some i ->    
+      exists fn,
+        fetch_fn fn pc = Some i
+        /\ In fn fns.
+  Proof.
+    cbv [fetch_ctx].
+    induction fns as [|fn fns]; cbn [fold_left]; [ congruence | ].
+    intros. destruct_one_match_hyp.
+    { rewrite fetch_ctx_done in *.
+      lazymatch goal with H : Some _ = Some _ |- _ => inversion H; clear H; subst end.
+      eexists; ssplit; eauto using in_eq. }
+    { repeat lazymatch goal with
+             | H : _ /\ _ |- _ => destruct H
+             | H : exists _, _ |- _ => destruct H
+             | H : fold_left _ _ None = Some _ |- _ => apply IHfns in H
+             end.
+      eexists; ssplit; eauto using in_cons. }
+  Qed.
+    
+  Lemma link_fetch syms prog fns pc1 pc2 i1 :
+    link fns = Ok prog ->
+    link_symbols fns = Ok syms ->
+    pcs_related syms pc1 pc2 ->
+    fetch_ctx fns pc1 = Some i1 ->
+    exists i2,
+      fetch prog pc2 = Some i2
+      /\ insn_equiv syms i1 i2.
+  Proof.
+    cbv [pcs_related]; intros.
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           | H : fetch_ctx _ _ = Some _ |- _ => apply fetch_ctx_Some in H
+           end.
+    pose proof (link_correct _ _ _ _ ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H; subst
+           | H : exists _, _ |- _ => destruct H
+           | H : fetch_fn ?fn (fst (fst ?fn), _) = Some _ |- _ => rewrite fetch_fn_name in H
+           end.
+           | H : fetch_fn _ _ = Some _ |- _ => apply fetch_fn_Some in H
+           | H : @nth_error insn _ ?n = Some _, H' : linked_at _ _ _ _ |- _ =>
+               specialize (H' n ltac:(eauto using List.nth_error_Some_bound_index))
+           end.
+  Print linked_at.
+  (* can we use the fetch_fn thing? *)
+  Lemma link_label prog fns syms name offset :
+    linked_at 
+    map.get syms name = Some offset ->
+
+    lazymatch goal with
+    | H : nth_error ?l ?i = Some ?x, H' : nth_error ?l ?i = Some ?y |- _ =>
+        assert (x = y) by congruence; subst
+    end.
+    cbv [fetch] in *. cbn [fst snd] in *.
+    (* x8 is label offset for fst pc1 *)
+    (* need to prove fst pc2 = program_size + x8 *)
+    (* fst pc2 = map.get syms (fst pc1) *)
+    Search link_symbols'.
+    (* need a lemma that says after link, all labels in function are
+       linked at global offset + get_label_offset *)
+
+    
+    (* need to prove x10 = i *)
+    lazymatch goal with
+    | H : fetch prog _ = Some ?i |- _ => exists i
+    end.
+    (* need to say that messy expression is in fact pc2 *)
+    cbv [fetch] in *. cbn [fst snd] in *.
+    (* need to say that the program size thng + x8 is the label's global offset *)
+    lazymatch goal with
+    
+    Print linked_at.
+    
+    cbv [function] in *; destruct_products; cbn [fst snd] in *.
+    subst.
+    cbv [pcs_related] in *.
+    Print linked_at.
+    eexists; ssplit; eauto.
+           | H : get_label_offset _ _ = Some ?n, H' : linked_at _ _ _ _ |- _ =>
+               specialize (H' n)
+           end.
+    assert (x8 + snd pc1 < length (snd x))%nat.
+    { eauto using List.nth_error_Some_bound_index.
+    specialize (H6 ltac:(eapply List.nth_error_Some_bound_index; auto)).
+    
+    subst.
+    Search nth_error.
+    (* use fetch_ctx to prove that it's in fns *)
+    (* use link_correct to say fn must be linked *)
+    Search linked_at.
+    Print linked_at.
+    cbv [fetch].
+  Qed.
+
+  (* prove that run1 on related states produces a related state *)
+  Lemma link_run1 :
+    forall fns prog syms st1 st2 spec1 spec2,
+      link fns = Ok prog ->
+      link_symbols fns = Ok syms ->
+      states_related syms st1 st2 ->
+      (forall st1' st2',
+          states_related syms st1' st2' ->
+          spec1 st1' ->
+          spec2 st2') ->
+      run1 (fetch:=fetch_ctx fns) st1 spec1 ->
+      run1 (fetch:=fetch prog) st2 spec2.
+  Proof.
+    cbv [run1].
+    destruct st1, st2; cbn [states_related]; try contradiction; intros;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | _ => progress subst
+        end; [ | | ].
+    { eexists; ssplit.
+      Search fetch.
+  Qed.
+
+  Lemma link_eventually_run1 :
+    forall fns prog syms st1 st2 spec1 spec2,
+      let name := fst (get_pc st1) in
+      let global_offset := fst (get_pc st2) in
+      let local_offset := snd (get_pc st1) in
+      link fns = Ok prog ->
+      link_symbols fns = Ok syms ->
+      states_related syms st1 st2 ->
+      (forall st1' st2',
+          states_related syms st1' st2' ->
+          spec1 st1' ->
+          spec2 st2') ->
+      eventually (run1 (fetch:=fetch_ctx fns)) spec1 st1 ->
+      eventually (run1 (fetch:=fetch prog)) spec2 st2.
+  Proof.
+  Admitted.
 
   (* Theorem that connects run1 with a ctx to run1 with a program *)
-  Lemma link_run1 :
-    forall ctx fns prog syms start_fn start_name start_pc pre_ctx post_ctx,
-      (* if all functions from the context are in the input list `fns`... *)
-      incl ctx fns ->
-      (* ...and `prog` is the result of a successful `link fns`... *)
+  Lemma link_exits :
+    forall fns prog syms start_fn start_name start_pc regs spec err_spec,
+      (* ...if `prog` is the result of a successful `link fns`... *)
       link fns = Ok prog ->
       (* ..and `syms` is the symbol table for `fns`... *)
       link_symbols fns = Ok syms ->
@@ -1223,24 +1337,38 @@ Section BuildProofs.
       linked_at prog syms start_fn start_pc ->
       (* ...and `start_name is the name of the starting function... *)
       start_name = fst (fst start_fn) ->
-      (* ...and evaluating the context satisfies the spec for certain states... *)
-      (forall st,
-          pre_ctx st ->
-          eventually (run1 (fetch:=fetch_ctx ctx)) post_ctx st) ->
-      (* ...then for all linked-program pre- and post-conditions... *)
-      (forall pre_prog post_prog,
-          (* ...if the preconditions are related... *)
-          link_spec syms pre_ctx pre_prog ->
-          (* ...and the preconditions are related... *)
-          link_spec syms post_ctx post_prog ->
-          (* ...then for all states satisfying the precondition... *)
-          forall st,
-            pre_prog st ->
-            (* ...the program satisfies the spec. *)
-            eventually (run1 (fetch:=fetch prog)) post_prog st).
+      (* ...and the start function is not empty... *)
+      (0 < length (snd (start_fn)))%nat ->
+      (* ...and the pre-link version satisfies the spec... *)
+      exits (fetch:=fetch_ctx fns) start_name regs [] [] spec err_spec ->
+      (* ...the program satisfies the spec. *)
+      exits (fetch:=fetch prog) start_pc regs [] [] spec err_spec.
   Proof.
-    (* TODO *)
-  Admitted.
+    cbv [exits].
+    intros.
+    Check link_correct.
+    eapply eventually_weaken
+             with (P:=
+    Check eventually_weaken.
+
+
+    
+    cbv [exits]; intros; subst.
+    lazymatch goal with H : eventually _ _ ?st |- _ =>
+                          remember st; induction H; subst; [ contradiction | ] end.
+    lazymatch goal with
+    | H : linked_at _ _ _ _ |- _ => specialize (H 0%nat ltac:(lia))
+    end.
+    cbn [run1] in *.
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           end.
+    eapply H5.
+    eapply eventually_step.
+    { eexists; ssplit; [ eassumption | ].
+      
+  Qed.
 End BuildProofs.
 
 Module map.
@@ -1340,9 +1468,9 @@ Section Helpers.
   Qed.
   
   Lemma fetch_weaken_run1
-    {destination : Type}
-    {fetch1 : destination * nat -> option insn}
-    {fetch2 : destination * nat -> option insn} :
+    {label : Type}
+    {fetch1 : label * nat -> option insn}
+    {fetch2 : label * nat -> option insn} :
     forall st P,
       run1 (fetch:=fetch1) st P ->
       (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
@@ -1357,9 +1485,9 @@ Section Helpers.
   Qed.
 
   Lemma fetch_weaken
-    {destination : Type}
-    {fetch1 : destination * nat -> option insn}
-    {fetch2 : destination * nat -> option insn} :
+    {label : Type}
+    {fetch1 : label * nat -> option insn}
+    {fetch2 : label * nat -> option insn} :
     forall st P,
       eventually (run1 (fetch:=fetch1)) P st ->
       (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
@@ -1367,18 +1495,6 @@ Section Helpers.
   Proof.
     induction 1; intros; [ auto using eventually_done | ].
     eapply eventually_step; eauto using fetch_weaken_run1.
-  Qed.
-
-  Lemma fetch_ctx_done :
-    forall fns dst i,
-      fold_left (fun res fn =>
-                   match res, fetch_fn fn dst with
-                   | None, Some i => Some i
-                   | _, _ => res
-                   end) fns (Some i) = Some i.
-  Proof.
-    induction fns; cbn [fold_left]; [ reflexivity | ].
-    intros. apply IHfns.
   Qed.
 
   Definition function_symbols_disjoint (fn1 fn2 : function) : Prop :=
@@ -1440,9 +1556,9 @@ Section Helpers.
   Qed.
 
   Lemma eventually_jump
-    {destination : Type}
-    {fetch1 : destination * nat -> option insn}
-    {fetch2 : destination * nat -> option insn} :
+    {label : Type}
+    {fetch1 : label * nat -> option insn}
+    {fetch2 : label * nat -> option insn} :
     forall dst pc (regs : regfile) cstack lstack spec post,
       fetch2 pc = Some (Control (Jal x1 dst)) ->
       (length cstack < 8)%nat ->
@@ -1467,7 +1583,7 @@ Section Helpers.
     cbn [tl]. eauto.
   Qed.
     
-  Lemma eventually_invariant {destination : Type} {fetch : destination * nat -> option insn} :
+  Lemma eventually_invariant {label : Type} {fetch : label * nat -> option insn} :
     forall (invariant : nat -> otbn_state -> Prop) iters post st,
       invariant iters st ->
       (forall i st,
@@ -1488,8 +1604,8 @@ Section Helpers.
         end.
   Qed.
 
-  Definition get_lstack {destination : Type} (st : otbn_state)
-    : option (list (destination * nat * nat)) :=
+  Definition get_lstack {label : Type} (st : otbn_state)
+    : option (list (label * nat * nat)) :=
     match st with
     | otbn_busy _ _ _ lstack => Some lstack
     | _ => None
@@ -1500,9 +1616,9 @@ Section Helpers.
      in the `i`th iteration from last, so e.g. `invariant 0` should
      hold at the very end of the loop. *)
   Lemma loop_invariant
-    {destination : Type} {fetch : destination * nat -> option insn} :
+    {label : Type} {fetch : label * nat -> option insn} :
     forall (invariant : nat -> regfile -> Prop)
-           (end_pc : destination * nat)
+           (end_pc : label * nat)
            iters pc r v (regs : regfile) cstack lstack post,
       fetch pc = Some (Control (Loop r)) ->
       fetch end_pc = Some (Control LoopEnd) ->
@@ -1573,7 +1689,7 @@ Section Helpers.
       eauto. }
   Qed.
 
-  Lemma eventually_beq {destination : Type} {fetch : destination * nat -> option insn}:
+  Lemma eventually_beq {label : Type} {fetch : label * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
       fetch pc = Some (Control (Beq r1 r2 dst)) ->
       gpr_has_value regs r1 v1 ->
@@ -1600,7 +1716,7 @@ Section Helpers.
       intros; subst. eauto. }
   Qed.
 
-  Lemma eventually_bne {destination : Type} {fetch : destination * nat -> option insn}:
+  Lemma eventually_bne {label : Type} {fetch : label * nat -> option insn}:
     forall pc dst r1 r2 regs cstack lstack v1 v2 post,
       fetch pc = Some (Control (Bne r1 r2 dst)) -> 
       gpr_has_value regs r1 v1 ->
@@ -1627,7 +1743,7 @@ Section Helpers.
       intros; subst. eauto. }
   Qed.
 
-  Lemma eventually_loop_end {destination : Type} {fetch : destination * nat -> option insn}:
+  Lemma eventually_loop_end {label : Type} {fetch : label * nat -> option insn}:
     forall pc regs cstack lstack loop_start iters post,
       fetch pc = Some (Control LoopEnd) ->
       (match iters with
@@ -1652,7 +1768,7 @@ Section Helpers.
       intros; subst. eassumption. }
   Qed.
 
-  Lemma eventually_ret {destination : Type} {fetch : destination * nat -> option insn}:
+  Lemma eventually_ret {label : Type} {fetch : label * nat -> option insn}:
     forall pc regs cstack lstack ret_pc post,
       fetch pc = Some (Control Ret) ->
       hd_error cstack = Some ret_pc ->
@@ -1666,10 +1782,22 @@ Section Helpers.
     intros; subst. eauto using eventually_done.
   Qed.
 
+  Lemma eventually_ecall {label : Type} {fetch : label * nat -> option insn}:
+    forall pc regs cstack lstack post,
+      fetch pc = Some (Control Ecall) ->
+      post (otbn_done pc regs) ->
+      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
+  Proof.
+    intros. eapply eventually_step.
+    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+      cbn [ctrl1 program_exit]. eassumption. }
+    intros; subst. eauto using eventually_done.
+  Qed.
+
   (* TODO: maybe strt1 should return a function args -> result? need
      more detail here, need to express new map *)
   Lemma eventually_straightline
-    {destination : Type} {fetch : destination * nat -> option insn}:
+    {label : Type} {fetch : label * nat -> option insn}:
     forall pc regs cstack lstack i post,
       fetch pc = Some (Straightline i) ->
       strt1 False prop_random prop_option_bind regs i
@@ -2177,6 +2305,108 @@ Module Test.
     ssplit; eauto.
   Qed.
 
+  Definition prog0_regs_spec (regs : regfile) : Prop :=
+    map.get regs (gpreg x5) = Some 5.
+
+  Lemma prog0_correct_prelink regs :
+    eventually
+      (run1 (fetch:=fetch_ctx [start_fn; add_fn]))
+      (fun st =>
+         match st with
+         | otbn_done pc regs =>
+             pc = ("start"%string, (length (snd start_fn) - 1)%nat)
+             /\ prog0_regs_spec regs
+         | _ => False
+         end)
+      (otbn_busy ("start"%string, 0%nat) regs [] []).
+  Proof.
+    cbv [start_fn start_state]; intros.
+    repeat straightline_step.
+
+    eapply eventually_jump.
+    { reflexivity. }
+    { cbn [length]; lia. }
+    { eapply add_correct; eauto. }
+    { intros.
+      rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+      eapply fetch_fn_disjoint; eauto; [ | ].
+      { eapply fetch_ctx_singleton_iff; eauto. }
+      { cbv; intuition congruence. } }
+
+    cbv beta. intros; subst.
+    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+    track_registers_combine.
+
+    eapply eventually_ecall; ssplit; [ reflexivity .. | ].
+    cbv [prog0_regs_spec].
+    lazymatch goal with H : map.get ?m ?k = Some _ |- map.get ?m ?k = Some _ =>
+                          rewrite H; apply f_equal end.
+    subst_lets. simplify_cast.
+    reflexivity.
+  Qed.
+
+  (* check that link_run1 works by using add_fn proof to prove link_run1 program *)
+  Check link_run1.
+  Lemma prog0_correct_postlink :
+    eventually
+      (run1 (fetch:=fetch prog0))
+      (fun st =>
+         match st with
+         | otbn_done pc regs =>
+             pc = (0%nat, (length (snd start_fn) - 1)%nat)
+             /\ prog0_regs_spec regs
+         | _ => False
+         end)
+      (start_state (0%nat, 0%nat)).
+  Proof.
+    set (fns:=[start_fn; add_fn]).
+    assert (link fns = inl prog0) by reflexivity.
+    let x := eval vm_compute in (link_symbols [start_fn; add_fn]) in
+      match x with
+      | inl ?x =>
+          pose (syms:=x)
+      | _ => fail
+      end.
+    assert (link_symbols fns = inl syms) by reflexivity.
+    assert (In start_fn fns) by (subst fns; cbn [In]; tauto).
+
+    pose proof (link_correct fns _ _ syms
+                  ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           | _ => progress subst
+           end.
+
+    eapply link_run1
+      with
+      (fns:=[start_fn; add_fn])
+      (start_fn:=start_fn)
+      (pre_ctx:=eq (start_state ("start"%string, 0%nat)));
+      (* find the right side condition and plug in prelink lemma to
+         instantiate postcondition *)
+      lazymatch goal with
+      | |- forall st, _ -> eventually run1 _ st =>
+          intros; subst; eapply prog0_correct_prelink
+      | _ => idtac
+      end.
+    { cbv [incl]. tauto. }
+    { eassumption. }
+    { eassumption. }
+    { eassumption. }
+    { reflexivity. }
+    { cbv [link_spec]. intros; subst.
+      cbn [start_state link_state link_call_stack link_loop_stack fst snd].
+      eexists. ssplit; [ solve [solve_map] | ].
+      apply eq_refl. }
+    { cbv [link_spec]. intro st; subst.
+      destruct st; try contradiction; [ ].
+      intros; repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      subst. cbv [link_state]. cbn [fst snd].
+      eexists; ssplit; solve_map. }
+    { reflexivity. }
+  Qed.
+
   (* Test scaling with a large codegen. *)
   Definition repeat_add (n : nat) : function :=
     (("add" ++ String.of_nat n)%string,
@@ -2273,3 +2503,4 @@ End ExecTest.
 (* Next: use the maybe monad in exec model for better error messages *)
 (* Next: try to apply link_run1, then try to prove it if form is OK *)
 (* Next: try to add more realistic error conditions for e.g. loop errors *)
+(* Next: use word!! *)
