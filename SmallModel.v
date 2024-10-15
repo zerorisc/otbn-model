@@ -837,6 +837,15 @@ Section BuildProofs.
     auto.
   Qed.
 
+  Lemma add_symbol_fail start_syms label label_offset1 label_offset2 :
+    map.get start_syms label = Some label_offset1 ->
+    exists msg,
+      add_symbol start_syms label label_offset2 = Err msg.
+  Proof.
+    cbv [add_symbol]; intros. destruct_one_match; try congruence.
+    eauto.
+  Qed.
+
   Lemma merge_symbols_no_overwrite fn_syms global_offset global_syms :
     forall syms,
       merge_symbols global_offset global_syms fn_syms = Ok syms ->
@@ -863,6 +872,20 @@ Section BuildProofs.
     err_simpl. eauto using add_symbol_no_overwrite, merge_symbols_no_overwrite.
   Qed.
 
+  Lemma link_symbols_for_function_name_fail :
+    forall fn start_syms start_offset name label_offset,
+      name = fst (fst fn) ->
+      map.get start_syms name = Some label_offset ->
+      exists msg,
+        link_symbols_for_function (start_syms, start_offset) fn = Err msg.
+  Proof.
+    destruct fn as [[fn_name fn_syms] fn_insns].
+    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros.
+    subst. lazymatch goal with H : map.get _ _ = Some _ |- _ =>
+                                 eapply add_symbol_fail in H; destruct H end.
+    rewrite H. err_simpl. eauto.
+  Qed.
+
   Lemma link_symbols'_no_overwrite :
     forall fns start_syms start_offset syms label label_offset end_offset,
       link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
@@ -880,6 +903,28 @@ Section BuildProofs.
            end.
   Qed.
 
+  Lemma link_symbols'_name_fail fn name :
+    forall fns start_syms start_offset label_offset,
+      In fn fns ->
+      name = fst (fst fn) ->
+      map.get start_syms name = Some label_offset ->
+      exists msg,
+        link_symbols' start_syms start_offset fns = Err msg.
+  Proof.
+    cbv [program_size link_symbols']; induction fns; cbn [In]; intros;
+      repeat lazymatch goal with
+        | H : False |- _ => contradiction H
+        | H : _ \/ _ |- _ => destruct H
+        | H : map.get _ _ = Some _ |- context [link_symbols_for_function _ fn] =>
+            eapply link_symbols_for_function_name_fail in H; [ | reflexivity .. ];
+            destruct H as [? H]; rewrite H; err_simpl; solve [eauto]
+        | _ => progress (cbn [maybe_fold_left]; subst)
+        end; [ ].
+    err_simpl; eauto.
+    destruct_products; cbn [fst snd] in *.
+    eauto using link_symbols_for_function_no_overwrite.
+  Qed.
+
   Lemma add_symbol_correct start_syms label label_offset syms :
       add_symbol start_syms label label_offset = Ok syms ->
       map.get syms label = Some label_offset.
@@ -894,15 +939,7 @@ Section BuildProofs.
           map.get fn_syms label = Some label_offset ->
           map.get syms label = Some (global_offset + label_offset)%nat).
   Proof.
-    cbv [merge_symbols]. intros *.
-    (*
-    apply (map.fold_spec
-            (fun (fn_syms : symbols) (syms : maybe symbols) =>
-               exists syms',
-                 syms = inl syms'
-                 /\ (forall label label_offset,
-                        map.get fn_syms label = Some label_offset ->
-                        map.get syms' label = Some (global_offset + label_offset)%nat))). *)
+    cbv [merge_symbols].
     apply map.fold_spec.
     { intros. rewrite map.get_empty in *. congruence. }
     { intros. err_simpl.
@@ -912,25 +949,16 @@ Section BuildProofs.
                  [ rewrite map.get_put_same in H
                  | rewrite map.get_put_diff in H by congruence ]
              | H : Some _ = Some _ |- _ => inversion H; clear H; subst
-             end.
-      { eauto using add_symbol_correct. }
-      { eapply H0.
-        eapply add_symbol_no_overwrite. [ | eassumption ].
-        eapply H0.
-        
+             end;
+        eauto using add_symbol_correct, add_symbol_no_overwrite. }
+  Qed.
 
-
-    
-    apply (map.fold_spec (fun fn_syms syms =>
-                            forall label label_offset,
-                              map.get fn_syms label = Some label_offset ->
-                              map.get syms label = Some (global_offset + label_offset)%nat)).
-    Check map.fold_spec.
-    lazymatch goal with
-    | |- forall syms,
-        map.fold _ _ _ = ?x -> ?Q =>
-        apply (map.fold_spec (fun fn_syms syms => forall m = x -> Q))
-    end; intros; err_simpl; eauto using add_symbol_no_overwrite.
+  Lemma get_label_offset_name fn name :
+    name = fst (fst fn) ->
+    get_label_offset fn name = Some 0%nat.
+  Proof.
+    intros; subst. cbv [get_label_offset].
+    destruct_one_match; congruence.
   Qed.
 
   Lemma link_symbols_for_function_correct
@@ -940,17 +968,23 @@ Section BuildProofs.
       map.get syms dst = Some (start_offset + fn_offset)%nat.
   Proof.
     destruct fn as [[fn_name fn_syms] fn_insns].
-    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros; err_simpl.
-    eauto using add_symbol_correct, merge_symbols_no_overwrite.    
+    cbv [link_symbols_for_function get_label_offset].
+    cbn [bind fst snd]; intros; err_simpl.
+    destruct_one_match_hyp; [ | solve [eauto using merge_symbols_correct] ].
+    lazymatch goal with
+    | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+    end.
+    rewrite Nat.add_0_r.
+    eauto using add_symbol_correct, merge_symbols_no_overwrite.
   Qed.
 
   Lemma link_symbols_for_function_name fn start_syms start_offset syms end_offset :
       link_symbols_for_function (start_syms, start_offset) fn = Ok (syms, end_offset) ->
       map.get syms (fst (fst fn)) = Some start_offset.
   Proof.
-    destruct fn as [[fn_name fn_syms] fn_insns].
-    cbv [link_symbols_for_function]; cbn [bind fst snd]; intros; err_simpl.
-    eauto using add_symbol_correct, merge_symbols_no_overwrite.    
+    intros. replace start_offset with (start_offset + 0)%nat by lia.
+    eapply link_symbols_for_function_correct; eauto; [ ].
+    apply get_label_offset_name; reflexivity.
   Qed.
 
   Lemma link_symbols'_correct :
@@ -973,26 +1007,17 @@ Section BuildProofs.
              | H : _ /\ _ |- _ => destruct H
              | _ => subst; solve [eauto]                                 
              end. }
+  Qed.
 
-  Lemma link_symbols'_correct :
+  Lemma link_symbols'_name :
     forall fns1 fns2 fn start_syms start_offset syms end_offset,
       link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = Ok (syms, end_offset) ->
       map.get syms (fst (fst fn)) = Some (program_size start_offset fns1).
   Proof.
-    cbv [link_symbols program_size]; induction fns1; intros.
-    { rewrite ?app_nil_l in *. cbn [link_symbols' maybe_fold_left] in *.
-      err_simpl. destruct_products.
-      eauto using link_symbols'_no_overwrite, link_symbols_for_function_correct. }
-    { rewrite <-?app_comm_cons in *. cbn [fold_left].
-      repeat lazymatch goal with
-             | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
-                 eapply link_symbols'_inv in H
-             | H: link_symbols_for_function _ _ = Ok _ |- _ =>               
-                 apply link_symbols_for_function_size in H; subst
-             | H : exists _, _ |- _ => destruct H
-             | H : _ /\ _ |- _ => destruct H
-             | _ => subst; solve [eauto]                                 
-             end. }
+    intros.
+    replace (program_size start_offset fns1)
+      with (program_size start_offset fns1 + 0)%nat by lia.
+    eapply link_symbols'_correct; eauto using get_label_offset_name.
   Qed.
 
   Lemma link_cinsn_correct syms i1 i2 : 
@@ -1287,19 +1312,24 @@ Section BuildProofs.
       eexists; ssplit; eauto using in_cons. }
   Qed.
 
-  Lemma link_symbols'_label
-    fns1 fns2 fn start_syms start_offset syms end_offset fn_offset dst :
-    link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
+  Lemma link_symbols_correct fns fn syms fn_offset dst n :
+    link_symbols fns = inl syms ->
+    nth_error fns n = Some fn ->
     get_label_offset fn dst = Some fn_offset ->
-    map.get syms dst = Some (program_size start_offset fns1 + fn_offset)%nat.
+    map.get syms dst = Some (program_size 0 (firstn n fns) + fn_offset)%nat.
   Proof.
-    intros
-    fns1 fns2 fn start_syms start_offset syms end_offset fn_offset dst :
-    link_symbols' start_syms start_offset (fns1 ++ fn :: fns2) = inl (syms, end_offset) ->
-    get_label_offset fn dst = Some fn_offset ->
-    map.get syms dst = Some (program_size start_offset fns1 + fn_offset)%nat.
+    cbv [link_symbols]. intros. err_simpl. destruct_products.
+    Search nth_error app.
+    repeat lazymatch goal with
+           | H : nth_error _ _ = Some _ |- _ =>
+               apply nth_error_split in H
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           end.
+    subst. rewrite List.firstn_app_l by reflexivity. cbn [fst snd].
+    eauto using link_symbols'_correct.
   Qed.
-    
+
   Lemma link_fetch syms prog fns pc1 pc2 i1 :
     link fns = Ok prog ->
     link_symbols fns = Ok syms ->
@@ -1330,77 +1360,156 @@ Section BuildProofs.
     | H : nth_error ?l ?i = Some ?x, H' : nth_error ?l ?i = Some ?y |- _ =>
         assert (x = y) by congruence; subst
     end.
-    cbv [fetch] in *. cbn [fst snd] in *.
-
-    (* fetch prog (global, local) = nth_error prog (global + local) *)
-    (* it feels like we do have enough information in linked_at... *)
-    (* need to say map.get syms (fst pc1) = Some (fst pc2)
-       implies that pc2 = global offset + fn offset -- fundamentally about link_symbols! *)
-
-    Print link_symbols.
-    Search link_symbols.
-    Search link_symbols'.
-    Search link_symbols_for_function.
-
-    
-           | H : fetch_fn _ _ = Some _ |- _ => apply fetch_fn_Some in H
-           | H : @nth_error insn _ ?n = Some _, H' : linked_at _ _ _ _ |- _ =>
-               specialize (H' n ltac:(eauto using List.nth_error_Some_bound_index))
-           end.
-  Print linked_at.
-  (* can we use the fetch_fn thing? *)
-  Lemma link_label prog fns syms name offset :
-    linked_at 
-    map.get syms name = Some offset ->
-
+ 
+    pose proof (link_symbols_correct
+                  _ _ _ _ _ _
+                  ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
     lazymatch goal with
-    | H : nth_error ?l ?i = Some ?x, H' : nth_error ?l ?i = Some ?y |- _ =>
+    | H : map.get ?m ?k = Some ?x, H' : map.get ?m ?k = Some ?y |- _ =>
         assert (x = y) by congruence; subst
     end.
-    cbv [fetch] in *. cbn [fst snd] in *.
-    (* x8 is label offset for fst pc1 *)
-    (* need to prove fst pc2 = program_size + x8 *)
-    (* fst pc2 = map.get syms (fst pc1) *)
-    Search link_symbols'.
-    (* need a lemma that says after link, all labels in function are
-       linked at global offset + get_label_offset *)
 
-    
-    (* need to prove x10 = i *)
     lazymatch goal with
     | H : fetch prog _ = Some ?i |- _ => exists i
     end.
-    (* need to say that messy expression is in fact pc2 *)
-    cbv [fetch] in *. cbn [fst snd] in *.
-    (* need to say that the program size thng + x8 is the label's global offset *)
+    ssplit; [ | assumption .. ].
+    destruct_products.
+    cbv [fetch] in *. cbn [fst snd] in *. subst.
     lazymatch goal with
-    
-    Print linked_at.
-    
-    cbv [function] in *; destruct_products; cbn [fst snd] in *.
-    subst.
-    cbv [pcs_related] in *.
-    Print linked_at.
-    eexists; ssplit; eauto.
-           | H : get_label_offset _ _ = Some ?n, H' : linked_at _ _ _ _ |- _ =>
-               specialize (H' n)
-           end.
-    assert (x8 + snd pc1 < length (snd x))%nat.
-    { eauto using List.nth_error_Some_bound_index.
-    specialize (H6 ltac:(eapply List.nth_error_Some_bound_index; auto)).
-    
-    subst.
-    Search nth_error.
-    (* use fetch_ctx to prove that it's in fns *)
-    (* use link_correct to say fn must be linked *)
-    Search linked_at.
-    Print linked_at.
-    cbv [fetch].
+    | H : _ = Some ?x |- _ = Some ?x => rewrite <-H
+    end.
+    repeat (f_equal; try lia).
+  Qed.
+
+  Lemma read_gpr_weaken regs r P Q :
+    read_gpr False prop_option_bind regs r P ->
+    (forall regs, P regs -> Q regs) ->
+    read_gpr False prop_option_bind regs r Q.
+  Proof.
+    cbv [read_gpr prop_option_bind]; intros; destruct_one_match;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | |- Q _ => solve [eauto]
+        end.
+  Qed.
+
+  Lemma read_csr_weaken regs r P Q :
+    read_csr prop_random regs r P ->
+    (forall regs, P regs -> Q regs) ->
+    read_csr prop_random regs r Q.
+  Proof.
+    cbv [read_csr prop_random]; intros; destruct_one_match; intros; eauto.
+  Qed.
+
+  Lemma write_gpr_weaken regs r v P Q :
+    write_gpr False regs r v P ->
+    (forall regs, P regs -> Q regs) ->
+    write_gpr False regs r v Q.
+  Proof.
+    cbv [write_gpr]; intros; destruct_one_match;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | |- Q _ => solve [eauto]
+        end.
+  Qed.
+
+  Lemma write_csr_weaken regs r v P Q :
+    write_csr (T:=Prop) regs r v P ->
+    (forall regs, P regs -> Q regs) ->
+    write_csr (T:=Prop) regs r v Q.
+  Proof.
+    cbv [write_csr]; intros; destruct_one_match; eauto.
+  Qed.
+
+  Lemma strt1_weaken regs i P Q :
+    strt1 False prop_random prop_option_bind regs i P ->
+    (forall regs, P regs -> Q regs) ->
+    strt1 False prop_random prop_option_bind regs i Q.
+  Proof.
+    cbv [strt1]; intros; repeat destruct_one_match;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | |- read_gpr _ _ _ _ _ =>
+            eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_csr _ _ _ _ =>
+            eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_gpr _ _ _ _ _ =>
+            eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_csr _ _ _ _ =>
+            eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- Q _ => solve [eauto]
+        end.
+  Qed.
+
+  Ltac related_states_hammer :=
+    cbn [states_related] in *;
+      repeat lazymatch goal with
+        | H : False |- _ => contradiction H
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H; subst
+        | H : forall st1' st2', _ st1' st2' -> _ st1' -> ?spec2 st2' |- ?spec2 _ =>
+            eapply H; [ | eassumption ]
+        | H : Forall2 _ (_ :: _) _ |- _ =>
+            inversion H; clear H; subst; cbn [hd_error tl] in *
+        | H : context [match ?x with _ => _ end] |- _ => destruct_one_match_hyp
+        | |- context [match ?x with _ => _ end] => destruct_one_match
+        | H : hd_error ?l = Some _ |- _ =>
+            destruct l; cbn [hd_error tl] in *                                               
+        | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+        | H : None = Some _ |- _ => exfalso; congruence
+        | |- pcs_related _ _ _ =>
+            progress cbv [advance_pc pcs_related] in *; cbn [fst snd]; ssplit; eauto
+        | |- loop_stack_entries_related _ _ _ =>
+            progress cbv [loop_stack_entries_related] in *; ssplit
+        | |- states_related _ _ _ =>
+            progress cbv [states_related]; try contradiction; ssplit; eauto
+        | H: Forall2 _ ?l1 ?l2,
+            H0 : (length ?l1 < ?n)%nat, H1 : (?n <= length ?l2)%nat |- _ =>
+            pose proof (Forall2_length H); lia
+        | |- Forall2 _ (_ :: _) (_ :: _) => constructor
+        | |- read_gpr _ _ _ _ _ =>
+            eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_csr _ _ _ _ =>
+            eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_gpr _ _ _ _ _ =>
+            eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_csr _ _ _ _ =>
+            eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- exists _, _ =>
+            eexists; ssplit; first [ eassumption
+                                   | reflexivity
+                                   | solve [related_states_hammer] ]
+        | _ => first [ progress (cbv [call_stack_pop call_stack_push
+                                        loop_start loop_end loop_stack_entries_related
+                                        read_gpr_from_state next_pc
+                                        set_pc set_regs program_exit] in *;
+                                 cbn [fst snd] in *; subst )
+                     | congruence
+                     | solve [eauto] ]
+        end.
+
+  Lemma ctrl1_weaken syms i1 i2 st1 st2 spec1 spec2 :
+    ctrl1 (label:=string) False prop_option_bind st1 i1 spec1 ->
+    states_related syms st1 st2 ->
+    cinsn_equiv syms i1 i2 ->
+    (forall st1' st2', states_related syms st1' st2' -> spec1 st1' -> spec2 st2') ->
+    ctrl1 (label:=nat) False prop_option_bind st2 i2 spec2.
+  Proof.
+    cbv [ctrl1 cinsn_equiv prop_option_bind]; intros.
+    destruct st1, st2; related_states_hammer.
   Qed.
 
   (* prove that run1 on related states produces a related state *)
-  Lemma link_run1 :
-    forall fns prog syms st1 st2 spec1 spec2,
+  Lemma link_run1 fns prog syms st1 st2 spec1 spec2 :
       link fns = Ok prog ->
       link_symbols fns = Ok syms ->
       states_related syms st1 st2 ->
@@ -1416,71 +1525,409 @@ Section BuildProofs.
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
         | H : _ /\ _ |- _ => destruct H
+        | H : fetch_ctx _ _ = Some _ |- _ => eapply link_fetch in H; [ | eassumption .. ]
+        | H : forall st1' st2',
+            states_related _ st1' st2' ->
+              spec1 st1' ->
+              spec2 st2' |- spec2 _ =>
+            eapply H; eauto; cbv [states_related]; ssplit; solve [eauto]
         | _ => progress subst
-        end; [ | | ].
-    { eexists; ssplit.
-      Search fetch.
+        end; [ ].
+    eexists; ssplit; [ eauto | ].
+    cbv [insn_equiv] in *.
+    destruct_one_match; destruct_one_match_hyp; subst; try contradiction; [ | ].
+    { (* straightline case *)
+      eapply strt1_weaken; [ eassumption | ].
+      cbv beta; intros.
+      related_states_hammer. }
+    { (* ctrl1 case *)
+      eapply ctrl1_weaken; try eassumption; [ ].
+      related_states_hammer. }
   Qed.
 
-  Lemma link_eventually_run1 :
-    forall fns prog syms st1 st2 spec1 spec2,
-      let name := fst (get_pc st1) in
-      let global_offset := fst (get_pc st2) in
-      let local_offset := snd (get_pc st1) in
+  Lemma link_eventually_run1 fns prog syms st1 st2 spec1 spec2 :
       link fns = Ok prog ->
       link_symbols fns = Ok syms ->
-      states_related syms st1 st2 ->
       (forall st1' st2',
           states_related syms st1' st2' ->
           spec1 st1' ->
           spec2 st2') ->
+      states_related syms st1 st2 ->
       eventually (run1 (fetch:=fetch_ctx fns)) spec1 st1 ->
       eventually (run1 (fetch:=fetch prog)) spec2 st2.
   Proof.
-  Admitted.
+    intros. generalize dependent st2.
+    let H := lazymatch goal with H : eventually _ _ _ |- _ => H end in
+    induction H; intros; [ solve [eauto using eventually_done] | ].    
+    eapply eventually_step; [ | solve [eauto] ].
+    eapply link_run1; eauto.      
+  Qed.
+
+  Lemma link_symbols_name fns1 fns2 fn name syms :
+    link_symbols (fns1 ++ fn :: fns2) = Ok syms ->
+    name = fst (fst fn) ->
+    map.get syms name = Some (program_size 0%nat fns1).
+  Proof.
+    cbv [link_symbols]; err_simpl; intros; subst; [ | congruence ].
+    destruct_products; cbn [fst snd] in *.
+    lazymatch goal with H : inl _ = inl _ |- _ => inversion H; clear H; subst end.
+    eauto using link_symbols'_name.
+  Qed.
 
   (* Theorem that connects run1 with a ctx to run1 with a program *)
-  Lemma link_exits :
-    forall fns prog syms start_fn start_name start_pc regs spec err_spec,
+  Lemma link_exits' :
+    forall fns prog syms start_fn start_name n start_pc regs spec err_spec,
       (* ...if `prog` is the result of a successful `link fns`... *)
       link fns = Ok prog ->
       (* ..and `syms` is the symbol table for `fns`... *)
       link_symbols fns = Ok syms ->
-      (* ...and the starting function is linked at `start_pc` ... *)
-      linked_at prog syms start_fn start_pc ->
+      (* ...and `start_fn` is in the list... *)
+      nth_error fns n = Some start_fn ->
+      (* ...and `start_pc` is the global offset... *)
+      start_pc = program_size 0%nat (firstn n fns) ->
       (* ...and `start_name is the name of the starting function... *)
       start_name = fst (fst start_fn) ->
-      (* ...and the start function is not empty... *)
-      (0 < length (snd (start_fn)))%nat ->
       (* ...and the pre-link version satisfies the spec... *)
       exits (fetch:=fetch_ctx fns) start_name regs [] [] spec err_spec ->
       (* ...the program satisfies the spec. *)
       exits (fetch:=fetch prog) start_pc regs [] [] spec err_spec.
   Proof.
-    cbv [exits].
-    intros.
-    Check link_correct.
-    eapply eventually_weaken
-             with (P:=
-    Check eventually_weaken.
+    cbv [exits]; intros.
+    assert (In start_fn fns) by (eauto using nth_error_In).
+    pose proof (link_correct _ _ _ _ ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | H : nth_error _ _ = Some _ |- _ => apply nth_error_split in H
+           | _ => progress subst
+           end.
+    eapply link_eventually_run1; eauto; [ | ].
+    { cbv beta; intros.
+      cbv [states_related] in *.
+      related_states_hammer. }
+    { cbv beta; intros.
+      cbv [states_related]; ssplit; related_states_hammer.
+      eapply link_symbols_name; [ | reflexivity .. ].
+      rewrite List.firstn_app_l by lia.
+      eauto. }
+  Qed.
 
+  (* like `find` except returns the index of the match *)
+  Definition find_index {A} (f : A -> bool) (l : list A) : option nat :=    
+    find (fun idx =>
+            match nth_error l idx with
+            | Some a => f a
+            | None => false
+            end)
+      (seq 0 (length l)).
 
-    
-    cbv [exits]; intros; subst.
-    lazymatch goal with H : eventually _ _ ?st |- _ =>
-                          remember st; induction H; subst; [ contradiction | ] end.
-    lazymatch goal with
-    | H : linked_at _ _ _ _ |- _ => specialize (H 0%nat ltac:(lia))
+  Definition find_global_offset (fns : list function) (name : string) : option nat :=
+    match find_index (fun fn => String.eqb name (fst (fst fn))) fns with
+    | Some idx => Some (program_size 0%nat (firstn idx fns))
+    | None => None
     end.
-    cbn [run1] in *.
+
+  Lemma find_app :
+    forall {A} (f : A -> bool) l1 l2,
+      find f (l1 ++ l2) = match find f l1 with
+                          | Some x => Some x
+                          | None => find f l2
+                          end.
+  Proof.
+    induction l1; intros; [ reflexivity | ].
+    cbn [app find]. destruct_one_match; eauto.
+  Qed.
+
+  Lemma find_map :
+    forall {A B} (f : B -> bool) (g : A -> B) l,
+      find f (List.map g l) = option_map g (find (fun a => f (g a)) l).
+  Proof.
+    cbv [option_map].
+    induction l; cbn [find List.map]; intros; [ congruence | ].
+    destruct_one_match_hyp; destruct_one_match;
+      repeat lazymatch goal with
+        | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+        | _ => first [ solve [eauto] | congruence ]
+        end.
+  Qed.
+
+  Lemma find_map_inv :
+    forall {A B} (f : B -> bool) (g : A -> B) l b,
+      find f (List.map g l) = Some b ->
+      exists a,
+        find (fun a => f (g a)) l = Some a
+        /\ g a = b.
+  Proof.
+    induction l; cbn [find List.map]; intros; [ congruence | ].
+    destruct_one_match_hyp;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+        | H : find _ (List.map _ _) = Some _ |- _ => apply IHl in H
+        | _ => solve [eauto]
+        end.
+  Qed.
+
+  Lemma program_size_add :
+    forall fns start,
+      fold_left
+        (fun offset (fn : function) => (offset + length (snd fn))%nat)
+        fns start = (fold_left
+                       (fun offset (fn : function) => (offset + length (snd fn))%nat)
+                       fns 0 + start)%nat.
+  Proof.
+    induction fns; cbn [fold_left]; intros; [ lia | ].
+    rewrite !(IHfns (_ + _)%nat). lia.
+  Qed.
+
+  Lemma program_size_equiv :
+    forall fns1 fns2 fns3 fns4 a b start,
+      program_size start fns1 = program_size start fns2 ->
+      fns1 ++ a :: fns3 = fns2 ++ b :: fns4 ->
+      (0 < length (snd a))%nat ->
+      (0 < length (snd b))%nat ->
+      a = b.
+  Proof.
+    cbv [program_size].
+    induction fns1; destruct fns2; cbn [app fold_left]; intros; subst;
+      repeat lazymatch goal with
+        | H : _ :: _ = _ :: _ |- _ => inversion H; clear H; subst
+        | H : ?start = fold_left _ _ (?start + _)%nat |- _ =>
+            rewrite program_size_add in H; lia
+        | H : fold_left _ _ (?start + _)%nat = ?start |- _ =>
+            rewrite program_size_add in H; lia
+        | |- ?x = ?x => reflexivity
+        | _ => solve [eauto]
+        end.    
+  Qed.
+
+  Lemma link_symbols'_app :
+    forall fns1 fns2 start_syms start_offset end_offset syms,
+      link_symbols' start_syms start_offset (fns1 ++ fns2) = Ok (syms, end_offset) ->
+      exists syms1 end_offset1,
+        link_symbols' start_syms start_offset fns1 = Ok (syms1, end_offset1)
+        /\ link_symbols' syms1 end_offset1 fns2 = Ok (syms, end_offset).
+  Proof.
+    induction fns1; cbn [app]; intros; [ do 2 eexists; ssplit; [ reflexivity | eauto ] | ].
     repeat lazymatch goal with
            | H : _ /\ _ |- _ => destruct H
            | H : exists _, _ |- _ => destruct H
+           | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+               apply link_symbols'_inv in H
+           | H : link_symbols' _ _ (_ ++ _) = Ok _ |- _ =>
+               apply IHfns1 in H
+           | _ => progress subst
+           end.    
+    erewrite link_symbols'_step by eauto.
+    eauto.
+  Qed.
+
+  Lemma link_symbols'_no_dup' :
+    forall fns start_syms start_offset end_offset syms fn1 fn2 n1 n2,
+      link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
+      nth_error fns n1 = Some fn1 ->
+      nth_error fns n2 = Some fn2 ->
+      (n1 < n2)%nat ->
+      fst (fst fn1) <> fst (fst fn2).
+  Proof.
+    intros. intro; subst.
+    repeat lazymatch goal with 
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           | H : nth_error (_ ++ _) _ = _ |- _ => rewrite nth_error_app2 in H by lia
+           | H : nth_error (_ :: _) _ = Some _ |- _ =>
+               rewrite nth_error_cons in H; destruct_one_match_hyp; [ lia | ]
+           | H : nth_error _ n1 = Some _ |- _ =>
+               apply List.nth_error_split in H
+           | H : nth_error _ ?n = Some _, H' : _ = S ?n |- _ =>
+               apply List.nth_error_split in H
+           | H : link_symbols' _ _ (_ ++ _) = Ok _ |- _ =>
+               apply link_symbols'_app in H
+           | H : link_symbols' _ _ (_ :: _) = Ok _ |- _ =>
+               apply link_symbols'_inv in H
+           | _ => progress (cbn [fst snd] in *; subst)
            end.
-    eapply H5.
-    eapply eventually_step.
-    { eexists; ssplit; [ eassumption | ].
-      
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           | H : link_symbols_for_function _ fn1 = _ |- _ =>
+               apply link_symbols_for_function_name in H
+           | H : link_symbols_for_function (?syms, ?off) fn2 = _,
+               H' : map.get ?syms _ = Some _ |- _ =>
+               eapply link_symbols_for_function_name_fail with (fn:=fn2) (start_offset:=off) in H';
+               [ | solve [eauto] ]
+           | H : link_symbols' ?syms _ _ = _, H' : map.get ?syms _ = Some _ |- _ =>
+               eapply link_symbols'_no_overwrite in H; [ | solve [eauto] .. ]
+           | _ => progress (cbn [fst snd] in *; subst)
+           end.
+    congruence.
+  Qed.
+
+  Lemma link_symbols'_no_dup :
+    forall fns start_syms start_offset end_offset syms fn1 fn2,
+      link_symbols' start_syms start_offset fns = Ok (syms, end_offset) ->
+      In fn1 fns ->
+      In fn2 fns ->
+      fst (fst fn1) = fst (fst fn2) ->
+      fn1 = fn2.      
+  Proof.
+    intros.
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : exists _, _ |- _ => destruct H
+           | H : In _ _ |- _ => apply In_nth_error in H
+           end.
+    lazymatch goal with
+    | H1 : nth_error fns ?n1 = Some fn1,
+        H2 : nth_error fns ?n2 = Some fn2 |- _ =>
+        destr (n1 <? n2)%nat;
+        [ | destr (n2 <? n1)%nat;
+            [ | assert (n1 = n2) by lia; subst ] ]
+    end; lazymatch goal with
+         | H : (_ < _)%nat |- _ => eapply link_symbols'_no_dup' in H; eauto; congruence
+         | _ => congruence
+         end.
+  Qed.
+
+  Lemma link_symbols_no_dup :
+    forall fns syms fn1 fn2,
+      link_symbols fns = Ok syms ->
+      In fn1 fns ->
+      In fn2 fns ->
+      fst (fst fn1) = fst (fst fn2) ->
+      fn1 = fn2.      
+  Proof.
+    cbv [link_symbols].
+    intros. err_simpl. destruct_products.
+    eapply link_symbols'_no_dup; eauto.    
+  Qed.
+
+  Lemma find_ext {A} (f g : A -> bool) l (Hext : forall a, f a = g a) :
+    find f l = find g l.
+  Proof.
+    induction l; cbn [find]; intros; [ reflexivity | ].
+    rewrite Hext, IHl; reflexivity.
+  Qed.
+
+  Lemma find_index_cons {A} (f : A -> bool) l a :
+      find_index f (a :: l) = if f a then Some 0%nat else option_map S (find_index f l).
+  Proof.
+    cbv [find_index]. cbn [length].
+    rewrite <-cons_seq, <-seq_shift.
+    cbn [find nth_error]. destruct_one_match; [ reflexivity | ].    
+    rewrite find_map; reflexivity.
+  Qed.
+
+  Lemma find_index_Some :
+    forall {A} (f : A -> bool) l i,
+      find_index f l = Some i ->
+      exists a,
+        nth_error l i = Some a
+        /\ f a = true.
+  Proof.
+    induction l; intros.
+    { cbn [find_index length nth_error seq find] in *. congruence. }
+    { rewrite find_index_cons in *. cbv [option_map] in *.
+      repeat lazymatch goal with
+             | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+             | H : None = Some _ |- _ => congruence
+             | H : context [match ?x with _ => _ end] |- _ => destruct_one_match_hyp
+             | _ => first [ progress (cbn [nth_error] in *; subst)
+                          | solve [eauto] ]
+             end. }    
+  Qed.
+
+  Lemma find_global_offset_correct' :
+    forall fns syms fn name offset,
+      In fn fns ->
+      link_symbols fns = Ok syms ->
+      find_global_offset fns name = Some offset ->
+      name = fst (fst fn) ->
+      exists n,
+        nth_error fns n = Some fn
+        /\ offset = program_size 0%nat (firstn n fns).
+  Proof.
+    cbv [find_global_offset]. intros.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+           | H : None = Some _ |- _ => congruence
+           | H : find_index _ _ = Some _ |- _ => apply find_index_Some in H
+           | H : String.eqb _ _ = true |- _ => apply String.eqb_eq in H
+           | H : nth_error _ _ = Some ?fn, H' : fst (fst _) = fst (fst ?fn) |- _ =>
+               eapply link_symbols_no_dup in H'; eauto using nth_error_In; subst; eauto
+           | _ => first [ progress subst | destruct_one_match_hyp ]
+           end.
+  Qed.
+
+  Lemma find_global_offset_correct :
+    forall fns syms name offset,
+      link_symbols fns = Ok syms ->
+      find_global_offset fns name = Some offset ->
+      exists fn n,
+        nth_error fns n = Some fn
+        /\ name = fst (fst fn)
+        /\ In fn fns
+        /\ offset = program_size 0%nat (firstn n fns).
+  Proof.
+    cbv [find_global_offset]. intros.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+           | H : None = Some _ |- _ => congruence
+           | H : find_index _ _ = Some _ |- _ => apply find_index_Some in H
+           | H : String.eqb _ _ = true |- _ => apply String.eqb_eq in H
+           | _ => first [ progress subst | destruct_one_match_hyp ]
+           end.
+    do 2 eexists; ssplit; eauto using nth_error_In.    
+  Qed.
+
+  (* Theorem that connects run1 with a ctx to run1 with a program *)
+  Lemma link_exits :
+    forall fns prog syms start_name start_pc regs spec err_spec,
+      (* ...if `prog` is the result of a successful `link fns`... *)
+      link fns = Ok prog ->
+      (* ..and `syms` is the symbol table for `fns`... *)
+      link_symbols fns = Ok syms ->
+      (* ...and `start_pc` is the global offset of `start_name`... *)
+      find_global_offset fns start_name = Some start_pc ->
+      (* ...and the pre-link version satisfies the spec... *)
+      exits (fetch:=fetch_ctx fns) start_name regs [] [] spec err_spec ->
+      (* ...the program satisfies the spec. *)
+      exits (fetch:=fetch prog) start_pc regs [] [] spec err_spec.
+  Proof.
+    cbv [exits]; intros.
+    lazymatch goal with H : find_global_offset _ _ = Some _ |- _ =>
+                          eapply find_global_offset_correct in H; [ | solve [eauto] ] end.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | _ => progress subst
+           end.
+    pose proof (link_correct _ _ _ _ ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           end.
+    eapply link_eventually_run1; eauto; [ | ].
+    { cbv beta; intros.
+      cbv [states_related] in *.
+      related_states_hammer. }
+    { cbv beta; intros.
+      cbv [states_related]; ssplit; related_states_hammer.
+      repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | H : nth_error _ _ = Some ?fn |- map.get syms (fst (fst ?fn)) = _ =>
+                 apply nth_error_split in H
+             | _ => progress subst
+             end.
+      erewrite link_symbols_name by eauto.
+      rewrite List.firstn_app_l by lia.
+      reflexivity. }
   Qed.
 End BuildProofs.
 
@@ -1565,21 +2012,6 @@ Section Helpers.
   Definition gpr_has_value (regs : regfile) (r : gpr) (v : Z) : Prop :=
     read_gpr False prop_option_bind regs r (eq v).
 
-  Lemma read_gpr_weaken regs r (P Q : Z -> Prop) :
-    read_gpr False prop_option_bind regs r P ->
-    (forall v, P v -> Q v) ->
-    read_gpr False prop_option_bind regs r Q.
-  Proof.
-    cbv [read_gpr prop_option_bind]; intros.
-    repeat lazymatch goal with
-           | H : exists _, _ |- _ => destruct H
-           | H : _ /\ _ |- _ => destruct H
-           | |- exists _, _ => eexists
-           | _ => first [ destruct_one_match; eauto
-                        | solve [eauto] ]
-           end.
-  Qed.
-  
   Lemma fetch_weaken_run1
     {label : Type}
     {fetch1 : label * nat -> option insn}
@@ -2418,22 +2850,15 @@ Module Test.
     ssplit; eauto.
   Qed.
 
-  Definition prog0_regs_spec (regs : regfile) : Prop :=
-    map.get regs (gpreg x5) = Some 5.
-
   Lemma prog0_correct_prelink regs :
-    eventually
-      (run1 (fetch:=fetch_ctx [start_fn; add_fn]))
-      (fun st =>
-         match st with
-         | otbn_done pc regs =>
-             pc = ("start"%string, (length (snd start_fn) - 1)%nat)
-             /\ prog0_regs_spec regs
-         | _ => False
-         end)
-      (otbn_busy ("start"%string, 0%nat) regs [] []).
+    exits
+      (fetch:=fetch_ctx [start_fn; add_fn])
+      "start"%string regs [] []
+      (fun regs' =>
+         map.get regs' (gpreg x5) = Some 5)
+      (fun errs => False).
   Proof.
-    cbv [start_fn start_state]; intros.
+    cbv [exits start_fn start_state]; intros.
     repeat straightline_step.
 
     eapply eventually_jump.
@@ -2451,7 +2876,6 @@ Module Test.
     track_registers_combine.
 
     eapply eventually_ecall; ssplit; [ reflexivity .. | ].
-    cbv [prog0_regs_spec].
     lazymatch goal with H : map.get ?m ?k = Some _ |- map.get ?m ?k = Some _ =>
                           rewrite H; apply f_equal end.
     subst_lets. simplify_cast.
@@ -2459,18 +2883,13 @@ Module Test.
   Qed.
 
   (* check that link_run1 works by using add_fn proof to prove link_run1 program *)
-  Check link_run1.
   Lemma prog0_correct_postlink :
-    eventually
-      (run1 (fetch:=fetch prog0))
-      (fun st =>
-         match st with
-         | otbn_done pc regs =>
-             pc = (0%nat, (length (snd start_fn) - 1)%nat)
-             /\ prog0_regs_spec regs
-         | _ => False
-         end)
-      (start_state (0%nat, 0%nat)).
+    exits
+      (fetch:=fetch prog0)
+      0%nat map.empty [] []
+      (fun regs' =>
+         map.get regs' (gpreg x5) = Some 5)
+      (fun errs => False).
   Proof.
     set (fns:=[start_fn; add_fn]).
     assert (link fns = inl prog0) by reflexivity.
@@ -2481,43 +2900,8 @@ Module Test.
       | _ => fail
       end.
     assert (link_symbols fns = inl syms) by reflexivity.
-    assert (In start_fn fns) by (subst fns; cbn [In]; tauto).
-
-    pose proof (link_correct fns _ _ syms
-                  ltac:(eassumption) ltac:(eassumption) ltac:(eassumption)).
-    repeat lazymatch goal with
-           | H : _ /\ _ |- _ => destruct H
-           | H : exists _, _ |- _ => destruct H
-           | _ => progress subst
-           end.
-
-    eapply link_run1
-      with
-      (fns:=[start_fn; add_fn])
-      (start_fn:=start_fn)
-      (pre_ctx:=eq (start_state ("start"%string, 0%nat)));
-      (* find the right side condition and plug in prelink lemma to
-         instantiate postcondition *)
-      lazymatch goal with
-      | |- forall st, _ -> eventually run1 _ st =>
-          intros; subst; eapply prog0_correct_prelink
-      | _ => idtac
-      end.
-    { cbv [incl]. tauto. }
-    { eassumption. }
-    { eassumption. }
-    { eassumption. }
-    { reflexivity. }
-    { cbv [link_spec]. intros; subst.
-      cbn [start_state link_state link_call_stack link_loop_stack fst snd].
-      eexists. ssplit; [ solve [solve_map] | ].
-      apply eq_refl. }
-    { cbv [link_spec]. intro st; subst.
-      destruct st; try contradiction; [ ].
-      intros; repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-      subst. cbv [link_state]. cbn [fst snd].
-      eexists; ssplit; solve_map. }
-    { reflexivity. }
+    assert (find_global_offset fns "start"%string = Some 0%nat) by reflexivity.
+    eapply link_exits; eauto using prog0_correct_prelink.
   Qed.
 
   (* Test scaling with a large codegen. *)
@@ -2614,6 +2998,5 @@ Module ExecTest.
 End ExecTest.
 
 (* Next: use the maybe monad in exec model for better error messages *)
-(* Next: try to apply link_run1, then try to prove it if form is OK *)
 (* Next: try to add more realistic error conditions for e.g. loop errors *)
 (* Next: use word!! *)
