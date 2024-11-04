@@ -7,6 +7,7 @@ Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
+Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
 Require Coq.Strings.HexString.
 Import ListNotations.
@@ -102,6 +103,7 @@ Section RegisterEquality.
 End RegisterEquality.
 
 Section Stringify.
+  Context {word32 : word.word 32}.
   Context {label : Type} {label_to_string : label -> string}.
   Local Coercion label_to_string : label >-> string.
 
@@ -168,6 +170,7 @@ Local Infix ">>" := Z.shiftr (at level 40, only parsing) : Z_scope.
 Local Coercion Z.b2z : bool >-> Z.
 
 Section Semantics.
+  Context {word32 : word.word 32}.
   (* Parameterize over the representation of jump locations. *)
   Context {label : Type}
     {label_eqb : label -> label -> bool}
@@ -175,7 +178,7 @@ Section Semantics.
       forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (label_eqb d1 d2)}.
   Definition advance_pc (pc : label * nat) := (fst pc, S (snd pc)).
   (* Parameterize over the map implementation. *)
-  Context {regfile : map.map reg Z}
+  Context {regfile : map.map reg word32}
     {fetch : label * nat -> option (insn (label:=label))}.
 
   (* Really, I want to talk about terminal states -- either a return
@@ -189,9 +192,6 @@ Section Semantics.
    *)
   Definition is_valid_addi_imm (imm : Z) : bool :=
     (-2048 <=? imm) && (imm <=? 2047).
-
-  (* Convenience definition to cast to 32 bits *)
-  Definition cast32 (v : Z) : Z := v &' Z.ones 32.
 
   Fixpoint repeat_advance_pc (pc : label * nat) (n : nat) : label * nat :=
     match n with
@@ -227,7 +227,7 @@ Section Semantics.
         (* error case: None for exec, False for proof *)
         (err : T)
         (* construction of randomness: list fetch for exec, (forall v, P v) for proof *)
-        (random : (Z -> T) -> T)
+        (random : (word32 -> T) -> T)
         (* construction for option types:
              - for exec: match x with | Some x => P x | None => None end
              - for proof: exists v, x = Some v /\ P v
@@ -235,21 +235,21 @@ Section Semantics.
         (option_bind : forall A, option A -> (A -> T) -> T).
     Local Arguments option_bind {_}.
 
-    Definition read_gpr (regs : regfile) (r : gpr) (P : Z -> T) : T :=
+    Definition read_gpr (regs : regfile) (r : gpr) (P : word32 -> T) : T :=
       match r with
-      | x0 => P 0 (* x0 always reads as 0 *)
+      | x0 => P (word.of_Z 0) (* x0 always reads as 0 *)
       | x1 =>
           (* TODO: call stack reads are rare in practice; for now, don't model *)
           err
       | _ => option_bind (map.get regs (gpreg r)) P
       end.
 
-    Definition read_csr (regs : regfile) (r : csr) (P : Z -> T) : T :=
+    Definition read_csr (regs : regfile) (r : csr) (P : word32 -> T) : T :=
       match r with
       | CSR_RND => random P
       end.
 
-    Definition write_gpr (regs : regfile) (r : gpr) (v : Z) (P : regfile -> T) : T :=
+    Definition write_gpr (regs : regfile) (r : gpr) (v : word32) (P : regfile -> T) : T :=
       match r with
       | x0 => P regs
       | x1 =>
@@ -257,14 +257,20 @@ Section Semantics.
              practically never used. For now, don't model this behavior
              and treat it as an error. *)
           err
-      | _ => P (map.put regs (gpreg r) (cast32 v))
+      | _ => P (map.put regs (gpreg r) v)
       end.
 
-    Definition write_csr (regs : regfile) (r : csr) (v : Z) (P : regfile -> T) : T :=
+    Definition write_csr (regs : regfile) (r : csr) (v : word32) (P : regfile -> T) : T :=
       match r with
       | CSR_RND => P regs (* writes ignored *)
       end.
 
+    Definition addi_spec (v : word32) (imm : Z) : word32 :=
+      if (0 <=? imm)
+      then word.add v (word.of_Z imm)
+      else word.sub v (word.of_Z imm).
+
+    Check Z.abs.
     Definition strt1
       (regs : regfile) (i : sinsn) (post : regfile -> T) : T :=
       match i with
@@ -273,20 +279,20 @@ Section Semantics.
           then
             read_gpr regs x
               (fun vx =>
-                 write_gpr regs d (vx + imm) post)
+                 write_gpr regs d (addi_spec vx imm) post)
           else err
       | Add d x y =>
           read_gpr regs x
             (fun vx =>
                read_gpr regs y
                  (fun vy =>
-                    write_gpr regs d (vx + vy) post))
+                    write_gpr regs d (word.add vx vy) post))
       | Csrrs d x =>
           read_gpr regs x
             (fun vx =>
                read_csr regs d
                  (fun vd =>
-                    write_csr regs d (Z.lxor vd vx)
+                    write_csr regs d (word.xor vd vx)
                       (fun regs =>
                          write_gpr regs x vd post)))
       end.
@@ -330,7 +336,7 @@ Section Semantics.
       | otbn_busy pc regs cstack lstack => post (otbn_busy (advance_pc pc) regs cstack lstack)
       | _ => post st
       end.
-    Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : Z -> T) : T :=
+    Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : _ -> T) : T :=
       match st with
       | otbn_busy _ regs _ _ => read_gpr regs r post
       | _ => err
@@ -395,7 +401,7 @@ Section Semantics.
           (fun v1 =>
              read_gpr_from_state st r2
                (fun v2 =>
-                  if (v1 =? v2)
+                  if (word.eqb v1 v2)
                   then next_pc st post
                   else set_pc st (dst, 0%nat) post))
     | Beq r1 r2 dst =>
@@ -403,16 +409,16 @@ Section Semantics.
           (fun v1 =>
              read_gpr_from_state st r2
                (fun v2 =>
-                  if (v1 =? v2)
+                  if (word.eqb v1 v2)
                   then set_pc st (dst, 0%nat) post
                   else next_pc st post))
     | Loopi v => loop_start st v post
     | Loop r => read_gpr_from_state st r
-                  (fun v => loop_start st (Z.to_nat v) post)
+                  (fun v => loop_start st (Z.to_nat (word.unsigned v)) post)
     | LoopEnd => loop_end st post
     end.
   End ExecOrProof.
-  Definition prop_random (P : Z -> Prop) : Prop := forall v, P v.
+  Definition prop_random (P : word32 -> Prop) : Prop := forall v, P v.
   Definition prop_option_bind (A : Type) (x : option A) (P : A -> Prop) : Prop :=
     exists v, x = Some v /\ P v.
 
@@ -437,7 +443,7 @@ Section Semantics.
   (* For now, we don't model RND in the executable model. It would
      theoretically be possible by e.g. plugging in a "next random" at
      every exec1. *)
-  Definition exec_random (P : Z -> option otbn_state)
+  Definition exec_random (P : word32 -> option otbn_state)
     : option otbn_state := None.
   Definition exec_option_bind
     (A : Type) (x : option A) (P : A -> option otbn_state) : option otbn_state :=
@@ -530,12 +536,6 @@ Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
 Local Coercion Straightline : sinsn >-> insn.
 Local Coercion Control : cinsn >-> insn.
-
-(* Contains proofs linking the executable and proof versions. *)
-Section Exec.
-  (* TODO *)
-End Exec.
- 
 
 (* Contains a way to link programs. *)
 Section Build.
@@ -727,7 +727,7 @@ End Build.
 Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
 
 Section BuildProofs.
-  Context {regfile : map.map reg Z}.
+  Context {word32 : word.word 32} {regfile : map.map reg word32}.
   Import ErrorMonadNotations.
 
   (* Returns the overall size of the program containing the functions
@@ -2006,10 +2006,10 @@ Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
 
 (* Helper lemmas for proving things about programs. *)
 Section Helpers.
-  Context {regfile : map.map reg Z}
-    {regfile_ok : map.ok regfile}.
+  Context {word32 : word.word 32} {word32_ok : word.ok word32}.
+  Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
 
-  Definition gpr_has_value (regs : regfile) (r : gpr) (v : Z) : Prop :=
+  Definition gpr_has_value (regs : regfile) (r : gpr) (v : word32) : Prop :=
     read_gpr False prop_option_bind regs r (eq v).
 
   Lemma fetch_weaken_run1
@@ -2168,7 +2168,7 @@ Section Helpers.
       fetch pc = Some (Control (Loop r)) ->
       fetch end_pc = Some (Control LoopEnd) ->
       gpr_has_value regs r v ->
-      Z.of_nat iters = v ->
+      Z.of_nat iters = word.unsigned v ->
       (length lstack < 8)%nat ->
       iters <> 0%nat ->
       invariant iters regs ->
@@ -2194,13 +2194,16 @@ Section Helpers.
   Proof.
     cbv [loop_start]; intros.
     repeat match goal with H : _ /\ _ |- _ => destruct H end.
-    destruct iters; [ lia | ].      
+    destruct iters; [ lia | ].    
     eapply eventually_step.
     { cbn [run1]. eexists; ssplit; [ eassumption | ].
       cbv iota. cbn [ctrl1 read_gpr_from_state].
       eapply read_gpr_weaken; [ eassumption | ].
       intros; cbv [loop_start]. ssplit; [ lia .. | ].
-      subst. rewrite Nat2Z.id.
+      subst.
+      lazymatch goal with H : Z.of_nat _ = word.unsigned ?v |- context [word.unsigned ?v] =>
+                            rewrite <-H end.
+      rewrite Nat2Z.id.
       destruct_one_match; try lia; eapply eq_refl. }
     intros; subst.
     eapply eventually_invariant
@@ -2248,16 +2251,17 @@ Section Helpers.
       eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
   Proof.
     intros.
-    destr (v1 =? v2).
+    destr (word.eqb v1 v2).
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        destruct_one_match; try lia; [ ]. cbv [set_pc]. apply eq_refl. }
+        rewrite word.eqb_eq by reflexivity.
+        cbv [set_pc]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        destruct_one_match; try lia; [ ]. apply eq_refl. }
+        destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
   Qed.
 
@@ -2275,16 +2279,16 @@ Section Helpers.
       eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs cstack lstack).
   Proof.
     intros.
-    destr (v1 =? v2).
+    destr (word.eqb v1 v2).
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        destruct_one_match; try lia; [ ]. apply eq_refl. }
+        destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
       { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
-        destruct_one_match; try lia; [ ]. apply eq_refl. }
+        destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
   Qed.
 
@@ -2355,9 +2359,6 @@ Section Helpers.
       cbv iota. cbv [set_regs set_pc]. eassumption. }
     intros; subst. eauto.
   Qed.
-
-  Lemma cast32_mod x : cast32 x = x mod 2^32.
-  Proof. cbv [cast32]. rewrite Z.land_ones; lia. Qed.
 
   Definition clobbers (l : list reg) (regs regs' : regfile) : Prop :=
     map.only_differ regs (PropSet.of_list l) regs'.
@@ -2435,9 +2436,8 @@ Section Helpers.
 
 End Helpers.
 
-Ltac simplify_cast_step :=
+Ltac zsimplify_step :=
   lazymatch goal with
-  | |- context [cast32 ?x] => rewrite !cast32_mod
   | |- context [_ + 0] => rewrite Z.add_0_r
   | |- context [0 + _] => rewrite Z.add_0_l
   | |- context [_ - 0] => rewrite Z.sub_0_r
@@ -2453,7 +2453,7 @@ Ltac simplify_cast_step :=
   | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
   | _ => progress Z.push_pull_mod
   end.
-Ltac simplify_cast := repeat simplify_cast_step.
+Ltac zsimplify := repeat zsimplify_step.
 
 Ltac simplify_side_condition_step :=
   match goal with
@@ -2501,7 +2501,7 @@ Ltac link_program fns :=
 
 Ltac get_next_insn :=
   lazymatch goal with
-  | |- eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _) =>
+  | |- eventually (run1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _) =>
       let i := eval vm_compute in (fetch pc) in
         i
   end.
@@ -2527,7 +2527,7 @@ Ltac find_loop_end' fetch pc :=
     end.
 Ltac find_loop_end :=
   lazymatch goal with
-  | |- context [eventually (@run1 _ _ ?fetch) _ (otbn_busy ?pc _ _ _)] =>
+  | |- context [eventually (run1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _)] =>
       let i := eval vm_compute in (fetch pc) in
         match i with
         | Some (Control (Loop _)) => find_loop_end' fetch (advance_pc pc)
@@ -2629,9 +2629,12 @@ Ltac subst_lets_step :=
   end.
 Ltac subst_lets := repeat subst_lets_step.
 
-Module Test.  
-  Context {regfile : map.map reg Z}
-    {regfile_ok : map.ok regfile}.
+Module Test.
+  Section __.
+  Context {word32 : word.word 32} {word32_ok : word.ok word32}.
+  Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
+  Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
+  
   (* Test program 0 : a function that adds two registers.
 
      start:
@@ -2691,14 +2694,14 @@ Module Test.
   Compute (link [mul_fn; add_fn]).
 
   Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
-
+  
   Lemma prog0_correct :
     eventually
       (run1 (fetch:=fetch prog0))
       (fun st =>
          match st with
          | otbn_done _ regs =>
-             map.get regs (gpreg x5) = Some 5
+             map.get regs (gpreg x5) = Some (word.of_Z 5)
          | _ => False
          end)
       (start_state (0%nat, 0%nat)).
@@ -2717,7 +2720,12 @@ Module Test.
     intros; subst. eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
     intros; subst. eapply eventually_done.
-    solve_map.
+    solve_map. apply f_equal.
+    cbv [addi_spec]. repeat destruct_one_match; try lia; [ ].    
+    rewrite !word.add_0_l.
+    apply word.unsigned_inj.
+    rewrite !word.unsigned_add, !word.unsigned_of_Z by lia.
+    cbv [word.wrap]. Z.push_pull_mod. reflexivity.
   Qed.
 
   Lemma add_correct :
@@ -2728,19 +2736,19 @@ Module Test.
         (fetch:=fetch_ctx [add_fn])
         "add"%string regs cstack lstack
         (fun regs' =>
-           map.get regs' (gpreg x5) = Some (cast32 (a + b))
+           map.get regs' (gpreg x5) = Some (word.add a b)
            /\ clobbers [gpreg x5] regs regs').
   Proof.
     cbv [add_fn returns]. intros; subst.
     track_registers_init.
     
     eapply eventually_step.
-    { simplify_side_condition. simplify_cast. apply eq_refl. }
+    { simplify_side_condition. apply eq_refl. }
     intros; subst.    
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
-    { solve_map. subst_lets. simplify_cast. reflexivity. }
+    { solve_map. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
   Qed.
@@ -2749,15 +2757,13 @@ Module Test.
     forall regs cstack lstack a b,
       map.get regs (gpreg x3) = Some a ->
       map.get regs (gpreg x4) = Some b ->
-      0 <= a ->
-      0 <= b ->
       (length cstack < 8)%nat ->
       (length lstack < 8)%nat ->
       returns
         (fetch:=fetch_ctx [mul_fn; add_fn])
         "mul"%string regs cstack lstack
         (fun regs' =>
-           map.get regs' (gpreg x2) = Some (cast32 (a * b))
+           map.get regs' (gpreg x2) = Some (word.mul a b)
            /\ clobbers [gpreg x2; gpreg x5] regs regs').
   Proof.
     cbv [mul_fn returns]. intros; subst. 
@@ -2770,13 +2776,23 @@ Module Test.
     { simplify_side_condition; reflexivity. }
     { (* case: b = 0, exit early *)
       intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
-      simplify_cast.
-      ssplit; try reflexivity; [ solve_map; reflexivity | ].
-      (* only_differ clause *)
-      eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
+      rewrite word.mul_0_r.
+      ssplit; try reflexivity; [ | ].
+      { (* result value *)
+        solve_map; subst_lets. cbv [addi_spec].
+        destruct_one_match; try lia; [ ].
+        apply f_equal. ring. }
+      { eapply clobbers_incl; eauto.
+        cbv [incl In]; tauto. } }
     (* case: b <> 0, proceed *)
     intros; subst.
+
+    pose proof (word.unsigned_range b).
+    assert (0 < word.unsigned b).
+    { lazymatch goal with H : b <> word.of_Z 0 |- _ =>
+                            apply word.unsigned_inj' in H end.
+      rewrite word.unsigned_of_Z_0 in *.
+      lia. }
  
     (* loop; use loop invariant lemma *)
     let loop_end_pc := find_loop_end in
@@ -2785,7 +2801,7 @@ Module Test.
       (end_pc:=loop_end_pc)
       (invariant :=
          fun i regs' =>
-           map.get regs' (gpreg x2) = Some (cast32 (a * (b - Z.of_nat i)))
+           map.get regs' (gpreg x2) = Some (word.mul a (word.sub b (word.of_Z (Z.of_nat i))))
            /\ map.get regs' (gpreg x3) = Some a
            /\ map.get regs' (gpreg x4) = Some b
            /\ clobbers [gpreg x2; gpreg x5] regs regs').
@@ -2796,8 +2812,13 @@ Module Test.
     { lia. }
     { lia. }
     { (* prove invariant holds at start *)
-      ssplit; simplify_side_condition; simplify_cast; [ reflexivity | ].
-      eapply clobbers_incl; eauto. cbv [incl In]; tauto. }
+      ssplit; simplify_side_condition; zsimplify.
+      { (* accumulator value *)
+        subst_lets. apply f_equal.
+        cbv [addi_spec]. destruct_one_match; try lia; [ ].
+        rewrite word.of_Z_unsigned. ring. }
+      { (* clobbered registers *)
+        eapply clobbers_incl; eauto. cbv [incl In]; tauto. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
       intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
 
@@ -2830,16 +2851,24 @@ Module Test.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
-        { simplify_side_condition. subst_lets. simplify_cast.
-          repeat (f_equal; try lia). } }
+        { simplify_side_condition. subst_lets. zsimplify.
+          cbv [addi_spec]. destruct_one_match; try lia.
+          apply f_equal. ring. } }
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
         left. eexists; ssplit; [ .. | reflexivity ]; solve_map.
-        { simplify_side_condition. subst_lets; simplify_cast.
-          repeat (f_equal; try lia). } } }
+        { simplify_side_condition. subst_lets; zsimplify.
+          cbv [addi_spec]. destruct_one_match; try lia.
+          apply f_equal.
+          replace (word.of_Z (Z.of_nat (S (S i))))
+            with (word.add (word:=word32) (word.of_Z (Z.of_nat (S i))) (word.of_Z 1));
+            [ ring | ].
+          apply word.unsigned_inj.
+          rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap, word.unsigned_of_Z by lia.
+          rewrite Z.add_1_r, <-Nat2Z.inj_succ. reflexivity. } } }
  
     (* invariant implies postcondition (i.e. post-loop code) *)
-    rewrite Z.sub_0_r; intros.
+    zsimplify. rewrite word.sub_0_r. intros.
     repeat lazymatch goal with
            | H : _ /\ _ |- _ => destruct H
            | H : Some _ = Some _ |- _ => inversion H; clear H; subst
@@ -2855,7 +2884,7 @@ Module Test.
       (fetch:=fetch_ctx [start_fn; add_fn])
       "start"%string regs [] []
       (fun regs' =>
-         map.get regs' (gpreg x5) = Some 5)
+         map.get regs' (gpreg x5) = Some (word.of_Z 5))
       (fun errs => False).
   Proof.
     cbv [exits start_fn start_state]; intros.
@@ -2878,7 +2907,9 @@ Module Test.
     eapply eventually_ecall; ssplit; [ reflexivity .. | ].
     lazymatch goal with H : map.get ?m ?k = Some _ |- map.get ?m ?k = Some _ =>
                           rewrite H; apply f_equal end.
-    subst_lets. simplify_cast.
+    subst_lets. cbv [addi_spec]. repeat destruct_one_match; try lia; [ ].
+    rewrite !word.add_0_l. apply word.unsigned_inj.
+    rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
     reflexivity.
   Qed.
 
@@ -2888,7 +2919,7 @@ Module Test.
       (fetch:=fetch prog0)
       0%nat map.empty [] []
       (fun regs' =>
-         map.get regs' (gpreg x5) = Some 5)
+         map.get regs' (gpreg x5) = Some (word.of_Z 5))
       (fun errs => False).
   Proof.
     set (fns:=[start_fn; add_fn]).
@@ -2911,15 +2942,25 @@ Module Test.
       (Addi x2 x0 0 : insn) :: repeat (Add x2 x2 x3 : insn) n ++ [(Ret : insn)]).
   Definition add100_fn : function := Eval vm_compute in (repeat_add 100).
 
+  (* helper lemma *)
+  Lemma mul_by_add_step x (a : word32) n :
+    0 < n ->
+    x = word.mul a (word.of_Z (n - 1)) ->
+    word.add x a = word.mul a (word.of_Z n).
+  Proof.
+    intros; subst. cbv [Z.sub].
+    rewrite word.ring_morph_add, word.ring_morph_opp.
+    ring.
+  Qed.
+
   Lemma add100_correct :
     forall regs cstack lstack a,
       map.get regs (gpreg x3) = Some a ->
-      0 <= a ->
       returns
         (fetch:=fetch_ctx [add100_fn])
         "add100"%string regs cstack lstack
         (fun regs' =>
-           map.get regs' (gpreg x2) = Some (cast32 (a * 100))
+           map.get regs' (gpreg x2) = Some (word.mul a (word.of_Z 100))
            /\ clobbers [gpreg x2] regs regs').
   Proof.
     cbv [returns]; intros.
@@ -2933,22 +2974,23 @@ Module Test.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
     Time do 10 straightline_step.
-    Time do 10 straightline_step. (* .4s *)
+    Time do 10 straightline_step. (* .47s *)
 
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
-    { solve_map. subst_lets. rewrite !cast32_mod.
-      assert (0 < 2^32) by lia.
-      generalize dependent (2^32). intros.
-      Z.push_pull_mod.
-      f_equal. f_equal. lia. }
+    { solve_map. apply (f_equal Some).
+      repeat (apply mul_by_add_step; [ lia | ];
+              cbn [Z.sub Z.add Z.opp Z.pos_sub Pos.pred_double]).
+      lazymatch goal with |- ?x = word.mul _ (word.of_Z 0) => subst x end.
+      cbv [addi_spec]. destruct_one_match; try lia; [ ].
+      ring. }
     { (* only_differ clause *)
-      eapply clobbers_incl; eauto.
-      cbv. tauto. }
-  Time Qed. (* 1.2s *)
-
+      eapply clobbers_incl; eauto. cbv [incl In]. tauto. }
+  Time Qed. (* 0.64s *)
+End __.
 End Test.
 
+Require Import coqutil.Word.Naive.
 Module SortedListRegs.
   Definition ltb (r1 r2 : reg) := String.ltb (reg_to_string r1) (reg_to_string r2).
   Definition Build_parameters (T : Type) : SortedList.parameters.parameters :=
@@ -2967,17 +3009,16 @@ Module SortedListRegs.
                 exfalso; cbv in *; try congruence). }
   Defined.
 
-  Global Instance reg_map : map.map reg Z :=
-    SortedList.map (Build_parameters Z) reg_strict_order.
-
+  Global Instance map : map.map reg Naive.word32 :=
+    SortedList.map (Build_parameters _) reg_strict_order.
 End SortedListRegs.
 
 Module ExecTest.
   (* Check that exec works *)
   Eval vm_compute in
-    (exec1 (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat))).
+    (exec1 (regfile:=SortedListRegs.map) (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat))).
   Eval vm_compute in
-    (exec (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat)) 100).
+    (exec (regfile:=SortedListRegs.map) (fetch:=fetch Test.prog0) (start_state (0%nat, 0%nat)) 100).
 
   (* scaling factor; create a program with ~n instructions *)
   Definition n := 10000.
@@ -2993,7 +3034,8 @@ Module ExecTest.
   Definition prog : program := ltac:(link_program [start_fn; add_fn]).
   Time
     Eval vm_compute in
-    (exec (fetch:=fetch prog) (start_state (0%nat, 0%nat)) (length prog)).
+    (exec (regfile:=SortedListRegs.map)
+       (fetch:=fetch prog) (start_state (0%nat, 0%nat)) (length prog)).
 
 End ExecTest.
 
