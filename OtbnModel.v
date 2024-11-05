@@ -155,6 +155,7 @@ Class label_parameters {label : Type} :=
   {
     label_eqb : label -> label -> bool;
     label_to_string : label -> string;
+    pc_to_string : label * nat -> string;
   }.
 Global Arguments label_parameters : clear implicits.
 
@@ -167,12 +168,14 @@ Instance string_label_parameters : label_parameters string :=
   {|
     label_eqb := String.eqb;
     label_to_string := id;
+    pc_to_string := fun pc => (fst pc ++ "+" ++ HexString.of_Z (4 * Z.of_nat (snd pc)))%string;
   |}.
 
 Instance nat_label_parameters : label_parameters nat :=
   {|
     label_eqb := Nat.eqb;
     label_to_string := HexString.of_nat;
+    pc_to_string := fun pc => HexString.of_Z (4 * Z.of_nat (fst pc + snd pc));
   |}.
 
 Section Stringify.
@@ -796,15 +799,8 @@ Section Semantics.
            end
     | _ => post st
     end.
-
-  Definition pc_to_string (pc : label * nat) : string :=
-    "(" ++ label_to_string (fst pc) ++ ", " ++ HexString.of_nat (snd pc) ++ ")".
   
   (* Fully executable model. *)
-  Check get_pc.
-  Check prefix_err.
-  Check insn_to_string.
-  Check map_err.
   Definition exec1 (st : otbn_state) : maybe otbn_state :=
     match st with
     | otbn_busy pc regs wregs flags dmem cstack lstack =>
@@ -822,7 +818,7 @@ Section Semantics.
                             (fun st => set_pc st (advance_pc pc) Ok)))
                 | Control i => ctrl1 st i Ok
                 end)
-               ("PC " ++ pc_to_string pc ++ " (" ++ insn_to_string i ++ "):"))
+               ("PC " ++ pc_to_string pc ++ " (" ++ insn_to_string i ++ "): "))
     | _ => Ok st
     end.
 
@@ -841,6 +837,28 @@ Section Semantics.
          else Ok st)
     end.
 End Semantics.
+
+(* Separation logic defs. This section is copied directly from
+   bedrock2 (copied to avoid introducing a bedrock2 dependency). *)
+Section Sep.
+  Context {key value} {map : map.map key value}.
+  Definition emp (P : Prop) := fun m : map => m = map.empty /\ P.
+  Definition sep (p q : map -> Prop) m :=
+    exists mp mq, map.split m mp mq /\ p mp /\ q mq.
+  Definition ptsto k v := fun m : map => m = map.put map.empty k v.
+  Definition read k (P : value -> map.rep -> Prop) m := exists v, sep (ptsto k v) (P v) m.
+
+  Fixpoint seps (xs : list (map.rep -> Prop)) : map.rep -> Prop :=
+    match xs with
+    | cons x nil => x
+    | cons x xs => sep x (seps xs)
+    | nil => emp True
+    end.
+End Sep.
+
+Declare Scope sep_scope.
+Delimit Scope sep_scope with sep.
+Infix "*" := sep (at level 40, left associativity) : sep_scope.
 
 Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
@@ -3551,6 +3569,9 @@ Module ExecTest.
       [ (Addi x3 x0 23 : insn);
         (Jal x1 (fst (fst add_fn)) : insn);
         (Sw x0 x2 0 : insn);
+        (* Uncomment this line to see an error
+        (Addi x2 x5 0 : insn);
+        *)
         (Ecall : insn)])%string.
 
   (* Check that exec completes in a reasonable amount of time *)
@@ -3562,8 +3583,12 @@ Module ExecTest.
 
 End ExecTest.
 
-(* Next: try to add more realistic error conditions for e.g. loop errors *)
-(* Next: separation logic for memory *)
-(* Next: add notations back *)
-(* Next: instruction decoding *)
+(* Next: separation logic for memory (and regs maybe?) *)
 (* Next: wclobbers, fclobbers *)
+(* Next: add bn.add/bn.addc and test these *)
+(* Next: add mulqacc *)
+(* Next: try to add more realistic error conditions for e.g. loop errors *)
+(* Next: add notations back *)
+(* Next: provable multiplication blocks *)
+(* Next: add more insns needed for 25519 mul *)
+(* Next: prove 25519 mul *)
