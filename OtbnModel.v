@@ -2254,6 +2254,87 @@ Module map.
   End __.
 End map.
 
+
+Section Clobbers.
+  Context {K V} {map : map.map K V} {map_ok : map.ok map}.
+  Context {key_eqb : K -> K -> bool}
+    {key_eqb_spec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}.
+
+  Definition clobbers (l : list K) (m m' : map.rep (map:=map)) : Prop :=
+    map.only_differ m (PropSet.of_list l) m'.
+
+  Lemma clobbers_step_in l k v r1 r2 :
+    clobbers l r1 r2 ->
+    In k l ->
+    clobbers l r1 (map.put r2 k v).
+  Proof.
+    cbv [clobbers PropSet.of_list]; intros.
+    intro k'; cbv [map.only_differ PropSet.elem_of] in *.
+    lazymatch goal with H : forall k : K, _ |- _ => specialize (H k') end.
+    destr (key_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
+    all:tauto.
+  Qed.
+
+  Lemma clobbers_step l k v r1 r2 :
+    clobbers l r1 r2 ->
+    clobbers (k :: l) r1 (map.put r2 k v).
+  Proof.
+    cbv [clobbers PropSet.of_list]; intros.
+    intro k'; cbv [map.only_differ PropSet.elem_of] in *. cbn [In].
+    lazymatch goal with H : forall k : K, _ |- _ => specialize (H k') end.
+    destr (key_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
+    all:tauto.
+  Qed.
+
+  Lemma clobbers_not_in l r1 r2 x v :
+    clobbers l r1 r2 ->
+    map.get r1 x = Some v ->
+    ~ (In x l) ->
+    map.get r2 x = Some v.
+  Proof.
+    cbv [clobbers map.only_differ PropSet.of_list PropSet.elem_of]; intros.
+    lazymatch goal with H : forall x : K, _ \/ _ |- _ =>
+                          destruct (H ltac:(eassumption)) end.
+    all:try tauto; congruence.
+  Qed.
+
+  Lemma clobbers_trans :
+    forall l1 l2 r1 r2 r3,
+      clobbers l1 r1 r2 ->
+      clobbers l2 r2 r3 ->
+      clobbers (l1 ++ l2) r1 r3.
+  Proof.
+    cbv [clobbers]; intros.
+    eapply map.only_differ_trans; eauto; [ ].
+    rewrite PropSet.of_list_app_eq. reflexivity.
+  Qed.
+
+  Lemma clobbers_trans_dedup l1 l2 l3 r1 r2 r3 :
+      clobbers l1 r1 r2 ->
+      clobbers l2 r2 r3 ->
+      l3 = List.dedup key_eqb (l1 ++ l2) ->
+      clobbers l3 r1 r3.
+  Proof.
+    intros; subst.
+    eapply map.only_differ_subset;
+      [ | eapply map.only_differ_trans; eauto; reflexivity ].
+    cbv [PropSet.of_list PropSet.subset PropSet.union PropSet.elem_of].
+    intros. rewrite <-List.dedup_preserves_In.
+    auto using in_or_app.
+  Qed.
+
+  Lemma clobbers_incl l1 l2 r1 r2 :
+    clobbers l1 r1 r2 ->
+    incl l1 l2 ->
+    clobbers l2 r1 r2.
+  Proof.
+    cbv [incl clobbers map.only_differ PropSet.elem_of PropSet.of_list].
+    intros; subst. repeat lazymatch goal with H : forall x : K, _ |- _ =>
+                                                specialize (H ltac:(eassumption)) end.
+    intuition idtac.
+  Qed.
+End Clobbers.
+
 Ltac solve_map_step t :=
   first [ rewrite map.get_put_diff by t
         | rewrite map.get_put_same by t                       
@@ -2640,80 +2721,6 @@ Section Helpers.
     intros; subst. eauto.
   Qed.
 
-  Definition clobbers (l : list reg) (regs regs' : regfile) : Prop :=
-    map.only_differ regs (PropSet.of_list l) regs'.
-
-  Lemma clobbers_step_in l k v r1 r2 :
-    clobbers l r1 r2 ->
-    In k l ->
-    clobbers l r1 (map.put r2 k v).
-  Proof.
-    cbv [clobbers PropSet.of_list]; intros.
-    intro k'; cbv [map.only_differ PropSet.elem_of] in *.
-    lazymatch goal with H : forall k : reg, _ |- _ => specialize (H k') end.
-    destr (reg_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
-    all:tauto.
-  Qed.
-
-  Lemma clobbers_step l k v r1 r2 :
-    clobbers l r1 r2 ->
-    clobbers (k :: l) r1 (map.put r2 k v).
-  Proof.
-    cbv [clobbers PropSet.of_list]; intros.
-    intro k'; cbv [map.only_differ PropSet.elem_of] in *. cbn [In].
-    lazymatch goal with H : forall k : reg, _ |- _ => specialize (H k') end.
-    destr (reg_eqb k k'); rewrite ?map.get_put_diff, ?map.get_put_same by congruence.
-    all:tauto.
-  Qed.
-
-  Lemma clobbers_not_in l (r1 r2 : regfile) x v :
-    clobbers l r1 r2 ->
-    map.get r1 x = Some v ->
-    ~ (In x l) ->
-    map.get r2 x = Some v.
-  Proof.
-    cbv [clobbers map.only_differ PropSet.of_list PropSet.elem_of]; intros.
-    lazymatch goal with H : forall x : reg, _ \/ _ |- _ =>
-                          destruct (H ltac:(eassumption)) end.
-    all:try tauto; congruence.
-  Qed.
-
-  Lemma clobbers_trans :
-    forall l1 l2 (r1 r2 r3 : regfile),
-      clobbers l1 r1 r2 ->
-      clobbers l2 r2 r3 ->
-      clobbers (l1 ++ l2) r1 r3.
-  Proof.
-    cbv [clobbers]; intros.
-    eapply map.only_differ_trans; eauto; [ ].
-    rewrite PropSet.of_list_app_eq. reflexivity.
-  Qed.
-
-  Lemma clobbers_trans_dedup l1 l2 l3 (r1 r2 r3 : regfile) :
-      clobbers l1 r1 r2 ->
-      clobbers l2 r2 r3 ->
-      l3 = List.dedup reg_eqb (l1 ++ l2) ->
-      clobbers l3 r1 r3.
-  Proof.
-    intros; subst.
-    eapply map.only_differ_subset;
-      [ | eapply map.only_differ_trans; eauto; reflexivity ].
-    cbv [PropSet.of_list PropSet.subset PropSet.union PropSet.elem_of].
-    intros. rewrite <-List.dedup_preserves_In.
-    auto using in_or_app.
-  Qed.
-
-  Lemma clobbers_incl l1 l2 (r1 r2 : regfile) :
-    clobbers l1 r1 r2 ->
-    incl l1 l2 ->
-    clobbers l2 r1 r2.
-  Proof.
-    cbv [incl clobbers map.only_differ PropSet.elem_of PropSet.of_list].
-    intros; subst. repeat lazymatch goal with H : forall x : reg, _ |- _ =>
-                                                specialize (H ltac:(eassumption)) end.
-    intuition idtac.
-  Qed.
-
   Lemma is_valid_addr_0 : is_valid_addr (word.of_Z 0) = true.
   Proof.
     cbv [is_valid_addr]. apply Bool.andb_true_iff. ssplit.
@@ -2906,31 +2913,39 @@ Ltac track_registers_init :=
   end;
   clear H.
 
+Ltac update_clobbers k l v H :=
+  first [ (let Hin := fresh in
+           assert (In k l) as Hin by (cbv [In]; tauto);
+           pose proof (clobbers_step_in l k v _ _ H Hin))
+        | pose proof (clobbers_step l k v _ _ H) ].
+Ltac update_live_registers r k v r' :=
+  let Heq := fresh in
+  remember (map.put r k v) as r' eqn:Heq;
+  assert (map.get r' k = Some v) by (subst r'; apply map.get_put_same);
+  repeat lazymatch goal with
+    | H : map.get r k = Some _ |- _ => clear H
+    | H : map.get r ?k = Some ?v |- _ =>
+        assert (map.get r' k = Some v)
+        by (subst r'; rewrite map.get_put_diff by congruence; eauto);
+        clear H
+    end;
+  clear Heq.
+  (* try clobbers_step_in first, then more generic clobbers_step *)
 Ltac track_registers_update_step :=
   lazymatch goal with
-  | H : clobbers ?l ?regs ?regs0
-    |- context [otbn_busy _ (map.put ?regs0 ?k ?v)] =>
-      let v' := fresh "v" in
-      set (v':= v);
-      (* try clobbers_step_in first, then more generic clobbers_step *)
-      first [ (let Hin := fresh in
-               assert (In k l) as Hin by (cbv [In]; tauto);
-               pose proof (clobbers_step_in l k v' _ _ H Hin))
-            | pose proof (clobbers_step l k v' _ _ H) ];
-      let regs1 := fresh "regs" in
-      let Hregs1 := fresh in
-      remember (map.put regs0 k v') as regs1 eqn:Hregs1;
-      assert (map.get regs1 k = Some v') by (subst regs1; apply map.get_put_same);
-      repeat lazymatch goal with
-        | H : map.get regs0 k = Some _ |- _ => clear H
-        | H : map.get regs0 ?r = Some ?v |- _ =>
-            assert (map.get regs1 r = Some v)
-            by (subst regs1; rewrite map.get_put_diff by congruence; eauto);
-            clear H
-        end;
-      clear Hregs1 H regs0
-  | H : clobbers ?l ?regs ?regs0
-    |- context [otbn_busy _ ?regs0] => idtac (* registers were not updated *)
+  | |- context [otbn_busy _ (map.put ?regs0 ?k ?v)] =>
+      (* update to small registers *)
+      lazymatch goal with
+      | H : @clobbers reg _ _ ?l ?regs ?regs0 |- _ =>
+          let v' := fresh "v" in
+          set (v':= v);
+          update_clobbers k l v' H;
+          let regs1 := fresh "regs" in
+          update_live_registers regs0 k v' regs1;
+          clear H regs0
+      | _ => fail "Could not find hypothesis for clobbered GPRs"
+      end
+  | _ => idtac (* nothing was updated *)
   end.
 Ltac track_registers_update :=
   track_registers_update_step; repeat progress track_registers_update_step.
@@ -2950,7 +2965,8 @@ Ltac track_registers_combine :=
             clear H
         end;
       let l2 := (eval vm_compute in (List.dedup reg_eqb (l0 ++ l1))) in
-      pose proof (clobbers_trans_dedup _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
+      pose proof (clobbers_trans_dedup (key_eqb:=reg_eqb)
+                    _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
       clear H0 H1; try clear regs0
   end.
 
@@ -3109,7 +3125,7 @@ Module Test.
     
     eapply eventually_step.
     { simplify_side_condition. apply eq_refl. }
-    intros; subst.    
+    intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
