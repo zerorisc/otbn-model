@@ -150,10 +150,22 @@ Section RegisterEquality.
   Qed.
 End RegisterEquality.
 
+(* Representation of jump locations (e.g. string, numerical offset). *)
+Class label_parameters {label : Type} :=
+  {
+    label_eqb : label -> label -> bool;
+    label_to_string : label -> string;
+  }.
+Global Arguments label_parameters : clear implicits.
+
+Class label_parameters_ok {label} (params: label_parameters label) :=
+  {
+    label_eqb_spec : forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (label_eqb d1 d2)
+  }.
+
 Section Stringify.
   Context {word32 : word.word 32}.
-  Context {label : Type} {label_to_string : label -> string}.
-  Local Coercion label_to_string : label >-> string.
+  Context {label : Type} {label_params : label_parameters label}.
 
   Definition gpr_to_string (r : gpr) : string :=
     match r with
@@ -227,9 +239,9 @@ Section Stringify.
     match i with
     | Ret => "ret"
     | Ecall => "ecall"
-    | Jal r dst => "jal " ++ r ++ ", " ++ dst
-    | Bne r1 r2 dst => "bne " ++ r1 ++ ", " ++ r2 ++ ", " ++ dst
-    | Beq r1 r2 dst => "beq " ++ r1 ++ ", " ++ r2 ++ ", " ++ dst
+    | Jal r dst => "jal " ++ r ++ ", " ++ label_to_string dst
+    | Bne r1 r2 dst => "bne " ++ r1 ++ ", " ++ r2 ++ ", " ++ label_to_string dst
+    | Beq r1 r2 dst => "beq " ++ r1 ++ ", " ++ r2 ++ ", " ++ label_to_string dst
     | Loop r => "loop " ++ r
     | Loopi n => "loop " ++ HexString.of_nat n
     | LoopEnd => "loopend"
@@ -243,6 +255,52 @@ Section Stringify.
 
 End Stringify.
 
+
+Section ErrorMonad.
+  (* returns either a value or an error message, helpful for debugging *)
+  Definition maybe (A : Type) : Type := A + string.
+  Definition bind {A B} (x : maybe A) (f : A -> maybe B) : maybe B :=
+    match x with
+    | inl a => f a
+    | inr err => inr err
+    end.
+  Definition map_err {A} (x : option A) (err : string) : maybe A :=
+    match x with
+    | Some v => inl v
+    | None => inr err
+    end.
+  Definition prefix_err {A} (x : maybe A) (prefix : string) : maybe A :=
+    match x with
+    | inl v => inl v
+    | inr err => inr (prefix ++ err)%string
+    end.
+  Definition maybe_map {A B} (f : A -> B) (x : maybe A) : maybe B :=
+    match x with
+    | inl v => inl (f v)
+    | inr err => inr err
+    end.
+  Fixpoint maybe_fold_left {A B} (f : A -> B -> maybe A) (l : list B) (x : A) : maybe A :=
+    match l with
+    | [] => inl x
+    | b :: l =>
+        bind (f x b) (maybe_fold_left f l)
+    end.
+  Fixpoint maybe_flat_map {A B} (f : A -> maybe (list B)) (l : list A) : maybe (list B) :=
+    match l with
+    | [] => inl []
+    | a :: l =>
+        bind (f a) (fun l1 => bind (maybe_flat_map f l) (fun l2 => inl (l1 ++ l2)))
+    end.
+  Definition assertion (cond : bool) (msg : string) : maybe unit :=
+    if cond then inl tt else inr msg.
+End ErrorMonad.
+Module ErrorMonadNotations.
+  Notation "a <- b ; c" := (bind b (fun a => c)) (at level 100, right associativity).
+  Notation Ok := inl (only parsing).
+  Notation "'Err' x" := (inr x%string) (at level 20, only parsing).
+End ErrorMonadNotations.
+Import ErrorMonadNotations.
+
 (* bitwise operation shorthand *)
 Local Infix "|'" := Z.lor (at level 40, only parsing) : Z_scope.
 Local Infix "&'" := Z.land (at level 40, only parsing) : Z_scope.
@@ -250,20 +308,29 @@ Local Infix "<<" := Z.shiftl (at level 40, only parsing) : Z_scope.
 Local Infix ">>" := Z.shiftr (at level 40, only parsing) : Z_scope.
 Local Coercion Z.b2z : bool >-> Z.
 
+(* Parameters to use for instantiating semantics. This allows us to
+   use the same semantics definitions for both proofs (T:=Prop) and an
+   executable model of OTBN (T:=maybe otbn_state). *)
+Class semantics_parameters {word32 : word.word 32} (T : Type) :=
+  {
+    err : string -> T;
+    random : (word32 -> T) -> T;
+    urandom : (word32 -> T) -> T;
+    option_bind : forall A, option A -> string -> (A -> T) -> T;
+  }.
+
 Section Semantics.
   Context {word32 : word.word 32} {word256 : word.word 256}.
   (* Parameterize over the representation of jump locations. *)
-  Context {label : Type}
-    {label_eqb : label -> label -> bool}
-    {label_eqb_spec :
-      forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (label_eqb d1 d2)}.
-  Definition advance_pc (pc : label * nat) := (fst pc, S (snd pc)).
+  Context {label : Type} {label_params : label_parameters label}.
   (* Parameterize over the map implementation. *)
   Context {regfile : map.map reg word32}
     {wregfile : map.map wreg word256}
     {flagfile : map.map flag bool}
     {mem : map.map word32 word32}
     {fetch : label * nat -> option (insn (label:=label))}.
+
+  Definition advance_pc (pc : label * nat) := (fst pc, S (snd pc)).
 
   Definition is_valid_addi_imm (imm : Z) : bool :=
     (-2048 <=? imm) && (imm <=? 2047).
@@ -305,43 +372,34 @@ Section Semantics.
   (* Code in this section can be used either for execution or for
      omnisemantics-style proofs depending on the parameters. *) 
   Section ExecOrProof.
-    Context
-      (* return type: option otbn_state for exec, Prop for proof *)
-      {T}
-        (* error case: None for exec, False for proof *)
-        (err : T)
-        (* construction of randomness: list fetch for exec, (forall v, P v) for proof *)
-        (random : (word32 -> T) -> T)
-        (* construction of pseudorandomness *)
-        (urandom : (word32 -> T) -> T)
-        (* construction for option types:
-             - for exec: match x with | Some x => P x | None => None end
-             - for proof: exists v, x = Some v /\ P v
-        *)
-        (option_bind : forall A, option A -> (A -> T) -> T).
-    Local Arguments option_bind {_}.
+    Context {T} {semantics_params : semantics_parameters T}.
+    Local Arguments option_bind {_ _ _ _}.    
 
     Definition read_gpr (regs : regfile) (r : gpr) (P : word32 -> T) : T :=
       match r with
       | x0 => P (word.of_Z 0) (* x0 always reads as 0 *)
-      | x1 =>
-          (* TODO: call stack reads are rare in practice; for now, don't model *)
-          err
-      | _ => option_bind (map.get regs (gpreg r)) P
+      | x1 => err "Call stack reads are not currently modelled"
+      | _ => option_bind (map.get regs (gpreg r))
+               ("Register " ++ gpr_to_string r ++ " read but not set.")
+               P
       end.
 
     Definition read_flag_group (group : bool) (flags : flagfile) (P : word32 -> T) : T :=
       option_bind
         (map.get flags (flagM group))
+        ("Flag M in group " ++ if group then "1" else "0" ++ " read but not set.")
         (fun m =>
            option_bind
              (map.get flags (flagL group))
+             ("Flag L in group " ++ if group then "1" else "0" ++ " read but not set.")
              (fun l =>
                 option_bind
                   (map.get flags (flagZ group))
+                  ("Flag Z in group " ++ if group then "1" else "0" ++ " read but not set.")
                   (fun z =>
                      option_bind
                        (map.get flags (flagC group))
+                       ("Flag C in group " ++ if group then "1" else "0" ++ " read but not set.")
                        (fun c =>
                           let value := Z.b2z c in
                           let value := Z.lor value (Z.shiftl (Z.b2z z) 1) in
@@ -363,24 +421,22 @@ Section Semantics.
                read_flag_group true flags
                  (fun fg1 =>
                     P (word.or fg0 (word.slu fg1 (word.of_Z 4)))))
-      | CSR_RND_PREFETCH => err (* cannot read *)
+      | CSR_RND_PREFETCH => err "RND_PREFETCH register is not readable"
       | CSR_RND => random P
       | CSR_URND => urandom P
       end.
 
     Definition read_mem (dmem : mem) (addr : word32) (P : word32 -> T) : T :=
       if is_valid_addr addr
-      then option_bind (map.get dmem addr) P
-      else err.      
+      then option_bind (map.get dmem addr)
+             ("Memory address " ++ HexString.of_Z (word.unsigned addr) ++ " read but not set.")
+             P
+      else err ("Memory read from invalid address: " ++ HexString.of_Z (word.unsigned addr)).
 
     Definition write_gpr (regs : regfile) (r : gpr) (v : word32) (P : regfile -> T) : T :=
       match r with
       | x0 => P regs
-      | x1 =>
-          (* TODO: this should push to the call stack, but is
-             practically never used. For now, don't model this behavior
-             and treat it as an error. *)
-          err
+      | x1 => err "Direct writes to the call stack via x1 are not currently modelled."
       | _ => P (map.put regs (gpreg r) v)
       end.
 
@@ -433,7 +489,7 @@ Section Semantics.
     Definition write_mem (dmem : mem) (addr v : word32) (P : mem -> T) : T :=
       if is_valid_addr addr
       then P (map.put dmem addr v)
-      else err.
+      else err ("Memory write to invalid address: " ++ HexString.of_Z (word.unsigned addr)).
 
     Definition addi_spec (v : word32) (imm : Z) : word32 :=
       if (0 <=? imm)
@@ -451,7 +507,7 @@ Section Semantics.
               (fun vx =>
                  write_gpr regs d (addi_spec vx imm)
                    (fun regs => post regs wregs flags dmem))
-          else err
+          else err ("Invalid immediate for ADDI: " ++ HexString.of_Z imm)
       | Add d x y =>
           read_gpr regs x
             (fun vx =>
@@ -467,7 +523,7 @@ Section Semantics.
                       (fun vm =>
                          write_gpr regs d vm
                            (fun regs => post regs wregs flags dmem)))
-          else err
+          else err ("Invalid memory offset for LW: " ++ HexString.of_Z imm) 
       | Sw x y imm =>
           if is_valid_mem_offset imm
           then read_gpr regs x
@@ -476,7 +532,7 @@ Section Semantics.
                        (fun vy =>
                           write_mem dmem (word.add vx (word.of_Z imm)) vy
                             (fun dmem => post regs wregs flags dmem))))
-          else err
+          else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
       | Csrrs d x =>
           read_gpr regs x
             (fun vx =>
@@ -492,8 +548,10 @@ Section Semantics.
     Definition call_stack_pop (st : otbn_state) (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
-          option_bind (hd_error cstack)
-                      (fun dst => post (otbn_busy dst regs wregs flags dmem (tl cstack) lstack))
+          option_bind
+            (hd_error cstack)
+            "Attempt to read from empty call stack!"
+            (fun dst => post (otbn_busy dst regs wregs flags dmem (tl cstack) lstack))
       | _ => post st
       end.
 
@@ -503,7 +561,7 @@ Section Semantics.
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
           if (length cstack <? 8)%nat
           then post (otbn_busy pc regs wregs flags dmem ((advance_pc pc) :: cstack) lstack)
-          else err
+          else err "Attempt to write to a full call stack!"
       | _ => post st
       end.
     Definition program_exit (st : otbn_state) (post : otbn_state -> T) : T :=
@@ -539,14 +597,14 @@ Section Semantics.
     Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : _ -> T) : T :=
       match st with
       | otbn_busy _ regs _ _ _ _ _ => read_gpr regs r post
-      | _ => err
+      | _ => err "GPR values cannot be read from non-busy OTBN states."
       end.
 
     (* Begin a new loop. *)
     Definition loop_start
       (st : otbn_state) (iters : nat) (post : otbn_state -> T) : T :=
       match iters with
-      | O => err (* iters cannot be zero *)
+      | O => err "Number of loop iterations cannot be 0."
       | S iters =>
           match st with
           | otbn_busy pc regs wregs flags dmem cstack lstack =>          
@@ -555,8 +613,8 @@ Section Semantics.
               then post (otbn_busy
                            start_pc regs wregs flags dmem cstack
                            ((start_pc, iters) :: lstack))
-              else err
-          | _ => err
+              else err "Loop stack full!"
+          | _ => err "Cannot start a loop in a non-busy OTBN state."
           end
       end.
 
@@ -567,6 +625,7 @@ Section Semantics.
       match st with
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
           option_bind (hd_error lstack)
+                      "Cannot end loop if loop stack is empty."
                       (fun start_iters =>
                              match (snd start_iters) with
                              | O => post (otbn_busy
@@ -577,7 +636,7 @@ Section Semantics.
                                          (fst start_iters) regs wregs flags dmem cstack
                                          ((fst start_iters, iters) :: tl lstack))
                              end)
-      | _ => err
+      | _ => err "Cannot end a loop in a non-busy OTBN state."
       end.
     
   (* TODO: is it necessary to simulate some error conditions? There
@@ -595,11 +654,7 @@ Section Semantics.
         match r with
         | x0 => set_pc st (dst, 0%nat) post
         | x1 => call_stack_push st (fun st => set_pc st (dst, 0%nat) post)
-        | _ =>
-            (* technically it is possible to write the PC to other
-               registers but practically this is almost never done, so
-               for now we don't model it *)
-            err
+        | _ => err "JAL with registers other than x1 is currently not modelled."
         end
     | Bne r1 r2 dst =>
         read_gpr_from_state st r1
@@ -623,10 +678,27 @@ Section Semantics.
     | LoopEnd => loop_end st post
     end.
   End ExecOrProof.
-  Definition prop_random (P : word32 -> Prop) : Prop := forall v, P v.
-  Definition prop_urandom (P : word32 -> Prop) : Prop := forall v, P v.
-  Definition prop_option_bind (A : Type) (x : option A) (P : A -> Prop) : Prop :=
-    exists v, x = Some v /\ P v.
+  
+  Global Instance proof_semantics {word32 : word.word 32} : semantics_parameters Prop :=
+    {|
+      err := fun _ => False;
+      random := fun P => forall v, P v;
+      urandom := fun P => forall v, P v;
+      option_bind := fun _ x _ f => exists v, x = Some v /\ f v;
+    |}.
+
+  (* TODO: randomness is currently modelled as an error, but we could
+     eventually present a list of random numbers or something. *)
+  Global Instance exec_semantics : semantics_parameters (maybe otbn_state) :=
+    {|
+      err := fun msg => Err msg;
+      random := fun _ => Err "Randomness not currently supported in executable model";
+      urandom := fun _ => Err "Randomness not currently supported in executable model";
+      option_bind := fun _ x msg f => match x with
+                                      | Some x => f x
+                                      | None => Err msg
+                                      end;
+    |}.
 
   (* Prop model for proofs *)
   Definition run1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
@@ -636,45 +708,42 @@ Section Semantics.
         fetch pc = Some i
         /\ match i with
            | Straightline i =>
-               strt1 False prop_random prop_urandom prop_option_bind
-                 regs wregs flags dmem i
+               strt1 regs wregs flags dmem i
                  (fun regs wregs flags dmem =>
                     update_state st regs wregs flags dmem
                       (fun st => set_pc st (advance_pc pc) post))
-           | Control i => ctrl1 False prop_option_bind st i post
+           | Control i => ctrl1 st i post
            end
     | _ => post st
     end.
 
-  (* For now, we don't model RND in the executable model. It would
-     theoretically be possible by e.g. plugging in a "next random" at
-     every exec1. *)
-  Definition exec_random (P : word32 -> option otbn_state)
-    : option otbn_state := None.
-  Definition exec_urandom (P : word32 -> option otbn_state)
-    : option otbn_state := None.
-  Definition exec_option_bind
-    (A : Type) (x : option A) (P : A -> option otbn_state) : option otbn_state :=
-    match x with
-    | Some v => P v
-    | None => None
-    end.
-
+  Definition pc_to_string (pc : label * nat) : string :=
+    "(" ++ label_to_string (fst pc) ++ ", " ++ HexString.of_nat (snd pc) ++ ")".
+  
   (* Fully executable model. *)
-  Definition exec1 (st : otbn_state) : option otbn_state :=
+  Check get_pc.
+  Check prefix_err.
+  Check insn_to_string.
+  Check map_err.
+  Definition exec1 (st : otbn_state) : maybe otbn_state :=
     match st with
     | otbn_busy pc regs wregs flags dmem cstack lstack =>
-        match fetch pc with
-        | Some (Straightline i) =>
-            strt1 None exec_random exec_urandom exec_option_bind
-              regs wregs flags dmem i
-              (fun regs wregs flags dmem =>
-                 update_state st regs wregs flags dmem
-                   (fun st => set_pc st (advance_pc pc) Some))
-        | Some (Control i) => ctrl1 None exec_option_bind st i Some
-        | None => None
-        end
-    | _ => Some st
+        option_bind
+          _
+          (fetch pc)
+          ("No instruction found at PC " ++ pc_to_string pc)%string
+          (fun i =>
+             prefix_err
+               (match i with
+                | Straightline i =>
+                    (strt1 regs wregs flags dmem i
+                       (fun regs wregs flags dmem =>
+                          update_state st regs wregs flags dmem
+                            (fun st => set_pc st (advance_pc pc) Ok)))
+                | Control i => ctrl1 st i Ok
+                end)
+               ("PC " ++ pc_to_string pc ++ " (" ++ insn_to_string i ++ "):"))
+    | _ => Ok st
     end.
 
   Definition is_busy (st : otbn_state) : bool :=
@@ -682,63 +751,16 @@ Section Semantics.
     | otbn_busy _ _ _ _ _ _ _ => true
     | _ => false
     end.
-  Fixpoint exec (st : otbn_state) (fuel : nat) : option otbn_state :=
+  Fixpoint exec (st : otbn_state) (fuel : nat) : maybe otbn_state :=
     match fuel with
-    | O => None
+    | O => Err "Simulation ran out of fuel."
     | S fuel =>
-        match exec1 st with
-        | Some st =>
-            if is_busy st
-            then exec st fuel
-            else Some st
-        | None => None
-        end        
+        (st <- exec1 st;
+         if is_busy st
+         then exec st fuel
+         else Ok st)
     end.
 End Semantics.
-
-Section ErrorMonad.
-  (* returns either a value or an error message, helpful for debugging *)
-  Definition maybe (A : Type) : Type := A + string.
-  Definition bind {A B} (x : maybe A) (f : A -> maybe B) : maybe B :=
-    match x with
-    | inl a => f a
-    | inr err => inr err
-    end.
-  Definition map_err {A} (x : option A) (err : string) : maybe A :=
-    match x with
-    | Some v => inl v
-    | None => inr err
-    end.
-  Definition prefix_err {A} (x : maybe A) (prefix : string) : maybe A :=
-    match x with
-    | inl v => inl v
-    | inr err => inr (prefix ++ err)%string
-    end.
-  Definition maybe_map {A B} (f : A -> B) (x : maybe A) : maybe B :=
-    match x with
-    | inl v => inl (f v)
-    | inr err => inr err
-    end.
-  Fixpoint maybe_fold_left {A B} (f : A -> B -> maybe A) (l : list B) (x : A) : maybe A :=
-    match l with
-    | [] => inl x
-    | b :: l =>
-        bind (f x b) (maybe_fold_left f l)
-    end.
-  Fixpoint maybe_flat_map {A B} (f : A -> maybe (list B)) (l : list A) : maybe (list B) :=
-    match l with
-    | [] => inl []
-    | a :: l =>
-        bind (f a) (fun l1 => bind (maybe_flat_map f l) (fun l2 => inl (l1 ++ l2)))
-    end.
-  Definition assertion (cond : bool) (msg : string) : maybe unit :=
-    if cond then inl tt else inr msg.
-End ErrorMonad.
-Module ErrorMonadNotations.
-  Notation "a <- b ; c" := (bind b (fun a => c)) (at level 100, right associativity).
-  Notation Ok := inl (only parsing).
-  Notation "'Err' x" := (inr x%string) (at level 20, only parsing).
-End ErrorMonadNotations.
 
 Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
@@ -746,20 +768,8 @@ Local Coercion Straightline : sinsn >-> insn.
 Local Coercion Control : cinsn >-> insn.
 
 (* Contains a way to link programs. *)
-Section Build.
-  (* TODO: how should we now represent programs? All we need is fetch. *)
-  (* option: map from string -> list insn, so that all labels
-     that are jumped to need an entry. The list insns can
-     overlap. Execution should not pass the end. *)
-  (* Can this cause problems with cycles or too much redundancy? *)
-  (* option: list insns * map from string -> nat, return tail of list always *)
-  (* this is nice from a representation redundancy perspective *)
-  (* how about reasoning with objs? *)
-  (* different fetch, multiple copies of list insns * map from string -> nat to choose from *)
-  (* or maybe each obj needs to be considered separately? *)
+Section Build.           
   Definition symbols : map.map string nat := SortedListString.map _.
-  Import ErrorMonadNotations.
-
   (* Functions consist of a name, internal labels (map of string ->
      offset within the function), and a list of instructions. *)
   Definition function : Type := string * symbols * list (insn (label:=string)).
@@ -938,7 +948,6 @@ Section BuildProofs.
   Context {word32 : word.word 32} {regfile : map.map reg word32}.
   Context {word256 : word.word 256} {wregfile : map.map wreg word256}.
   Context {flagfile : map.map flag bool} {mem : map.map word32 word32}.
-  Import ErrorMonadNotations.
 
   (* Returns the overall size of the program containing the functions
      and starting at the given offset. *)
@@ -1596,11 +1605,11 @@ Section BuildProofs.
   Qed.
 
   Lemma read_gpr_weaken regs r P Q :
-    read_gpr False prop_option_bind regs r P ->
+    read_gpr regs r P ->
     (forall regs, P regs -> Q regs) ->
-    read_gpr False prop_option_bind regs r Q.
+    read_gpr regs r Q.
   Proof.
-    cbv [read_gpr prop_option_bind]; intros; destruct_one_match;
+    cbv [read_gpr err option_bind proof_semantics]; intros; destruct_one_match;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
         | H : _ /\ _ |- _ => destruct H
@@ -1611,11 +1620,11 @@ Section BuildProofs.
   Qed.
 
   Lemma read_csr_weaken regs flags r P Q :
-    read_csr False prop_random prop_urandom prop_option_bind regs flags r P ->
+    read_csr regs flags r P ->
     (forall regs, P regs -> Q regs) ->
-    read_csr False prop_random prop_urandom prop_option_bind regs flags r Q.
+    read_csr regs flags r Q.
   Proof.
-    cbv [read_csr read_flag_group prop_random prop_urandom prop_option_bind]; intros.
+    cbv [read_csr read_flag_group err random urandom option_bind proof_semantics]; intros.
     destruct r;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
@@ -1627,11 +1636,11 @@ Section BuildProofs.
   Qed.
 
   Lemma read_mem_weaken dmem addr P Q :
-    read_mem False prop_option_bind dmem addr P ->
+    read_mem dmem addr P ->
     (forall dmem, P dmem -> Q dmem) ->
-    read_mem False prop_option_bind dmem addr Q.
+    read_mem dmem addr Q.
   Proof.
-    cbv [read_mem prop_option_bind]; intros.
+    cbv [read_mem err option_bind proof_semantics]; intros.
     destruct_one_match;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
@@ -1643,11 +1652,11 @@ Section BuildProofs.
   Qed.
 
   Lemma write_gpr_weaken regs r v P Q :
-    write_gpr False regs r v P ->
+    write_gpr regs r v P ->
     (forall regs, P regs -> Q regs) ->
-    write_gpr False regs r v Q.
+    write_gpr regs r v Q.
   Proof.
-    cbv [write_gpr]; intros; destruct_one_match;
+    cbv [write_gpr err proof_semantics]; intros; destruct_one_match;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
         | H : _ /\ _ |- _ => destruct H
@@ -1666,37 +1675,35 @@ Section BuildProofs.
   Qed.
 
   Lemma write_mem_weaken dmem addr v P Q :
-    write_mem False dmem addr v P ->
+    write_mem dmem addr v P ->
     (forall dmem, P dmem -> Q dmem) ->
-    write_mem False dmem addr v Q.
+    write_mem dmem addr v Q.
   Proof.
     cbv [write_mem]; intros; destruct_one_match; eauto.
   Qed.
 
   Lemma strt1_weaken regs wregs flags dmem i P Q :
-    strt1 False prop_random prop_urandom prop_option_bind
-      regs wregs flags dmem i P ->
+    strt1 regs wregs flags dmem i P ->
     (forall regs wregs flags dmem, P regs wregs flags dmem -> Q regs wregs flags dmem) ->
-    strt1 False prop_random prop_urandom prop_option_bind
-      regs wregs flags dmem i Q.
+    strt1 regs wregs flags dmem i Q.
   Proof.
-    cbv [strt1]; intros; repeat destruct_one_match;
+    cbv [strt1 err proof_semantics]; intros; repeat destruct_one_match;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
         | H : _ /\ _ |- _ => destruct H
         | H : False |- _ => contradiction H
         | |- exists _, _ => eexists; ssplit; [ eassumption | ]
-        | |- read_gpr _ _ _ _ _ =>
+        | |- read_gpr _ _ _ =>
             eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- read_csr _ _ _ _ _ _ _ _ =>
+        | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- read_mem _ _ _ _ _ =>
+        | |- read_mem _ _ _ =>
             eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
-        | |- write_gpr _ _ _ _ _ =>
+        | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- write_mem _ _ _ _ _ =>
+        | |- write_mem _ _ _ _ =>
             eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- Q _ _ _ _ => solve [eauto]
         end.
@@ -1728,14 +1735,18 @@ Section BuildProofs.
             H0 : (length ?l1 < ?n)%nat, H1 : (?n <= length ?l2)%nat |- _ =>
             pose proof (Forall2_length H); lia
         | |- Forall2 _ (_ :: _) (_ :: _) => constructor
-        | |- read_gpr _ _ _ _ _ =>
+        | |- read_gpr _ _ _ =>
             eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- read_csr _ _ _ _ _ _ _ _ =>
+        | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- write_gpr _ _ _ _ _ =>
+        | |- read_mem _ _ _ =>
+            eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_mem _ _ _ _ =>
+            eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- exists _, _ =>
             eexists; ssplit; first [ eassumption
                                    | reflexivity
@@ -1744,19 +1755,19 @@ Section BuildProofs.
                                         loop_start loop_end loop_stack_entries_related
                                         read_gpr_from_state next_pc
                                         set_pc update_state program_exit] in *;
-                                 cbn [fst snd] in *; subst )
+                                 cbn [fst snd err option_bind proof_semantics] in *; subst )
                      | congruence
                      | solve [eauto] ]
         end.
 
   Lemma ctrl1_weaken syms i1 i2 st1 st2 spec1 spec2 :
-    ctrl1 (label:=string) False prop_option_bind st1 i1 spec1 ->
+    ctrl1 (label:=string) st1 i1 spec1 ->
     states_related syms st1 st2 ->
     cinsn_equiv syms i1 i2 ->
     (forall st1' st2', states_related syms st1' st2' -> spec1 st1' -> spec2 st2') ->
-    ctrl1 (label:=nat) False prop_option_bind st2 i2 spec2.
+    ctrl1 (label:=nat) st2 i2 spec2.
   Proof.
-    cbv [ctrl1 cinsn_equiv prop_option_bind]; intros.
+    cbv [ctrl1 cinsn_equiv err option_bind proof_semantics]; intros.
     destruct st1, st2; related_states_hammer.
   Qed.
 
@@ -2266,7 +2277,7 @@ Section Helpers.
   Context {mem : map.map word32 word32} {mem_ok : map.ok mem}.
 
   Definition gpr_has_value (regs : regfile) (r : gpr) (v : word32) : Prop :=
-    read_gpr False prop_option_bind regs r (eq v).
+    read_gpr regs r (eq v).
 
   Lemma fetch_weaken_run1
     {label : Type}
@@ -2617,7 +2628,7 @@ Section Helpers.
     {label : Type} {fetch : label * nat -> option insn}:
     forall pc regs wregs flags dmem cstack lstack i post,
       fetch pc = Some (Straightline i) ->
-      strt1 False prop_random prop_urandom prop_option_bind regs wregs flags dmem i
+      strt1 regs wregs flags dmem i
         (fun regs wregs flags dmem =>
            eventually (run1 (fetch:=fetch)) post
              (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)) ->
@@ -2824,9 +2835,9 @@ Ltac simplify_side_condition_step :=
                           set_pc update_state call_stack_pop call_stack_push
                           length hd_error tl skipn nth_error fold_left
                           fetch fetch_ctx Nat.add fst snd
+                          err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [prop_random prop_option_bind
-                                 gpr_has_value write_mem]
+               | progress cbv [gpr_has_value write_mem]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
