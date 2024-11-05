@@ -163,6 +163,18 @@ Class label_parameters_ok {label} (params: label_parameters label) :=
     label_eqb_spec : forall d1 d2, BoolSpec (d1 = d2) (d1 <> d2) (label_eqb d1 d2)
   }.
 
+Instance string_label_parameters : label_parameters string :=
+  {|
+    label_eqb := String.eqb;
+    label_to_string := id;
+  |}.
+
+Instance nat_label_parameters : label_parameters nat :=
+  {|
+    label_eqb := Nat.eqb;
+    label_to_string := HexString.of_nat;
+  |}.
+
 Section Stringify.
   Context {word32 : word.word 32}.
   Context {label : Type} {label_params : label_parameters label}.
@@ -3519,14 +3531,16 @@ Module SortedListFlags.
     SortedList.map (Build_parameters _) strict_order.
 End SortedListFlags.
 
+Global Instance mem : map.map Naive.word32 Naive.word32 := SortedListWord.map _ _.
+
 Module ExecTest.
+  Local Instance word32 : word.word 32 := Naive.word 32.
+  Local Instance word256 : word.word 256 := Naive.word 256.
   (* Check that exec works *)
   Eval vm_compute in
-    (exec1 (regfile:=SortedListRegs.map) (fetch:=fetch Test.prog0) start_state).
+    (exec1 (fetch:=fetch Test.prog0) start_state).
   Eval vm_compute in
-    (exec (regfile:=SortedListRegs.map) (fetch:=fetch Test.prog0) start_state 100).
-
-  Global Instance mem : map.map Naive.word32 Naive.word32 := SortedListWord.map _ _.
+    (exec (fetch:=fetch Test.prog0) start_state 100).
 
   (* scaling factor; create a program with ~n instructions *)
   Definition n := 10000.
@@ -3543,11 +3557,8 @@ Module ExecTest.
   Definition prog : program := ltac:(link_program [start_fn; add_fn]).
   Time
     Eval vm_compute in
-    (exec (regfile:=SortedListRegs.map)
-       (wregfile:=SortedListWregs.map)
-       (flagfile:=SortedListFlags.map)
-       (fetch:=fetch prog) start_state (length prog)).
-  (* 5.045s *)
+    (exec (fetch:=fetch prog) start_state (length prog)).
+  (* 5s *)
 
 End ExecTest.
 
