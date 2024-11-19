@@ -5,6 +5,7 @@ Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Map.Interface.
+Require Import coqutil.Map.Properties.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
@@ -421,7 +422,7 @@ Section Semantics.
     (-2048 <=? imm) && (imm <=? 2047).
   Definition is_valid_addr (addr : word32) : bool :=
     word.eqb (word.of_Z 0) (word.and addr (word.of_Z 3))
-    && word.ltu addr (word.of_Z DMEM_BYTES).
+    && (word.unsigned addr + 4 <? DMEM_BYTES).
 
   Fixpoint repeat_advance_pc (pc : label * nat) (n : nat) : label * nat :=
     match n with
@@ -579,6 +580,59 @@ Section Semantics.
       then word.add v (word.of_Z imm)
       else word.sub v (word.of_Z imm).
 
+    Definition bignum_combine (v0 v1 v2 v3 v4 v5 v6 v7: word32) : word256 :=
+      let v := word.unsigned v0 in
+      let v := Z.lor v (Z.shiftl (word.unsigned v1) 32) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v2) 64) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v3) 96) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v4) 128) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v5) 160) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v6) 192) in
+      let v := Z.lor v (Z.shiftl (word.unsigned v7) 224) in
+      word.of_Z v.
+
+    Definition bignum_store (dmem : mem) (addr : word32) (v : word256) (P : mem -> T) : T :=
+      let v := word.unsigned v in
+      write_mem dmem addr (word.of_Z v)
+        (fun dmem =>
+           write_mem dmem (word.add addr (word.of_Z 4)) (word.of_Z (Z.shiftr v 32))
+             (fun dmem =>
+                write_mem dmem (word.add addr (word.of_Z 8)) (word.of_Z (Z.shiftr v 64))
+                  (fun dmem =>
+                     write_mem dmem (word.add addr (word.of_Z 12)) (word.of_Z (Z.shiftr v 96))
+                       (fun dmem =>
+                          write_mem dmem
+                            (word.add addr (word.of_Z 16)) (word.of_Z (Z.shiftr v 128))
+                            (fun dmem =>
+                               write_mem dmem
+                                 (word.add addr (word.of_Z 20)) (word.of_Z (Z.shiftr v 160))
+                                 (fun dmem =>
+                                    write_mem dmem
+                                      (word.add addr (word.of_Z 24)) (word.of_Z (Z.shiftr v 192))
+                                      (fun dmem =>
+                                         write_mem dmem
+                                           (word.add addr (word.of_Z 28))
+                                           (word.of_Z (Z.shiftr v 224)) P))))))).
+
+    Definition bignum_load (dmem : mem) (addr : word32) (P : word256 -> T) : T :=
+      read_mem dmem addr
+        (fun v0 =>
+           read_mem dmem (word.add addr (word.of_Z 4))
+             (fun v1 =>
+                read_mem dmem (word.add addr (word.of_Z 8))
+                  (fun v2 =>
+                     read_mem dmem (word.add addr (word.of_Z 12))
+                       (fun v3 =>
+                          read_mem dmem (word.add addr (word.of_Z 16))
+                            (fun v4 =>
+                               read_mem dmem (word.add addr (word.of_Z 20))
+                                 (fun v5 =>
+                                    read_mem dmem (word.add addr (word.of_Z 24))
+                                      (fun v6 =>
+                                         read_mem dmem (word.add addr (word.of_Z 28))
+                                           (fun v7 =>
+                                              P (bignum_combine v0 v1 v2 v3 v4 v5 v6 v7))))))))).
+ 
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
       (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
@@ -837,28 +891,6 @@ Section Semantics.
          else Ok st)
     end.
 End Semantics.
-
-(* Separation logic defs. This section is copied directly from
-   bedrock2 (copied to avoid introducing a bedrock2 dependency). *)
-Section Sep.
-  Context {key value} {map : map.map key value}.
-  Definition emp (P : Prop) := fun m : map => m = map.empty /\ P.
-  Definition sep (p q : map -> Prop) m :=
-    exists mp mq, map.split m mp mq /\ p mp /\ q mq.
-  Definition ptsto k v := fun m : map => m = map.put map.empty k v.
-  Definition read k (P : value -> map.rep -> Prop) m := exists v, sep (ptsto k v) (P v) m.
-
-  Fixpoint seps (xs : list (map.rep -> Prop)) : map.rep -> Prop :=
-    match xs with
-    | cons x nil => x
-    | cons x xs => sep x (seps xs)
-    | nil => emp True
-    end.
-End Sep.
-
-Declare Scope sep_scope.
-Delimit Scope sep_scope with sep.
-Infix "*" := sep (at level 40, left associativity) : sep_scope.
 
 Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
@@ -2819,14 +2851,24 @@ Section Helpers.
     intros; subst. eauto.
   Qed.
 
+  Lemma is_valid_addr_iff addr :
+    is_valid_addr addr = true <-> (word.unsigned addr mod 4 = 0
+                                   /\ word.unsigned addr + 4 < DMEM_BYTES).
+  Proof.
+    cbv [is_valid_addr]. rewrite Bool.andb_true_iff, word.unsigned_eqb, Z.eqb_eq.
+    rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
+    rewrite Z.land_ones with (n:=2) by lia. change (2^2) with 4.
+    pose proof Z.mod_pos_bound (word.unsigned addr) 4 ltac:(lia).
+    cbv [word.wrap]. rewrite Z.mod_small; lia.
+  Qed.
+
   Lemma is_valid_addr_0 : is_valid_addr (word.of_Z 0) = true.
   Proof.
     cbv [is_valid_addr]. apply Bool.andb_true_iff. ssplit.
     { apply word.eqb_eq, word.unsigned_inj.
       rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
       cbv [Z.land word.wrap]. rewrite Z.mod_small; lia. }
-    { cbv [DMEM_BYTES].
-      rewrite word.unsigned_ltu, !word.unsigned_of_Z_nowrap by lia.
+    { cbv [DMEM_BYTES]. rewrite word.unsigned_of_Z_nowrap by lia.
       lia. }
   Qed.
 
@@ -2834,7 +2876,7 @@ Section Helpers.
     is_valid_addr addr = true ->
     offset mod 4 = 0 ->
     0 <= offset ->
-    0 <= word.unsigned addr + offset < DMEM_BYTES ->
+    0 <= word.unsigned addr + offset + 4 < DMEM_BYTES ->
     is_valid_addr (word.add addr (word.of_Z offset)) = true.
   Proof.
     cbv [is_valid_addr DMEM_BYTES]. rewrite !Bool.andb_true_iff. intros.
@@ -2868,7 +2910,7 @@ Section Helpers.
              end.
       rewrite Z.mod_0_l by lia.
       reflexivity. }
-    { rewrite word.unsigned_ltu, word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
+    { rewrite word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
       apply Z.ltb_lt.
       cbv [word.wrap]. rewrite Z.mod_small by lia.
       lia. }
@@ -2877,6 +2919,7 @@ Section Helpers.
   Definition start_state : otbn_state :=
     otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty map.empty [] [].
 End Helpers.
+
 
 Ltac zsimplify_step :=
   lazymatch goal with
@@ -2889,6 +2932,7 @@ Ltac zsimplify_step :=
   | |- context [_ * 1] => rewrite Z.mul_1_r
   | |- context [1 * _] => rewrite Z.mul_1_l
   | |- context [0 mod _] => rewrite Z.mod_0_l by lia
+  | |- context [?x mod ?x] => rewrite (Z.mod_same x) by lia
   | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
   | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
   | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
@@ -2896,6 +2940,233 @@ Ltac zsimplify_step :=
   | _ => progress Z.push_pull_mod
   end.
 Ltac zsimplify := repeat zsimplify_step.
+
+
+(* Separation logic defs. This section is copied directly from
+   bedrock2 (copied to avoid introducing a bedrock2 dependency). *)
+Section Sep.
+  Context {key value} {map : map.map key value}.
+  Definition emp (P : Prop) := fun m : map => m = map.empty /\ P.
+  Definition sep (p q : map -> Prop) m :=
+    exists mp mq, map.split m mp mq /\ p mp /\ q mq.
+  Definition ptsto k v := fun m : map => m = map.put map.empty k v.
+End Sep.
+
+Declare Scope sep_scope.
+Delimit Scope sep_scope with sep.
+Infix "*" := sep (at level 40, left associativity) : sep_scope.
+
+Section SepProofs.
+  Context {key value} {map : map.map key value} {map_ok : map.ok map}.
+  Context {key_eqb : key -> key -> bool}
+    {key_eq_dec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}.
+
+  Lemma sep_comm p q (m : map) :
+    sep p q m -> sep q p m.
+  Proof.
+    cbv [sep]; intros [mp [mq ?]]. intros. exists mq, mp.
+    cbv [map.split] in *.
+    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+    subst; ssplit; eauto; [ | ].
+    { eapply map.putmany_comm; eauto. }
+    { eapply map.disjoint_comm; eauto. }
+  Qed.
+
+  Lemma sep_weaken_l p q r (m : map) :
+    sep p q m -> (forall m, p m -> r m) -> sep r q m.
+  Proof.
+    cbv [sep]; intros [mp [mq ?]]. intros. exists mp, mq.
+    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+    ssplit; eauto.
+  Qed.
+
+  Lemma sep_weaken_r p q r (m : map) :
+    sep p q m -> (forall m, q m -> r m) -> sep p r m.
+  Proof.
+    intros. apply sep_comm. eapply sep_weaken_l; [ apply sep_comm | .. ]; eauto.
+  Qed.
+
+  Lemma sep_exists_l p q (m : map) :
+    sep p q m -> exists m, p m.
+  Proof.
+    cbv [sep]; intros [mp [mq ?]]. intros. exists mp.
+    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+    ssplit; eauto.
+  Qed.
+
+  Lemma sep_exists_r p q (m : map) :
+    sep p q m -> exists m, q m.
+  Proof.
+    intros. eapply sep_exists_l; [ apply sep_comm | .. ]; eauto.
+  Qed.
+
+End SepProofs.
+
+(* Additional separation-logic definitions. *)
+Section SepDefs.
+  Context {word32 : word.word 32} {word256 : word.word 256} {mem : map.map word32 word32}.
+
+  Definition bignum (addr : word32) (v : word256) (m : mem) : Prop :=
+    bignum_load m addr (eq v).
+
+  Definition buf (addr : word32) (n : nat) (m : mem) : Prop :=
+    is_valid_addr addr = true
+    /\ 0 <= word.unsigned addr + (4 * Z.of_nat n) < DMEM_BYTES.
+
+  Section Proofs.
+    Context {word32_ok : word.ok word32} {word256_ok : word.ok word256} {mem_ok : map.ok mem}.
+    Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
+    
+    Lemma bignum_clear dmem addr v R :
+      (bignum addr v * R)%sep dmem ->
+      (buf addr 8 * R)%sep dmem.
+    Proof.
+      intros; eapply sep_weaken_l; eauto.
+      cbv [bignum bignum_load buf read_mem err option_bind proof_semantics]; intros.
+      repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | H : False |- _ => contradiction H
+             | |- True => trivial
+             | |- context [word.add (word.add ?x (word.of_Z ?y)) (word.of_Z 4)] =>
+                 rewrite <-(word.add_assoc x (word.of_Z y) (word.of_Z 4));
+                 rewrite <-(word.ring_morph_add y 4);
+                 cbn [Z.add Pos.add Pos.succ]
+             | H : context [word.unsigned (word.of_Z _)] |- _ =>
+                 rewrite word.unsigned_of_Z_nowrap in H by (cbv [DMEM_BYTES]; lia)
+             | H : if ?x then _ else _ |- _ => destr x
+             end.
+      pose proof (word.unsigned_range addr).
+      ssplit; [ reflexivity | lia | ].
+      rewrite word.unsigned_add, word.unsigned_of_Z_nowrap in * by lia.
+      cbv [word.wrap DMEM_BYTES] in *.
+      rewrite !(Z.mod_small (word.unsigned addr + _)) in * by lia.
+      lia.
+    Qed.
+
+    Lemma buf_valid_addr start size offset :
+      (exists m, buf start size m) ->
+      0 <= offset < 4 * Z.of_nat size ->
+      offset mod 4 = 0 ->
+      is_valid_addr (word.add start (word.of_Z offset)) = true.
+    Proof.
+      intros [? [? ?]]. intros; subst.
+      apply is_valid_addr_add; eauto; try lia; [ ].
+      rewrite is_valid_addr_iff in *.
+      pose proof (word.unsigned_range start).
+      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      let x := lazymatch goal with
+               | H : context [ word.unsigned start + ?x < DMEM_BYTES] |- _ => x end in        
+      destr (offset <=? x - 4); [ lia | ];
+      assert (offset = x - 3 \/ offset = x - 2 \/ offset = x - 1) by lia.
+      assert (offset mod 4 <> 0); [ | lia ].
+      repeat lazymatch goal with
+             | H : _ \/ _ |- _ => destruct H; subst
+             end.
+      all:Z.push_mod.
+      all:zsimplify.
+      all:cbn; congruence.
+    Qed.
+
+    Lemma buf_range m n :
+      forall addr,
+        buf addr n m ->
+        (0 < n)%nat ->
+        0 <= word.unsigned addr < DMEM_BYTES - (4 * Z.of_nat n).
+    Proof.
+      induction n; cbn [buf]; [ lia | ]. intros.
+      destruct_one_match_hyp; [ | contradiction ].
+      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      rewrite ?word.unsigned_of_Z_nowrap in * by (cbv [DMEM_BYTES]; lia).
+      destr (0 <? n)%nat.
+      {
+        specialize (IHn _ ltac:(eassumption) ltac:(lia)).
+        rewrite word.unsigned_add in IHn.
+    Qed.
+
+    Ltac prove_word_neq :=
+      lazymatch goal with
+      |- not (@eq word.rep ?x ?y) =>
+          apply word.eqb_false; rewrite word.unsigned_eqb;
+          apply Z.eqb_neq;
+          rewrite ?word.unsigned_add, ?word.unsigned_of_Z_nowrap by lia;
+          cbv [word.wrap]; rewrite ?Z.mod_small; lia
+      end.
+
+    Lemma bignum_store_step m addr v :
+      buf addr 8 m ->
+      bignum_store m addr v (bignum addr v).
+    Proof.
+      intros.
+      pose proof (buf_range _ _ _ ltac:(eassumption)).
+      change (4 * Z.of_nat 8) with 32 in *. cbv [DMEM_BYTES] in *.
+      cbv [ bignum_store bignum bignum_load write_mem read_mem
+              option_bind err proof_semantics ].
+      replace (is_valid_addr addr) with (is_valid_addr (word.add addr (word.of_Z 0)))
+        by (rewrite word.add_0_r; reflexivity).
+      repeat (erewrite buf_valid_addr;
+              [ | solve [eauto using sep_exists_l] | lia | reflexivity ]).
+      repeat (rewrite ?map.get_put_diff by prove_word_neq; rewrite map.get_put_same;
+              eexists; ssplit; [ reflexivity .. | ]).
+      cbv [bignum_combine].
+      rewrite !word.unsigned_of_Z.
+      apply word.unsigned_inj. rewrite word.unsigned_of_Z.
+      cbv [word.wrap]. rewrite <-!Z.land_ones by lia.
+      apply Z.bits_inj'. intro i. intros.
+      repeat first
+        [ rewrite Z.land_spec
+        | rewrite Z.lor_spec
+        | rewrite Z.shiftl_spec by lia
+        | rewrite Z.shiftr_spec by lia
+        | rewrite Z.testbit_ones by lia
+        ].
+      pose proof (word.unsigned_range v).
+      destr (i <? 256);
+        repeat
+          multimatch goal with
+          | |- context [Z.testbit (Z.shiftr _ _) ?i] =>
+              destr (0 <=? i);
+              [ try lia; rewrite Z.shiftr_spec by lia; rewrite Z.sub_simpl_r
+              | try lia; rewrite Z.testbit_neg_r with (n:=i) by lia ]
+          | H : ?x <= ?y |- context [Z.leb ?x ?y] => destr (x <=? y); try lia; [ ]
+          | |- context [Z.ltb ?x ?y] =>  destr (x <? y); try lia; [ ]
+          end.
+      all:
+      repeat first
+        [ rewrite Bool.andb_true_l
+        | rewrite Bool.andb_true_r
+        | rewrite Bool.andb_false_l
+        | rewrite Bool.andb_false_r
+        | rewrite Bool.orb_true_l
+        | rewrite Bool.orb_true_r
+        | rewrite Bool.orb_false_l
+        | rewrite Bool.orb_false_r
+        | reflexivity
+        ].
+      (* should only have 256 < i case left now *)
+      pose proof Z.pow_le_mono_r 2 256 i ltac:(lia) ltac:(lia).
+      apply Z.testbit_false; [ lia .. | ].
+      rewrite Z.div_small; [ reflexivity | ].
+      lia.
+    Qed.
+
+    Lemma bignum_store_step dmem addr v R P :
+      (buf addr 8 * R)%sep dmem ->
+      (forall dmem, (bignum addr v * R)%sep dmem -> P dmem) ->
+      bignum_store dmem addr v P.
+    Proof.
+      intros. cbv [bignum_store write_mem].
+      erewrite buf_valid_addr with (offset:=0);
+        [ | solve [eauto using sep_exists_l] | lia | reflexivity | ring ].
+      repeat (erewrite buf_valid_addr; [ .. | reflexivity ];
+              [ | solve [eauto using sep_exists_l] | lia | reflexivity ]).
+      lazymatch goal with H : forall _, _ -> ?P _ |- ?P _ => apply H end.
+      (* something for sep is needed here -- need to say that the
+         split is the same as in the hypothesis *)
+      rewrite ?map.get_put
+    Qed.
+  End Proofs.
+End SepDefs.
 
 Ltac solve_is_valid_addr :=
   lazymatch goal with
@@ -3106,7 +3377,7 @@ Module Test.
   Context {mem : map.map word32 word32} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   
-  (* Test program 0 : a function that adds two registers.
+  (* Test program : a function that adds two registers.
 
      start:
        addi x2, x0, 2
@@ -3135,7 +3406,7 @@ Module Test.
 
   Compute (link [start_fn; add_fn]).
 
-  (* Test program 1 : build multiplication out of addition
+  (* Test program : build multiplication out of addition
 
      mul:
        addi   x2, x0, x0
@@ -3163,6 +3434,28 @@ Module Test.
         let syms := map.put syms "_mul_end" (length body) in
         let body := (body ++  [(Ret : insn)])%list in
         ("mul", syms, body))%string.
+
+  (* Test program : add two values from memory
+
+     start:
+       lw   x2, 0(x0)
+       lw   x3, 4(x0)
+       jal  x1, add
+       sw   x5, 0(x0)
+       ecall
+
+     add:
+       add  x5, x2, x3
+       ret
+   *)
+  Definition start_mem_fn : function :=
+    ("start",
+      map.empty,
+      [ (Lw x2 x0 0 : insn);
+        (Lw x3 x0 4 : insn);
+        (Jal x1 "add" : insn);
+        (Sw x0 x5 0 : insn) ;
+        (Ecall : insn)])%string.
 
   Compute (link [mul_fn; add_fn]).
 
@@ -3476,7 +3769,6 @@ Module Test.
 End __.
 End Test.
 
-(* TODO: get index and then use SortedListZ? would also simplify printing and wreg indexing *)
 Require Import coqutil.Word.Naive.
 Require Import coqutil.Map.SortedListWord.
 
@@ -3583,7 +3875,7 @@ Module ExecTest.
 
 End ExecTest.
 
-(* Next: separation logic for memory (and regs maybe?) *)
+(* Next: separation logic for memory (considered for regs, but doesn't make much sense given how regs are usually handled -- most useful for long values) *)
 (* Next: wclobbers, fclobbers *)
 (* Next: add bn.add/bn.addc and test these *)
 (* Next: add mulqacc *)
@@ -3592,3 +3884,29 @@ End ExecTest.
 (* Next: provable multiplication blocks *)
 (* Next: add more insns needed for 25519 mul *)
 (* Next: prove 25519 mul *)
+
+(* TODO: think through how memory should actually work re symbols and
+   labels; does everything need to be fixed? Can we add it to the
+   linker? *)
+(*
+ option 1: have mem map be label * offset -> word32, just like jumps
+   - then in proofs we'd just use the context with strings
+   - linker pass would set them in some kinda order
+   - unlike for jump dsts, we'd need a size (but I guess kinda like functions)
+   - would need to handle both with and without initial values
+   - so we'd have list function, also list (name : string, values: list word32) for data
+   - and list (name : string, size : nat) for bss/scratchpad
+   - would need to link straightline instructions as well as control flow for that
+   - would not need seplogic in proofs
+
+
+option 2: have mem map be always word32 -> word32
+  - then in proos we'd deal with addresses and seplogic, and need to assume they don't overlap
+  - we could plug in any separated addresses at the last stage
+  - would need to pass addresses around in proofs -- but only as much as we do in code anyway
+  - each proof for each function would assume seplogic
+  - for functions we tie together, we'd need to include all buffers used by sub-functions
+  - maybe that's OK though?
+
+Try option 2 and see how this goes
+*)
