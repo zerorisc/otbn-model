@@ -580,7 +580,7 @@ Section Semantics.
       then word.add v (word.of_Z imm)
       else word.sub v (word.of_Z imm).
 
-    Definition bignum_combine (v0 v1 v2 v3 v4 v5 v6 v7: word32) : word256 :=
+    Definition wide_word_combine (v0 v1 v2 v3 v4 v5 v6 v7: word32) : word256 :=
       let v := word.unsigned v0 in
       let v := Z.lor v (Z.shiftl (word.unsigned v1) 32) in
       let v := Z.lor v (Z.shiftl (word.unsigned v2) 64) in
@@ -591,7 +591,7 @@ Section Semantics.
       let v := Z.lor v (Z.shiftl (word.unsigned v7) 224) in
       word.of_Z v.
 
-    Definition bignum_store (dmem : mem) (addr : word32) (v : word256) (P : mem -> T) : T :=
+    Definition wide_word_store (dmem : mem) (addr : word32) (v : word256) (P : mem -> T) : T :=
       let v := word.unsigned v in
       write_mem dmem addr (word.of_Z v)
         (fun dmem =>
@@ -614,7 +614,7 @@ Section Semantics.
                                            (word.add addr (word.of_Z 28))
                                            (word.of_Z (Z.shiftr v 224)) P))))))).
 
-    Definition bignum_load (dmem : mem) (addr : word32) (P : word256 -> T) : T :=
+    Definition wide_word_load (dmem : mem) (addr : word32) (P : word256 -> T) : T :=
       read_mem dmem addr
         (fun v0 =>
            read_mem dmem (word.add addr (word.of_Z 4))
@@ -631,7 +631,7 @@ Section Semantics.
                                       (fun v6 =>
                                          read_mem dmem (word.add addr (word.of_Z 28))
                                            (fun v7 =>
-                                              P (bignum_combine v0 v1 v2 v3 v4 v5 v6 v7))))))))).
+                                              P (wide_word_combine v0 v1 v2 v3 v4 v5 v6 v7))))))))).
  
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
@@ -2972,6 +2972,23 @@ Section SepProofs.
     { eapply map.disjoint_comm; eauto. }
   Qed.
 
+  Lemma sep_assoc p q r (m : map) :
+    sep (sep p q) r m -> sep p (sep q r) m.
+  Proof.
+    cbv [sep map.split]; intros.
+    repeat lazymatch goal with
+           | H : exists _, _ |- _ => destruct H
+           | H : _ /\ _ |- _ => destruct H
+           | H : map.disjoint (map.putmany _ _) _ |- _ => apply map.disjoint_putmany_l in H
+           | |- map.disjoint _ (map.putmany _ _) => apply map.disjoint_putmany_r; ssplit
+           | Hp : p ?mp, Hq : q ?mq, Hr : r ?mr |- exists x _, _ /\ p x /\ _ =>
+               exists mp, (map.putmany mq mr); ssplit
+           | Hq : q ?mq, Hr : r ?mr |- exists x _, _ /\ q x /\ _ =>
+               exists mq, mr; ssplit
+           | _ => first [ progress subst | solve [eauto using map.putmany_assoc] ]
+           end.
+  Qed.
+
   Lemma sep_weaken_l p q r (m : map) :
     sep p q m -> (forall m, p m -> r m) -> sep r q m.
   Proof.
@@ -3000,14 +3017,86 @@ Section SepProofs.
     intros. eapply sep_exists_l; [ apply sep_comm | .. ]; eauto.
   Qed.
 
+  Lemma sep_emp_l p q (m : map) :
+    sep (emp p) q m -> p /\ q m.
+  Proof.
+    cbv [sep emp]; intros [mp [mq ?]].
+    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H; subst end.
+    lazymatch goal with H : map.split _ map.empty _ |- _ =>
+                          eapply map.split_empty_l in H end.
+    subst; eauto.
+  Qed.
+
+  Lemma sep_emp_r p q (m : map) :
+    sep p (emp q) m -> q /\ p m.
+  Proof.
+    intros. eapply sep_emp_l; eauto using sep_comm.
+  Qed.
+
+  Lemma ptsto_get k v p (m : map) :
+    sep (ptsto k v) p m -> map.get m k = Some v.
+  Proof.
+    cbv [sep ptsto]; intros [? [? ?]].
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : _ \/ _ |- _ => destruct H
+           | H : context [map.get (map.put _ ?k _) ?k] |- _ => rewrite map.get_put_same in H
+           | H : map.split _ _ _ |- _ => apply map.get_split with (k:=k) in H
+           | H : Some _ = None |- _ => congruence
+           | H : ?P |- ?P => assumption
+           | _ => progress subst
+           end.
+  Qed.
+
 End SepProofs.
+
+Ltac sepsimpl_step :=
+  lazymatch goal with
+  | H : (emp _ * _)%sep _ |- _ => apply sep_emp_l in H; destruct H
+  | H : (_ * emp _)%sep _ |- _ => apply sep_emp_r in H; destruct H
+  | H : (emp _ * _ * _)%sep _ |- _ => apply sep_assoc, sep_emp_l in H; destruct H
+  end.
+Ltac sepsimpl := repeat sepsimpl_step.
+
+(* make the term `p` the left-hand outer operand of `sep` *)
+Ltac sep_extract_step p H :=
+  lazymatch type of H with
+  | sep ?x ?y _ =>
+      lazymatch x with
+      | p => idtac (* done *)
+      | sep _ p => eapply sep_weaken_l in H; [ | solve [apply sep_comm] ]
+      | context [p] => apply sep_assoc in H
+      | _ => lazymatch y with
+             | context [p] => apply sep_comm in H
+             | _ => fail "statement" p "not found in" x "or" y
+             end
+      end
+  end.
+Ltac sep_extract p H := repeat sep_extract_step p H.
+
+Ltac sepsolve :=
+  lazymatch goal with
+  | H : context [?p] |- sep ?p _ _ => sep_extract p H; solve [apply H]
+  end.
 
 (* Additional separation-logic definitions. *)
 Section SepDefs.
   Context {word32 : word.word 32} {word256 : word.word 256} {mem : map.map word32 word32}.
 
-  Definition bignum (addr : word32) (v : word256) (m : mem) : Prop :=
-    bignum_load m addr (eq v).
+  Definition ptr (addr : word32) (v : word32) : mem -> Prop :=
+    (emp (is_valid_addr addr = true) * ptsto addr v)%sep.
+  Definition wptr (addr : word32) (v : word256) (m : mem) : Prop :=
+    exists v0 v1 v2 v3 v4 v5 v6 v7,
+      (ptr addr v0
+       * ptr (word.add addr (word.of_Z 4)) v1
+       * ptr (word.add addr (word.of_Z 8)) v2
+       * ptr (word.add addr (word.of_Z 12)) v3
+       * ptr (word.add addr (word.of_Z 16)) v4
+       * ptr (word.add addr (word.of_Z 20)) v5
+       * ptr (word.add addr (word.of_Z 24)) v6
+       * ptr (word.add addr (word.of_Z 28)) v7)%sep m
+      /\ 0 <= word.unsigned addr + 32 < DMEM_BYTES
+      /\ wide_word_combine v0 v1 v2 v3 v4 v5 v6 v7 = v.
 
   Definition buf (addr : word32) (n : nat) (m : mem) : Prop :=
     is_valid_addr addr = true
@@ -3016,31 +3105,52 @@ Section SepDefs.
   Section Proofs.
     Context {word32_ok : word.ok word32} {word256_ok : word.ok word256} {mem_ok : map.ok mem}.
     Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
+
+    Lemma ptr_valid_addr addr v dmem R :
+      sep (ptr addr v) R dmem -> is_valid_addr addr = true.
+    Proof. cbv [ptr]; intros. sepsimpl. assumption. Qed.
+
+    Lemma ptr_load addr v dmem R :
+      sep (ptr addr v) R dmem -> read_mem dmem addr (eq v).
+    Proof.
+      cbv [ptr read_mem]; intros. sepsimpl.
+      lazymatch goal with H : is_valid_addr ?a = true |- _ => rewrite H end.
+      erewrite ptsto_get by eauto.
+      eexists; ssplit; reflexivity.      
+    Qed.
+
+    Lemma wptr_load addr v dmem :
+      wptr addr v dmem -> wide_word_load dmem addr (eq v).
+    Proof.
+      cbv [wptr wide_word_load]; intros.
+      repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | H : context [ptr ?a ?v] |- read_mem _ ?a _ =>
+                 eapply read_mem_weaken; [ eapply (ptr_load a v); sepsolve | intros; subst ]
+             end.
+      reflexivity.
+    Qed.
     
-    Lemma bignum_clear dmem addr v R :
-      (bignum addr v * R)%sep dmem ->
+    Lemma wide_word_clear dmem addr v R :
+      (wptr addr v * R)%sep dmem ->
       (buf addr 8 * R)%sep dmem.
     Proof.
       intros; eapply sep_weaken_l; eauto.
-      cbv [bignum bignum_load buf read_mem err option_bind proof_semantics]; intros.
+      cbv [wptr wide_word_load buf read_mem err option_bind proof_semantics]; intros.
       repeat lazymatch goal with
              | H : exists _, _ |- _ => destruct H
              | H : _ /\ _ |- _ => destruct H
              | H : False |- _ => contradiction H
              | |- True => trivial
-             | |- context [word.add (word.add ?x (word.of_Z ?y)) (word.of_Z 4)] =>
-                 rewrite <-(word.add_assoc x (word.of_Z y) (word.of_Z 4));
-                 rewrite <-(word.ring_morph_add y 4);
-                 cbn [Z.add Pos.add Pos.succ]
              | H : context [word.unsigned (word.of_Z _)] |- _ =>
                  rewrite word.unsigned_of_Z_nowrap in H by (cbv [DMEM_BYTES]; lia)
              | H : if ?x then _ else _ |- _ => destr x
+             | H : context [ptr ?a ?v] |- context [is_valid_addr ?a] =>
+                 erewrite (ptr_valid_addr a v); [ | sepsolve ]
              end.
       pose proof (word.unsigned_range addr).
       ssplit; [ reflexivity | lia | ].
-      rewrite word.unsigned_add, word.unsigned_of_Z_nowrap in * by lia.
-      cbv [word.wrap DMEM_BYTES] in *.
-      rewrite !(Z.mod_small (word.unsigned addr + _)) in * by lia.
       lia.
     Qed.
 
@@ -3068,21 +3178,11 @@ Section SepDefs.
       all:cbn; congruence.
     Qed.
 
-    Lemma buf_range m n :
-      forall addr,
-        buf addr n m ->
-        (0 < n)%nat ->
-        0 <= word.unsigned addr < DMEM_BYTES - (4 * Z.of_nat n).
-    Proof.
-      induction n; cbn [buf]; [ lia | ]. intros.
-      destruct_one_match_hyp; [ | contradiction ].
-      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-      rewrite ?word.unsigned_of_Z_nowrap in * by (cbv [DMEM_BYTES]; lia).
-      destr (0 <? n)%nat.
-      {
-        specialize (IHn _ ltac:(eassumption) ltac:(lia)).
-        rewrite word.unsigned_add in IHn.
-    Qed.
+    Lemma buf_range m n addr :
+      buf addr n m ->
+      (0 < n)%nat ->
+      0 <= word.unsigned addr + (4 * Z.of_nat n) < DMEM_BYTES.
+    Proof. cbv [buf]; intros. lia. Qed.
 
     Ltac prove_word_neq :=
       lazymatch goal with
@@ -3093,22 +3193,26 @@ Section SepDefs.
           cbv [word.wrap]; rewrite ?Z.mod_small; lia
       end.
 
-    Lemma bignum_store_step m addr v :
+    Lemma wide_word_store_step m addr v :
       buf addr 8 m ->
-      bignum_store m addr v (bignum addr v).
+      wide_word_store m addr v (wptr addr v).
     Proof.
       intros.
-      pose proof (buf_range _ _ _ ltac:(eassumption)).
+      pose proof (word.unsigned_range addr).
+      pose proof (buf_range _ _ _ ltac:(eassumption) ltac:(lia)).
       change (4 * Z.of_nat 8) with 32 in *. cbv [DMEM_BYTES] in *.
-      cbv [ bignum_store bignum bignum_load write_mem read_mem
+      cbv [ wide_word_store wptr wide_word_load write_mem
               option_bind err proof_semantics ].
       replace (is_valid_addr addr) with (is_valid_addr (word.add addr (word.of_Z 0)))
         by (rewrite word.add_0_r; reflexivity).
       repeat (erewrite buf_valid_addr;
               [ | solve [eauto using sep_exists_l] | lia | reflexivity ]).
+      do 8 eexists.
+      lazy
+      Search ma
       repeat (rewrite ?map.get_put_diff by prove_word_neq; rewrite map.get_put_same;
               eexists; ssplit; [ reflexivity .. | ]).
-      cbv [bignum_combine].
+      cbv [wide_word_combine].
       rewrite !word.unsigned_of_Z.
       apply word.unsigned_inj. rewrite word.unsigned_of_Z.
       cbv [word.wrap]. rewrite <-!Z.land_ones by lia.
@@ -3149,22 +3253,6 @@ Section SepDefs.
       rewrite Z.div_small; [ reflexivity | ].
       lia.
     Qed.
-
-    Lemma bignum_store_step dmem addr v R P :
-      (buf addr 8 * R)%sep dmem ->
-      (forall dmem, (bignum addr v * R)%sep dmem -> P dmem) ->
-      bignum_store dmem addr v P.
-    Proof.
-      intros. cbv [bignum_store write_mem].
-      erewrite buf_valid_addr with (offset:=0);
-        [ | solve [eauto using sep_exists_l] | lia | reflexivity | ring ].
-      repeat (erewrite buf_valid_addr; [ .. | reflexivity ];
-              [ | solve [eauto using sep_exists_l] | lia | reflexivity ]).
-      lazymatch goal with H : forall _, _ -> ?P _ |- ?P _ => apply H end.
-      (* something for sep is needed here -- need to say that the
-         split is the same as in the hypothesis *)
-      rewrite ?map.get_put
-    Qed.
   End Proofs.
 End SepDefs.
 
@@ -3176,7 +3264,6 @@ Ltac solve_is_valid_addr :=
       assert (is_valid_addr a = true) by solve_is_valid_addr; apply is_valid_addr_add;
       eauto; cbv[DMEM_BYTES] in *; rewrite ?word.unsigned_of_Z_nowrap by lia; lia
   end.
-  
 
 Ltac simplify_side_condition_step :=
   match goal with
@@ -3193,13 +3280,17 @@ Ltac simplify_side_condition_step :=
   | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
   | |- context [fetch_fn _ _] =>
       erewrite fetch_fn_sym by
-      (cbn [fst snd]; first [ congruence | solve_map ])
+      (cbn [fst snd]; first [ congruence | solve_map ])        
+  | H : sep (ptsto ?addr _) _ ?m |- map.get ?m ?addr = Some _ =>
+      eapply ptsto_get; solve [apply H]
   | |- map.get _ _ = Some _ => solve_map
   | H : map.get ?m ?k = Some _ |- context [match map.get ?m ?k with _ => _ end] =>
       rewrite H
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
+  | H : is_valid_addr ?a = true |- context [is_valid_addr (word.add ?a (word.of_Z 0))] =>
+      rewrite (word.add_0_r a); rewrite H
   | |- (_ < _) => lia
   | |- (_ <= _) => lia                                   
   | |- (_ < _)%nat => lia
@@ -3207,13 +3298,13 @@ Ltac simplify_side_condition_step :=
   | |- Some _ = Some _ => reflexivity
   | _ => first [ progress
                    cbn [run1 strt1 read_gpr write_gpr ctrl1
-                          read_gpr_from_state read_mem
+                          read_gpr_from_state
                           set_pc update_state call_stack_pop call_stack_push
                           length hd_error tl skipn nth_error fold_left
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_mem]
+               | progress cbv [gpr_has_value write_mem read_mem]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -3435,27 +3526,23 @@ Module Test.
         let body := (body ++  [(Ret : insn)])%list in
         ("mul", syms, body))%string.
 
-  (* Test program : add two values from memory
+  (* Test program : add two values from memory using pointers
 
-     start:
-       lw   x2, 0(x0)
-       lw   x3, 4(x0)
-       jal  x1, add
-       sw   x5, 0(x0)
-       ecall
-
-     add:
+     add_mem:
+       lw   x2, 0(x12)
+       lw   x3, 0(x13)
        add  x5, x2, x3
+       sw   x5, 0(x12)
        ret
    *)
-  Definition start_mem_fn : function :=
-    ("start",
+  Definition add_mem_fn : function :=
+    ("add_mem",
       map.empty,
-      [ (Lw x2 x0 0 : insn);
-        (Lw x3 x0 4 : insn);
-        (Jal x1 "add" : insn);
-        (Sw x0 x5 0 : insn) ;
-        (Ecall : insn)])%string.
+      [ (Lw x2 x12 0 : insn);
+        (Lw x3 x13 0 : insn);
+        (Add x5 x2 x3 : insn);
+        (Sw x12 x5 0 : insn) ;
+        (Ret : insn)])%string.
 
   Compute (link [mul_fn; add_fn]).
 
@@ -3521,6 +3608,53 @@ Module Test.
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
     { solve_map. }
+    { eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
+  Qed.
+
+  Lemma add_mem_correct :
+    forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
+      is_valid_addr pa = true ->
+      is_valid_addr pb = true ->
+      map.get regs (gpreg x12) = Some pa ->
+      map.get regs (gpreg x13) = Some pb ->
+      (* note: the separation-logic setup does not require the operands to be disjoint *)
+      (ptsto pa a * Ra)%sep dmem ->
+      (ptsto pb b * Rb)%sep dmem ->
+      returns
+        (fetch:=fetch_ctx [add_mem_fn])
+        "add_mem"%string regs wregs flags dmem cstack lstack
+        (fun regs' wregs' flags' dmem' =>
+           (* note: no guarantees about flags or specific register values *)
+           wregs' = wregs
+           /\ (ptsto pa (word.add a b) * Ra)%sep dmem'
+           /\ clobbers [gpreg x2; gpreg x3; gpreg x5] regs regs').
+  Proof.
+    cbv [add_mem_fn returns]. intros; subst.
+    track_registers_init.
+    
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_ret; [ reflexivity | eassumption | ].
+    ssplit; try reflexivity; [ | ].
+    {
+      (* TODO: need to not have literal DMEM here, but rather an
+      updated form. Can write_mem use sep? *)
+    }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
   Qed.
