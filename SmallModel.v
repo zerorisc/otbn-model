@@ -64,9 +64,10 @@ Section ISA.
   .
 End ISA.
 
+
 (* Boilerplate definitions for comparing registers. *)
 Section RegisterEquality.
-  Local Ltac derive_eqb r1 r2 :=
+  Ltac derive_eqb r1 r2 :=
     pose r1 as x1;
     pose r2 as x2;
     destruct r1, r2;
@@ -169,6 +170,53 @@ Local Infix "<<" := Z.shiftl (at level 40, only parsing) : Z_scope.
 Local Infix ">>" := Z.shiftr (at level 40, only parsing) : Z_scope.
 Local Coercion Z.b2z : bool >-> Z.
 
+(*
+Constant-time checker and leakage checker
+
+Goal 1: use existing semantics to run constant-time checks
+- maybe use existing semantics to compute iflow graph or at least secret regs?
+- need constants in state -- maybe only constants are in reg dicts?
+- try running each straightline insn -- if it does not error, use the updated regs
+- if Prop, maybe say "constants updated and (...) or constants not updated and (...)"
+- but what about non-constants?
+- maybe need alternate straightline that just specifies the iflow for each insn
+- right, so straightline = try update constants + always update iflow
+- iflow per-insn includes memory and flags
+- control flow?
+- if just using secret regs, fail imm if a secret reg is used for control flow
+- if full iflow graph, keep track of which regs flow into ctrl
+- need to re-implement ctrl1 probably? or just run it to update most of otbn state first, then run a custom update on the same insn
+- maybe just designate "flow" as a node in the iflow graph and record what flows to it
+- iflow graph: map from all regs/flags/mem-addrs/"flow" to sources at start point
+
+
+Goal 2: use existing semantics to run leakage checks
+- sorta similar to iflow I think
+- except here we might care about combinations of values
+- insns should get some extra annotation that says what they leak, mainly the distance between vals
+- start with a set of pairwise "forbidden combinations"
+- combining iflow with per-insn leakage gives you {set * set} of the *iflow sources* of the thing that leaked
+- check that, for all forbidden combinations, you do not have a situation where one is on each side
+- ALT: update the forbidden combinations at each insn
+- do 1 step of iflow, then recalculate the forbidden combinations
+- at each insn, check if a forbidden combination leaked
+- what about constants?
+- think about the Q = 0 case -- this would not get caught at insn-level
+- the thing there is that *whether the value is a constant or not* depends on a secret
+- in general, need to consider that whether a value *changes* might be visible
+- leakage needs a way to express that this leaks something!
+- how does masking get taken into account? can it remove stuff from forbidden list?
+- need to think about this more
+
+
+Goal 3: fault injection modelling
+- variant of run1 that, after any insn execution, is allowed to modify it
+- can prove stuff against this model, I think it works
+- example: skip insns, fault branch, change 1 register to 0, write to wrong reg
+- actually this one seems pretty straightforward
+
+ *)
+
 Section Semantics.
   Context {word32 : word.word 32}.
   (* Parameterize over the representation of jump locations. *)
@@ -270,7 +318,6 @@ Section Semantics.
       then word.add v (word.of_Z imm)
       else word.sub v (word.of_Z imm).
 
-    Check Z.abs.
     Definition strt1
       (regs : regfile) (i : sinsn) (post : regfile -> T) : T :=
       match i with
@@ -487,6 +534,156 @@ Section Semantics.
         end        
     end.
 End Semantics.
+
+Section InformationFlow.
+  Context {label : Type}.
+  Local Coercion gpreg : gpr >-> reg.
+  Local Coercion csreg : csr >-> reg.
+
+  (* in larger model should also have flags and mem *)
+  Inductive node : Type :=
+  | NodeReg : reg -> node
+  | NodeFlow : node
+  .
+  Local Coercion NodeReg : reg >-> node.
+
+  Definition node_eqb (n1 n2 : node) : bool :=
+    match n1, n2 with
+    | NodeReg r1, NodeReg r2 => reg_eqb r1 r2
+    | NodeFlow, NodeFlow => true
+    | _, _ => false
+    end.
+
+  Section WithMap.
+    Context {iflow : map.map node (list node)}.
+
+    Definition sinsn_iflow (i : sinsn) : iflow :=
+      match i with
+      | Addi d x _ =>
+          map.put (map.empty (map:=iflow)) d [(x : node)]
+      | Add d x y =>
+          map.put (map.empty (map:=iflow)) d [ (x : node); (y : node)]
+      | Csrrs x d =>
+          map.put (map.empty (map:=iflow)) d [(x : node)]
+      end.
+
+    Definition cinsn_iflow (i : cinsn (label:=label)) : iflow :=
+      match i with
+      | Ret => map.empty
+      | Ecall => map.empty
+      | Jal _ _ => map.empty
+      | Bne x y _ =>
+          map.put map.empty NodeFlow [ (x : node); (y : node)]
+      | Beq x y _ =>
+          map.put map.empty NodeFlow [ (x : node); (y : node)]
+      | Loop x =>
+          map.put map.empty NodeFlow [ (x : node) ]
+      | Loopi _ => map.empty
+      | LoopEnd => map.empty
+      end.
+
+    Definition insn_iflow (i : insn (label:=label)) : iflow :=
+      match i with
+      | Straightline i => sinsn_iflow i
+      | Control i => cinsn_iflow i
+      end.
+
+    Definition get_sources (g : iflow) (dst : node) : list node :=
+      match map.get g dst with
+      | Some srcs => srcs
+      | None => [dst]
+      end.
+
+    Definition compose (g1 g2 : iflow) : iflow :=
+      map.fold
+        (fun g dst mids =>
+           map.put g dst
+             (List.dedup
+                node_eqb
+                (List.concat
+                   (List.map (get_sources g1) mids)))) g1 g2.
+
+    Definition flows_to (g : iflow) (src dst : node) : bool :=
+      existsb (node_eqb src) (get_sources g dst).
+  End WithMap.
+End InformationFlow.
+
+Section InformationFlowProperties.
+  Context {iflow : map.map node (list node)} {iflow_ok : map.ok iflow}.
+
+  Global Instance node_eqb_spec : forall n1 n2, BoolSpec (n1 = n2) (n1 <> n2) (node_eqb n1 n2).
+    cbv [node_eqb]; intros. repeat destruct_one_match; try (constructor; congruence); [ ].
+    lazymatch goal with |- context [reg_eqb ?r1 ?r2] => destr (reg_eqb r1 r2) end.
+    all:constructor; congruence.
+  Qed.
+
+  Lemma flows_to_put g src dst k v :
+    flows_to (map.put g k v) src dst =
+      if node_eqb dst k
+      then existsb (node_eqb src) v
+      else flows_to g src dst.
+  Proof.
+    cbv [flows_to get_sources]; intros.
+    destr (node_eqb dst k);
+      rewrite ?map.get_put_diff, ?map.get_put_same by congruence; reflexivity.
+  Qed.
+    
+  Lemma flows_to_compose g1 g2 src dst :
+    flows_to (compose g1 g2) src dst = true <->
+      (exists mid,
+          flows_to g1 src mid = true
+          /\ flows_to g2 mid dst = true).
+  Proof.
+    intros. cbv [compose].
+    generalize dependent src. generalize dependent dst.
+    apply map.fold_spec.
+    { intros. cbv [flows_to get_sources]. rewrite map.get_empty. cbn [existsb]. split.
+      { intros; exists dst; destr (node_eqb dst dst); [ | congruence ]. auto. }
+      { intros [mid [? ?]]. destr (node_eqb mid dst); cbn [orb] in *; [ | congruence ].
+        auto. } }
+    { intros *. intros ? IH; intros.
+      rewrite flows_to_put by auto.
+      destruct_one_match.
+      { rewrite existsb_exists.
+        split; intros;
+          repeat lazymatch goal with
+            | H : exists _, _ |- _ => destruct H
+            | H : _ /\ _ |- _ => destruct H
+            | H : context [In _ (List.dedup _ _)] |- _ =>
+                apply List.dedup_preserves_In in H
+            | H : context [In _ (List.concat _)] |- _ =>
+                apply in_concat in H
+            | H : context [In _ (List.map _ _)] |- _ =>
+                apply in_map_iff in H
+            | H : context [node_eqb ?x ?y] |- _ =>
+                destr (node_eqb x y); subst; try congruence
+            end.
+        { eexists. rewrite flows_to_put by auto.
+          destruct_one_match; try congruence; [ ].
+          cbv [flows_to]. rewrite <-!List.existsb_eqb_in.
+          eauto. }
+        { lazymatch goal with
+          | |- exists y, _ /\ node_eqb ?x y = true =>
+              exists x; split; [ | destr (node_eqb x x); congruence ]
+          end.
+          repeat lazymatch goal with
+                 | H : flows_to _ _ _ = true |- _ => apply List.existsb_eqb_in in H
+                 end.
+          rewrite <-List.dedup_preserves_In.
+          apply in_concat. eexists; ssplit; eauto.
+          apply in_map.
+          cbv [get_sources] in *. rewrite map.get_put_same in *. auto. } }
+      { split; intro Himpl.
+        { apply IH in Himpl. destruct Himpl as [? [? ?]].
+          eexists; rewrite flows_to_put by auto.
+          destruct_one_match; try congruence; eauto. }
+        { apply IH. destruct Himpl as [? [? Hput]].
+          rewrite flows_to_put in Hput by auto.
+          destruct_one_match_hyp; try congruence; [ ].
+          eexists; ssplit; eauto. } } }
+  Qed.
+
+End InformationFlowProperties.
 
 Section ErrorMonad.
   (* returns either a value or an error message, helpful for debugging *)
