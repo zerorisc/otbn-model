@@ -33,6 +33,13 @@ Section Registers.
   | gpreg : gpr -> reg
   | csreg : csr -> reg
   .
+
+  Definition reg_writeable (r : reg) : bool :=
+    match r with
+    | gpreg x0 => false
+    | csreg CSR_RND => false
+    | _ => true
+    end.        
 End Registers.
 
 Section ISA.
@@ -383,6 +390,12 @@ Section Semantics.
       | otbn_busy pc regs cstack lstack => post (otbn_busy (advance_pc pc) regs cstack lstack)
       | _ => post st
       end.
+    Definition regs_from_state (st : otbn_state) (post : regfile -> T) : T :=
+      match st with
+      | otbn_busy _ regs _ _ => post regs
+      | otbn_done _ regs => post regs
+      | otbn_error _ _ => err
+      end.
     Definition read_gpr_from_state (st : otbn_state) (r : gpr) (post : _ -> T) : T :=
       match st with
       | otbn_busy _ regs _ _ => read_gpr regs r post
@@ -535,6 +548,137 @@ Section Semantics.
     end.
 End Semantics.
 
+Section Leakage.
+  Context {label : Type} {word32 : word.word 32}.
+
+  Inductive leakable : Type :=
+  | LeakLoad : forall (addr : word32) (len : nat), leakable
+  | LeakStore : forall (addr : word32) (len : nat), leakable
+  | LeakBranch : forall (cond : bool), leakable
+  | LeakWord : forall (w : word32), leakable
+  .
+
+  Definition sinsn_iflow (i : sinsn) :  :=
+    match i with
+    | Addi d x _ => write_iflow d [(x : node)]
+    | Add d x y => write_iflow d [ (x : node); (y : node)]
+    | Csrrs x d => write_iflow d [(x : node)]
+    end.
+
+    Definition cinsn_iflow (i : cinsn (label:=label)) : iflow :=
+      match i with
+      | Ret => map.empty
+      | Ecall => map.empty
+      | Jal _ _ => map.empty
+      | Bne x y _ =>
+          map.put map.empty NodeFlow [ (x : node); (y : node)]
+      | Beq x y _ =>
+          map.put map.empty NodeFlow [ (x : node); (y : node)]
+      | Loop x =>
+          map.put map.empty NodeFlow [ (x : node) ]
+      | Loopi _ => map.empty
+      | LoopEnd => map.empty
+      end.
+
+    Definition insn_iflow (i : insn (label:=label)) : iflow :=
+      match i with
+      | Straightline i => sinsn_iflow i
+      | Control i => cinsn_iflow i
+      end.
+
+    Definition get_sources (g : iflow) (dst : node) : list node :=
+      match map.get g dst with
+      | Some srcs => srcs
+      | None => [dst]
+      end.
+
+    Definition compose (g1 g2 : iflow) : iflow :=
+      map.fold
+        (fun g dst mids =>
+           map.put g dst
+             (List.dedup
+                node_eqb
+                (List.concat
+                   (List.map (get_sources g1) mids)))) g1 g2.
+
+    Definition flows_to (g : iflow) (src dst : node) : bool :=
+      existsb (node_eqb src) (get_sources g dst).
+
+    Section WithFetch.
+      Context {word32 : word.word 32} {regfile : map.map reg word32}.
+      Context {fetch : label * nat -> option (insn (label:=label))}.
+      
+      Definition flow1 (st : otbn_state (regfile:=regfile)) : option iflow :=
+        match st with
+        | otbn_busy pc regs _ _ =>
+            match fetch pc with
+            | Some i => Some (insn_iflow i)
+            | None => None
+            end
+        |  _ => Some map.empty
+        end.
+
+      (* TODO: leakage trace a la new paper? leak1 as analogue of
+      exec1, using alt ctrl1 that only reacts to branches/loops *)
+      (* computable part: make function for leakage trace, fail if
+      impossible? can have branches etc on public state *)
+      (* also would help automate proofs *)
+
+      (* check if sources are all constants *)
+      (* if so, then *)
+      Print strt1.
+      Print exec1.
+      Print map.map.
+      Check (map.fold (fun m k v => if existsb (reg_eqb k))).
+      Check map.remove.
+      Definition flow_strt1 (regs : regfile) (i : sinsn) : regs * iflow :=
+        let g := sinsn_iflow i in
+        (* check if sources are all constants *)
+        map.fold (fun ok r v => if existsb ()) regs
+        strt1
+          (map.fold (fun regs r v => if get_sources)
+          exec_random exec_option_bind regs i
+          (fun regs' =>
+             
+
+      Print ctrl1.
+
+      Definition flow_ctrl1 (st : otbn_state) (i : cinsn) : list iflow :=
+        match i with
+        | Ret =>
+      
+
+      (* need to behave differently for straightline and not!
+         - for straightline, try strt1 and accept new regs if successful
+         - if failure, then check iflow for insn and remove constants with flow
+         - for control, might need to e.g. take both branches!
+
+         maybe nice consttime prop def for difficult cases
+         and an executable iflow one for easy ones
+       *)
+      (* state in iflow has only known constants *)
+      Definition information_flow'
+        (st : otbn_state)
+        (g : iflow)
+        (fuel : nat) : option iflow :=
+        match fuel with
+        | 0%nat => None
+        | S fuel =>
+            match exec1 st with
+            | Some st' =>
+                match flow1 st with
+                | if is_busy st'
+                          then program_iflow st' (compose g (insn_iflow i)) fuel
+                          else Some st'
+            | None => 
+      
+
+      
+      Definition consttime (program : list insn) (secrets : list node) (st : otbn_state) : bool :=
+      
+  End WithMap.
+End InformationFlow.
+
 Section InformationFlow.
   Context {label : Type}.
   Local Coercion gpreg : gpr >-> reg.
@@ -557,14 +701,16 @@ Section InformationFlow.
   Section WithMap.
     Context {iflow : map.map node (list node)}.
 
+    Definition write_iflow (dst : reg) (srcs : list node) : iflow :=
+      if reg_writeable dst
+      then map.put map.empty (NodeReg dst) srcs
+      else map.empty.
+
     Definition sinsn_iflow (i : sinsn) : iflow :=
       match i with
-      | Addi d x _ =>
-          map.put (map.empty (map:=iflow)) d [(x : node)]
-      | Add d x y =>
-          map.put (map.empty (map:=iflow)) d [ (x : node); (y : node)]
-      | Csrrs x d =>
-          map.put (map.empty (map:=iflow)) d [(x : node)]
+      | Addi d x _ => write_iflow d [(x : node)]
+      | Add d x y => write_iflow d [ (x : node); (y : node)]
+      | Csrrs x d => write_iflow d [(x : node)]
       end.
 
     Definition cinsn_iflow (i : cinsn (label:=label)) : iflow :=
@@ -605,11 +751,85 @@ Section InformationFlow.
 
     Definition flows_to (g : iflow) (src dst : node) : bool :=
       existsb (node_eqb src) (get_sources g dst).
+
+    Section WithFetch.
+      Context {word32 : word.word 32} {regfile : map.map reg word32}.
+      Context {fetch : label * nat -> option (insn (label:=label))}.
+      
+      Definition flow1 (st : otbn_state (regfile:=regfile)) : option iflow :=
+        match st with
+        | otbn_busy pc regs _ _ =>
+            match fetch pc with
+            | Some i => Some (insn_iflow i)
+            | None => None
+            end
+        |  _ => Some map.empty
+        end.
+
+      (* TODO: leakage trace a la new paper? leak1 as analogue of
+      exec1, using alt ctrl1 that only reacts to branches/loops *)
+      (* computable part: make function for leakage trace, fail if
+      impossible? can have branches etc on public state *)
+      (* also would help automate proofs *)
+
+      (* check if sources are all constants *)
+      (* if so, then *)
+      Print strt1.
+      Print exec1.
+      Print map.map.
+      Check (map.fold (fun m k v => if existsb (reg_eqb k))).
+      Check map.remove.
+      Definition flow_strt1 (regs : regfile) (i : sinsn) : regs * iflow :=
+        let g := sinsn_iflow i in
+        (* check if sources are all constants *)
+        map.fold (fun ok r v => if existsb ()) regs
+        strt1
+          (map.fold (fun regs r v => if get_sources)
+          exec_random exec_option_bind regs i
+          (fun regs' =>
+             
+
+      Print ctrl1.
+
+      Definition flow_ctrl1 (st : otbn_state) (i : cinsn) : list iflow :=
+        match i with
+        | Ret =>
+      
+
+      (* need to behave differently for straightline and not!
+         - for straightline, try strt1 and accept new regs if successful
+         - if failure, then check iflow for insn and remove constants with flow
+         - for control, might need to e.g. take both branches!
+
+         maybe nice consttime prop def for difficult cases
+         and an executable iflow one for easy ones
+       *)
+      (* state in iflow has only known constants *)
+      Definition information_flow'
+        (st : otbn_state)
+        (g : iflow)
+        (fuel : nat) : option iflow :=
+        match fuel with
+        | 0%nat => None
+        | S fuel =>
+            match exec1 st with
+            | Some st' =>
+                match flow1 st with
+                | if is_busy st'
+                          then program_iflow st' (compose g (insn_iflow i)) fuel
+                          else Some st'
+            | None => 
+      
+
+      
+      Definition consttime (program : list insn) (secrets : list node) (st : otbn_state) : bool :=
+      
   End WithMap.
 End InformationFlow.
 
 Section InformationFlowProperties.
   Context {iflow : map.map node (list node)} {iflow_ok : map.ok iflow}.
+  Context {label : Type} {word32 : word.word 32} {regfile : map.map reg word32}.
 
   Global Instance node_eqb_spec : forall n1 n2, BoolSpec (n1 = n2) (n1 <> n2) (node_eqb n1 n2).
     cbv [node_eqb]; intros. repeat destruct_one_match; try (constructor; congruence); [ ].
@@ -682,6 +902,61 @@ Section InformationFlowProperties.
           destruct_one_match_hyp; try congruence; [ ].
           eexists; ssplit; eauto. } } }
   Qed.
+
+  Check strt1.
+
+  Print run1.
+  Print write_gpr.
+  (* TODO: handle x0! and in general non-writeable nodes *)
+  (* for all pairs (src, dst)
+     for all start states st and instructions i
+     when we update the value of src in st but nothing else
+     then either the dst value is always the same
+     or src flows to dst *)
+  Lemma iflow_strt1 (src dst : reg) i regs st1 st2 v :
+    strt1 False prop_random prop_option_bind regs i
+      (fun regs' =>
+         strt1 False prop_random prop_option_bind (map.put regs src v) i
+           (fun regs' =>
+         forall src dst : node,
+           
+         
+         (* for all pairs of nodes (src, dst) *)
+         forall src dst : node,
+           (* if the values of src are not equal before *)
+           node_value_eq st st' src ->
+           (node_value_eq st st' dst \/
+              (exists i,
+                  fetch (get_pc st) = Some i
+                  /\ flows_to (insn_iflow i) src dst = true))).
+  Definition node_value_eq (st st' : otbn_state) (n : node) : Prop :=
+    match n with
+    | NodeFlow => get_pc st = get_pc st'
+    | NodeReg r =>
+        regs_from_state (label:=label) False st
+          (fun regs => regs_from_state False st' (eq regs))
+    end.
+
+  Print otbn_state.
+  (* maybe need to change one node? *)
+  (* maybe need to talk about strt1 and ctrl1 instead *)
+  Print run1.
+
+  (* verify that the information-flow defs are conservative enough *)
+  Lemma iflow_run1 fetch (src dst : node) st1 st2 :
+    run1 (fetch:=fetch) st1
+      (fun st1' =>
+         run1 (fetch:=fetch) st2
+         (* for all pairs of nodes (src, dst) *)
+         forall src dst,
+           (* if the values of src are not equal before *)
+           node_value_eq st st' src ->
+           (node_value_eq st st' dst \/
+              (exists i,
+                  fetch (get_pc st) = Some i
+                  /\ flows_to (insn_iflow i) src dst = true))).
+                   
+    
 
 End InformationFlowProperties.
 
