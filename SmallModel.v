@@ -549,18 +549,33 @@ Section Semantics.
 End Semantics.
 
 Section Leakage.
-  Context {label : Type} {word32 : word.word 32}.
+  Context {label : Type} {word32 : word.word 32} {regfile : map.map reg word32}.
 
-  Inductive leakable : Type :=
-  | LeakLoad : forall (addr : word32) (len : nat), leakable
-  | LeakStore : forall (addr : word32) (len : nat), leakable
-  | LeakBranch : forall (cond : bool), leakable
-  | LeakWord : forall (w : word32), leakable
+  (* timing leaks:
+     load/store addresses and lengths
+     branch bools (incl loopend)
+
+     other leaks:
+     maybe operands
+     old/new values of dst register
+   *)
+  Inductive leak : Type :=
+  | LeakLoad : forall (addr : word32) (len : nat), leak
+  | LeakStore : forall (addr : word32) (len : nat), leak
+  | LeakBranch : forall (cond : bool), leak
+  | LeakValue : forall (w : word32), leak
   .
 
-  Definition sinsn_iflow (i : sinsn) :  :=
+  Print strt1.
+
+  Definition sinsn_leak (regs : regfile) (i : sinsn) : list leak :=
     match i with
-    | Addi d x _ => write_iflow d [(x : node)]
+    | Addi d x imm =>
+    (* run strt1, check for reg/mem changes, leak addresses and distances *)
+
+  Definition sinsn_leak (i : sinsn) : list leak :=
+    match i with
+    | Addi d x _ => 
     | Add d x y => write_iflow d [ (x : node); (y : node)]
     | Csrrs x d => write_iflow d [(x : node)]
     end.

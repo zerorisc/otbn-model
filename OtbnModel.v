@@ -4009,7 +4009,7 @@ Module ExecTest.
 
 End ExecTest.
 
-(* Next: separation logic for memory (considered for regs, but doesn't make much sense given how regs are usually handled -- most useful for long values) *)
+(* Next: separation logic for memory *)
 (* Next: wclobbers, fclobbers *)
 (* Next: add bn.add/bn.addc and test these *)
 (* Next: add mulqacc *)
@@ -4018,29 +4018,5 @@ End ExecTest.
 (* Next: provable multiplication blocks *)
 (* Next: add more insns needed for 25519 mul *)
 (* Next: prove 25519 mul *)
-
-(* TODO: think through how memory should actually work re symbols and
-   labels; does everything need to be fixed? Can we add it to the
-   linker? *)
-(*
- option 1: have mem map be label * offset -> word32, just like jumps
-   - then in proofs we'd just use the context with strings
-   - linker pass would set them in some kinda order
-   - unlike for jump dsts, we'd need a size (but I guess kinda like functions)
-   - would need to handle both with and without initial values
-   - so we'd have list function, also list (name : string, values: list word32) for data
-   - and list (name : string, size : nat) for bss/scratchpad
-   - would need to link straightline instructions as well as control flow for that
-   - would not need seplogic in proofs
-
-
-option 2: have mem map be always word32 -> word32
-  - then in proos we'd deal with addresses and seplogic, and need to assume they don't overlap
-  - we could plug in any separated addresses at the last stage
-  - would need to pass addresses around in proofs -- but only as much as we do in code anyway
-  - each proof for each function would assume seplogic
-  - for functions we tie together, we'd need to include all buffers used by sub-functions
-  - maybe that's OK though?
-
-Try option 2 and see how this goes
-*)
+(* Next: prove bignum op with var #regs (e.g. mul) *)
+(* Next: prove sha512 copy *)
