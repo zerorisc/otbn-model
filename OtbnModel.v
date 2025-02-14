@@ -5,7 +5,10 @@ Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Map.Interface.
+Require Import coqutil.Map.OfListWord.
 Require Import coqutil.Map.Properties.
+Require Import coqutil.Map.Separation.
+Require Import coqutil.Map.SeparationLogic.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
@@ -2027,8 +2030,9 @@ Section BuildProofs.
                           | None => find f l2
                           end.
   Proof.
-    induction l1; intros; [ reflexivity | ].
-    cbn [app find]. destruct_one_match; eauto.
+    induction l1 as [|a ?]; intros; [ reflexivity | ].
+    rewrite <-app_comm_cons. cbn [find].
+    destruct_one_match; eauto.
   Qed.
 
   Lemma find_map :
@@ -2083,7 +2087,8 @@ Section BuildProofs.
       a = b.
   Proof.
     cbv [program_size].
-    induction fns1; destruct fns2; cbn [app fold_left]; intros; subst;
+    induction fns1; destruct fns2; intros *; rewrite ?app_nil_l, <-?app_comm_cons;
+      cbn [app fold_left]; intros; subst;
       repeat lazymatch goal with
         | H : _ :: _ = _ :: _ |- _ => inversion H; clear H; subst
         | H : ?start = fold_left _ _ (?start + _)%nat |- _ =>
@@ -2092,7 +2097,7 @@ Section BuildProofs.
             rewrite program_size_add in H; lia
         | |- ?x = ?x => reflexivity
         | _ => solve [eauto]
-        end.    
+        end.
   Qed.
 
   Lemma link_symbols'_app :
@@ -2102,7 +2107,8 @@ Section BuildProofs.
         link_symbols' start_syms start_offset fns1 = Ok (syms1, end_offset1)
         /\ link_symbols' syms1 end_offset1 fns2 = Ok (syms, end_offset).
   Proof.
-    induction fns1; cbn [app]; intros; [ do 2 eexists; ssplit; [ reflexivity | eauto ] | ].
+    induction fns1; cbn [app]; intros; rewrite ?app_nil_l, <-?app_comm_cons in *;
+      [ do 2 eexists; ssplit; [ reflexivity | eauto ] | ].
     repeat lazymatch goal with
            | H : _ /\ _ |- _ => destruct H
            | H : exists _, _ |- _ => destruct H
@@ -2941,321 +2947,6 @@ Ltac zsimplify_step :=
   end.
 Ltac zsimplify := repeat zsimplify_step.
 
-
-(* Separation logic defs. This section is copied directly from
-   bedrock2 (copied to avoid introducing a bedrock2 dependency). *)
-Section Sep.
-  Context {key value} {map : map.map key value}.
-  Definition emp (P : Prop) := fun m : map => m = map.empty /\ P.
-  Definition sep (p q : map -> Prop) m :=
-    exists mp mq, map.split m mp mq /\ p mp /\ q mq.
-  Definition ptsto k v := fun m : map => m = map.put map.empty k v.
-End Sep.
-
-Declare Scope sep_scope.
-Delimit Scope sep_scope with sep.
-Infix "*" := sep (at level 40, left associativity) : sep_scope.
-
-Section SepProofs.
-  Context {key value} {map : map.map key value} {map_ok : map.ok map}.
-  Context {key_eqb : key -> key -> bool}
-    {key_eq_dec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}.
-
-  Lemma sep_comm p q (m : map) :
-    sep p q m -> sep q p m.
-  Proof.
-    cbv [sep]; intros [mp [mq ?]]. intros. exists mq, mp.
-    cbv [map.split] in *.
-    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-    subst; ssplit; eauto; [ | ].
-    { eapply map.putmany_comm; eauto. }
-    { eapply map.disjoint_comm; eauto. }
-  Qed.
-
-  Lemma sep_assoc p q r (m : map) :
-    sep (sep p q) r m -> sep p (sep q r) m.
-  Proof.
-    cbv [sep map.split]; intros.
-    repeat lazymatch goal with
-           | H : exists _, _ |- _ => destruct H
-           | H : _ /\ _ |- _ => destruct H
-           | H : map.disjoint (map.putmany _ _) _ |- _ => apply map.disjoint_putmany_l in H
-           | |- map.disjoint _ (map.putmany _ _) => apply map.disjoint_putmany_r; ssplit
-           | Hp : p ?mp, Hq : q ?mq, Hr : r ?mr |- exists x _, _ /\ p x /\ _ =>
-               exists mp, (map.putmany mq mr); ssplit
-           | Hq : q ?mq, Hr : r ?mr |- exists x _, _ /\ q x /\ _ =>
-               exists mq, mr; ssplit
-           | _ => first [ progress subst | solve [eauto using map.putmany_assoc] ]
-           end.
-  Qed.
-
-  Lemma sep_weaken_l p q r (m : map) :
-    sep p q m -> (forall m, p m -> r m) -> sep r q m.
-  Proof.
-    cbv [sep]; intros [mp [mq ?]]. intros. exists mp, mq.
-    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-    ssplit; eauto.
-  Qed.
-
-  Lemma sep_weaken_r p q r (m : map) :
-    sep p q m -> (forall m, q m -> r m) -> sep p r m.
-  Proof.
-    intros. apply sep_comm. eapply sep_weaken_l; [ apply sep_comm | .. ]; eauto.
-  Qed.
-
-  Lemma sep_exists_l p q (m : map) :
-    sep p q m -> exists m, p m.
-  Proof.
-    cbv [sep]; intros [mp [mq ?]]. intros. exists mp.
-    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-    ssplit; eauto.
-  Qed.
-
-  Lemma sep_exists_r p q (m : map) :
-    sep p q m -> exists m, q m.
-  Proof.
-    intros. eapply sep_exists_l; [ apply sep_comm | .. ]; eauto.
-  Qed.
-
-  Lemma sep_emp_l p q (m : map) :
-    sep (emp p) q m -> p /\ q m.
-  Proof.
-    cbv [sep emp]; intros [mp [mq ?]].
-    repeat lazymatch goal with H : _ /\ _ |- _ => destruct H; subst end.
-    lazymatch goal with H : map.split _ map.empty _ |- _ =>
-                          eapply map.split_empty_l in H end.
-    subst; eauto.
-  Qed.
-
-  Lemma sep_emp_r p q (m : map) :
-    sep p (emp q) m -> q /\ p m.
-  Proof.
-    intros. eapply sep_emp_l; eauto using sep_comm.
-  Qed.
-
-  Lemma ptsto_get k v p (m : map) :
-    sep (ptsto k v) p m -> map.get m k = Some v.
-  Proof.
-    cbv [sep ptsto]; intros [? [? ?]].
-    repeat lazymatch goal with
-           | H : _ /\ _ |- _ => destruct H
-           | H : _ \/ _ |- _ => destruct H
-           | H : context [map.get (map.put _ ?k _) ?k] |- _ => rewrite map.get_put_same in H
-           | H : map.split _ _ _ |- _ => apply map.get_split with (k:=k) in H
-           | H : Some _ = None |- _ => congruence
-           | H : ?P |- ?P => assumption
-           | _ => progress subst
-           end.
-  Qed.
-
-End SepProofs.
-
-Ltac sepsimpl_step :=
-  lazymatch goal with
-  | H : (emp _ * _)%sep _ |- _ => apply sep_emp_l in H; destruct H
-  | H : (_ * emp _)%sep _ |- _ => apply sep_emp_r in H; destruct H
-  | H : (emp _ * _ * _)%sep _ |- _ => apply sep_assoc, sep_emp_l in H; destruct H
-  end.
-Ltac sepsimpl := repeat sepsimpl_step.
-
-(* make the term `p` the left-hand outer operand of `sep` *)
-Ltac sep_extract_step p H :=
-  lazymatch type of H with
-  | sep ?x ?y _ =>
-      lazymatch x with
-      | p => idtac (* done *)
-      | sep _ p => eapply sep_weaken_l in H; [ | solve [apply sep_comm] ]
-      | context [p] => apply sep_assoc in H
-      | _ => lazymatch y with
-             | context [p] => apply sep_comm in H
-             | _ => fail "statement" p "not found in" x "or" y
-             end
-      end
-  end.
-Ltac sep_extract p H := repeat sep_extract_step p H.
-
-Ltac sepsolve :=
-  lazymatch goal with
-  | H : context [?p] |- sep ?p _ _ => sep_extract p H; solve [apply H]
-  end.
-
-(* Additional separation-logic definitions. *)
-Section SepDefs.
-  Context {word32 : word.word 32} {word256 : word.word 256} {mem : map.map word32 word32}.
-
-  Definition ptr (addr : word32) (v : word32) : mem -> Prop :=
-    (emp (is_valid_addr addr = true) * ptsto addr v)%sep.
-  Definition wptr (addr : word32) (v : word256) (m : mem) : Prop :=
-    exists v0 v1 v2 v3 v4 v5 v6 v7,
-      (ptr addr v0
-       * ptr (word.add addr (word.of_Z 4)) v1
-       * ptr (word.add addr (word.of_Z 8)) v2
-       * ptr (word.add addr (word.of_Z 12)) v3
-       * ptr (word.add addr (word.of_Z 16)) v4
-       * ptr (word.add addr (word.of_Z 20)) v5
-       * ptr (word.add addr (word.of_Z 24)) v6
-       * ptr (word.add addr (word.of_Z 28)) v7)%sep m
-      /\ 0 <= word.unsigned addr + 32 < DMEM_BYTES
-      /\ wide_word_combine v0 v1 v2 v3 v4 v5 v6 v7 = v.
-
-  Definition buf (addr : word32) (n : nat) (m : mem) : Prop :=
-    is_valid_addr addr = true
-    /\ 0 <= word.unsigned addr + (4 * Z.of_nat n) < DMEM_BYTES.
-
-  Section Proofs.
-    Context {word32_ok : word.ok word32} {word256_ok : word.ok word256} {mem_ok : map.ok mem}.
-    Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
-
-    Lemma ptr_valid_addr addr v dmem R :
-      sep (ptr addr v) R dmem -> is_valid_addr addr = true.
-    Proof. cbv [ptr]; intros. sepsimpl. assumption. Qed.
-
-    Lemma ptr_load addr v dmem R :
-      sep (ptr addr v) R dmem -> read_mem dmem addr (eq v).
-    Proof.
-      cbv [ptr read_mem]; intros. sepsimpl.
-      lazymatch goal with H : is_valid_addr ?a = true |- _ => rewrite H end.
-      erewrite ptsto_get by eauto.
-      eexists; ssplit; reflexivity.      
-    Qed.
-
-    Lemma wptr_load addr v dmem :
-      wptr addr v dmem -> wide_word_load dmem addr (eq v).
-    Proof.
-      cbv [wptr wide_word_load]; intros.
-      repeat lazymatch goal with
-             | H : exists _, _ |- _ => destruct H
-             | H : _ /\ _ |- _ => destruct H
-             | H : context [ptr ?a ?v] |- read_mem _ ?a _ =>
-                 eapply read_mem_weaken; [ eapply (ptr_load a v); sepsolve | intros; subst ]
-             end.
-      reflexivity.
-    Qed.
-    
-    Lemma wide_word_clear dmem addr v R :
-      (wptr addr v * R)%sep dmem ->
-      (buf addr 8 * R)%sep dmem.
-    Proof.
-      intros; eapply sep_weaken_l; eauto.
-      cbv [wptr wide_word_load buf read_mem err option_bind proof_semantics]; intros.
-      repeat lazymatch goal with
-             | H : exists _, _ |- _ => destruct H
-             | H : _ /\ _ |- _ => destruct H
-             | H : False |- _ => contradiction H
-             | |- True => trivial
-             | H : context [word.unsigned (word.of_Z _)] |- _ =>
-                 rewrite word.unsigned_of_Z_nowrap in H by (cbv [DMEM_BYTES]; lia)
-             | H : if ?x then _ else _ |- _ => destr x
-             | H : context [ptr ?a ?v] |- context [is_valid_addr ?a] =>
-                 erewrite (ptr_valid_addr a v); [ | sepsolve ]
-             end.
-      pose proof (word.unsigned_range addr).
-      ssplit; [ reflexivity | lia | ].
-      lia.
-    Qed.
-
-    Lemma buf_valid_addr start size offset :
-      (exists m, buf start size m) ->
-      0 <= offset < 4 * Z.of_nat size ->
-      offset mod 4 = 0 ->
-      is_valid_addr (word.add start (word.of_Z offset)) = true.
-    Proof.
-      intros [? [? ?]]. intros; subst.
-      apply is_valid_addr_add; eauto; try lia; [ ].
-      rewrite is_valid_addr_iff in *.
-      pose proof (word.unsigned_range start).
-      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
-      let x := lazymatch goal with
-               | H : context [ word.unsigned start + ?x < DMEM_BYTES] |- _ => x end in        
-      destr (offset <=? x - 4); [ lia | ];
-      assert (offset = x - 3 \/ offset = x - 2 \/ offset = x - 1) by lia.
-      assert (offset mod 4 <> 0); [ | lia ].
-      repeat lazymatch goal with
-             | H : _ \/ _ |- _ => destruct H; subst
-             end.
-      all:Z.push_mod.
-      all:zsimplify.
-      all:cbn; congruence.
-    Qed.
-
-    Lemma buf_range m n addr :
-      buf addr n m ->
-      (0 < n)%nat ->
-      0 <= word.unsigned addr + (4 * Z.of_nat n) < DMEM_BYTES.
-    Proof. cbv [buf]; intros. lia. Qed.
-
-    Ltac prove_word_neq :=
-      lazymatch goal with
-      |- not (@eq word.rep ?x ?y) =>
-          apply word.eqb_false; rewrite word.unsigned_eqb;
-          apply Z.eqb_neq;
-          rewrite ?word.unsigned_add, ?word.unsigned_of_Z_nowrap by lia;
-          cbv [word.wrap]; rewrite ?Z.mod_small; lia
-      end.
-
-    Lemma wide_word_store_step m addr v :
-      buf addr 8 m ->
-      wide_word_store m addr v (wptr addr v).
-    Proof.
-      intros.
-      pose proof (word.unsigned_range addr).
-      pose proof (buf_range _ _ _ ltac:(eassumption) ltac:(lia)).
-      change (4 * Z.of_nat 8) with 32 in *. cbv [DMEM_BYTES] in *.
-      cbv [ wide_word_store wptr wide_word_load write_mem
-              option_bind err proof_semantics ].
-      replace (is_valid_addr addr) with (is_valid_addr (word.add addr (word.of_Z 0)))
-        by (rewrite word.add_0_r; reflexivity).
-      repeat (erewrite buf_valid_addr;
-              [ | solve [eauto using sep_exists_l] | lia | reflexivity ]).
-      do 8 eexists.
-      lazy
-      Search ma
-      repeat (rewrite ?map.get_put_diff by prove_word_neq; rewrite map.get_put_same;
-              eexists; ssplit; [ reflexivity .. | ]).
-      cbv [wide_word_combine].
-      rewrite !word.unsigned_of_Z.
-      apply word.unsigned_inj. rewrite word.unsigned_of_Z.
-      cbv [word.wrap]. rewrite <-!Z.land_ones by lia.
-      apply Z.bits_inj'. intro i. intros.
-      repeat first
-        [ rewrite Z.land_spec
-        | rewrite Z.lor_spec
-        | rewrite Z.shiftl_spec by lia
-        | rewrite Z.shiftr_spec by lia
-        | rewrite Z.testbit_ones by lia
-        ].
-      pose proof (word.unsigned_range v).
-      destr (i <? 256);
-        repeat
-          multimatch goal with
-          | |- context [Z.testbit (Z.shiftr _ _) ?i] =>
-              destr (0 <=? i);
-              [ try lia; rewrite Z.shiftr_spec by lia; rewrite Z.sub_simpl_r
-              | try lia; rewrite Z.testbit_neg_r with (n:=i) by lia ]
-          | H : ?x <= ?y |- context [Z.leb ?x ?y] => destr (x <=? y); try lia; [ ]
-          | |- context [Z.ltb ?x ?y] =>  destr (x <? y); try lia; [ ]
-          end.
-      all:
-      repeat first
-        [ rewrite Bool.andb_true_l
-        | rewrite Bool.andb_true_r
-        | rewrite Bool.andb_false_l
-        | rewrite Bool.andb_false_r
-        | rewrite Bool.orb_true_l
-        | rewrite Bool.orb_true_r
-        | rewrite Bool.orb_false_l
-        | rewrite Bool.orb_false_r
-        | reflexivity
-        ].
-      (* should only have 256 < i case left now *)
-      pose proof Z.pow_le_mono_r 2 256 i ltac:(lia) ltac:(lia).
-      apply Z.testbit_false; [ lia .. | ].
-      rewrite Z.div_small; [ reflexivity | ].
-      lia.
-    Qed.
-  End Proofs.
-End SepDefs.
-
 Ltac solve_is_valid_addr :=
   lazymatch goal with
   | H : is_valid_addr ?a = true |- is_valid_addr ?a = true => exact H
@@ -3282,7 +2973,7 @@ Ltac simplify_side_condition_step :=
       erewrite fetch_fn_sym by
       (cbn [fst snd]; first [ congruence | solve_map ])        
   | H : sep (ptsto ?addr _) _ ?m |- map.get ?m ?addr = Some _ =>
-      eapply ptsto_get; solve [apply H]
+      eapply get_sep; solve [apply H]
   | |- map.get _ _ = Some _ => solve_map
   | H : map.get ?m ?k = Some _ |- context [match map.get ?m ?k with _ => _ end] =>
       rewrite H
@@ -3651,10 +3342,7 @@ Module Test.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | ].
-    {
-      (* TODO: need to not have literal DMEM here, but rather an
-      updated form. Can write_mem use sep? *)
-    }
+    { eauto using sep_put. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
   Qed.
@@ -4009,7 +3697,6 @@ Module ExecTest.
 
 End ExecTest.
 
-(* Next: separation logic for memory *)
 (* Next: wclobbers, fclobbers *)
 (* Next: add bn.add/bn.addc and test these *)
 (* Next: add mulqacc *)
