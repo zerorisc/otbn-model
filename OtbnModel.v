@@ -86,6 +86,10 @@ Section Registers.
 End Registers.
 
 Section ISA.
+  Definition flag_group : Type := bool.
+  Definition FG0 : flag_group := false.
+  Definition FG1 : flag_group := true.
+
   (* Straightline instructions (no control flow) *)
   Inductive sinsn : Type :=
   | Addi : gpr -> gpr -> Z -> sinsn
@@ -93,6 +97,8 @@ Section ISA.
   | Lw : gpr -> gpr -> Z -> sinsn
   | Sw : gpr -> gpr -> Z -> sinsn
   | Csrrs : csr -> gpr -> sinsn
+  | Bn_add : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
+  | Bn_addc : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
   .
 
   (* Control-flow instructions *)
@@ -296,17 +302,21 @@ Section Stringify.
     | wsreg r => r
     end.
 
+  Definition flag_group_to_string (group : flag_group) : string :=
+    if group then "FG1" else "FG0".
+
   Definition flag_to_string (f : flag) : string :=
     match f with
-    | flagM false => "FG0.M"
-    | flagM true  => "FG1.M"
-    | flagL false => "FG0.L"
-    | flagL true  => "FG1.L"
-    | flagZ false => "FG0.Z"
-    | flagZ true  => "FG1.Z"
-    | flagC false => "FG0.C"
-    | flagC true  => "FG1.C"
+    | flagM g => flag_group_to_string g ++ ".M"
+    | flagL g => flag_group_to_string g ++ ".L"
+    | flagZ g => flag_group_to_string g ++ ".Z"
+    | flagC g => flag_group_to_string g ++ ".C"
     end.
+
+  Definition shift_to_string (shift : Z) : string :=
+    if shift =? 0
+    then ""
+    else (if shift >? 0 then " <<" else " >>") ++ HexString.of_Z (Z.abs shift).
 
   Definition sinsn_to_string (i : sinsn) : string :=
     match i with
@@ -315,11 +325,15 @@ Section Stringify.
     | Add rd rs1 rs2 =>
         "add " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
     | Lw rd rs imm =>
-        "lw" ++ rd ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs
+        "lw " ++ rd ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs
     | Sw rs1 rs2 imm =>
-        "sw" ++ rs2 ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs1
+        "sw " ++ rs2 ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs1
     | Csrrs rd rs =>
         "csrrs " ++ rd ++ ", " ++ rs ++ ", "
+    | Bn_add wrd wrs1 wrs2 shift fg =>
+        "bn.add " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_addc wrd wrs1 wrs2 shift fg =>
+        "bn.addc " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
     end.
 
   Definition cinsn_to_string (i : cinsn (label:=label)) : string :=
@@ -426,6 +440,8 @@ Section Semantics.
   Definition is_valid_addr (addr : word32) : bool :=
     word.eqb (word.of_Z 0) (word.and addr (word.of_Z 3))
     && (word.unsigned addr + 4 <? DMEM_BYTES).
+  Definition is_valid_shift_imm (imm : Z) : bool :=
+    (0 <=? imm) && (imm <=? 248) && (imm mod 8 =? 0).
 
   Fixpoint repeat_advance_pc (pc : label * nat) (n : nat) : label * nat :=
     match n with
@@ -471,22 +487,23 @@ Section Semantics.
                P
       end.
 
-    Definition read_flag_group (group : bool) (flags : flagfile) (P : word32 -> T) : T :=
-      option_bind
-        (map.get flags (flagM group))
-        ("Flag M in group " ++ if group then "1" else "0" ++ " read but not set.")
+    Definition read_wdr (wregs : wregfile) (r : wdr) (P : word256 -> T) : T :=
+     option_bind (map.get wregs (wdreg r))
+       ("Register " ++ wdr_to_string r ++ " read but not set.")
+       P.
+
+    Definition read_flag (flags : flagfile) (f : flag) (P : bool -> T) : T :=
+      option_bind (map.get flags f)
+        ("Flag " ++ flag_to_string f ++ " read but not set") P.
+
+    Definition read_flag_group (group : flag_group) (flags : flagfile) (P : word32 -> T) : T :=
+      read_flag flags (flagM group)
         (fun m =>
-           option_bind
-             (map.get flags (flagL group))
-             ("Flag L in group " ++ if group then "1" else "0" ++ " read but not set.")
+           read_flag flags (flagL group)
              (fun l =>
-                option_bind
-                  (map.get flags (flagZ group))
-                  ("Flag Z in group " ++ if group then "1" else "0" ++ " read but not set.")
+                read_flag flags (flagZ group)
                   (fun z =>
-                     option_bind
-                       (map.get flags (flagC group))
-                       ("Flag C in group " ++ if group then "1" else "0" ++ " read but not set.")
+                     read_flag flags (flagC group)
                        (fun c =>
                           let value := Z.b2z c in
                           let value := Z.lor value (Z.shiftl (Z.b2z z) 1) in
@@ -500,12 +517,12 @@ Section Semantics.
       (r : csr)
       (P : word32 -> T) : T :=
       match r with
-      | CSR_FG0 => read_flag_group false flags P
-      | CSR_FG1 => read_flag_group true flags P
+      | CSR_FG0 => read_flag_group FG0 flags P
+      | CSR_FG1 => read_flag_group FG1 flags P
       | CSR_FLAGS =>
-          read_flag_group false flags
+          read_flag_group FG0 flags
             (fun fg0 =>
-               read_flag_group true flags
+               read_flag_group FG1 flags
                  (fun fg1 =>
                     P (word.or fg0 (word.slu fg1 (word.of_Z 4)))))
       | CSR_RND_PREFETCH => err "RND_PREFETCH register is not readable"
@@ -526,6 +543,12 @@ Section Semantics.
       | x1 => err "Direct writes to the call stack via x1 are not currently modelled."
       | _ => P (map.put regs (gpreg r) v)
       end.
+
+    Definition write_wdr (wregs : wregfile) (r : wdr) (v : word256) (P : wregfile -> T) : T :=
+      P (map.put wregs (wdreg r) v).
+
+    Definition write_flag (flags : flagfile) (f : flag) (v : bool) (P : flagfile -> T) : T :=
+      P (map.put flags f v).
 
     Definition extract_flag (v : word32) (f : flag) (P : bool -> T) : T :=
       match f with
@@ -561,12 +584,12 @@ Section Semantics.
       (v : word32)
       (P : regfile -> flagfile -> T) : T :=
       match r with
-      | CSR_FG0 => write_flag_group false flags v (fun flags => P regs flags)
-      | CSR_FG1 => write_flag_group true flags v (fun flags => P regs flags)
+      | CSR_FG0 => write_flag_group FG0 flags v (fun flags => P regs flags)
+      | CSR_FG1 => write_flag_group FG1 flags v (fun flags => P regs flags)
       | CSR_FLAGS =>
-          write_flag_group false flags v
+          write_flag_group FG0 flags v
             (fun flags =>
-               write_flag_group true flags (word.sru v (word.of_Z 4))
+               write_flag_group FG1 flags (word.sru v (word.of_Z 4))
                  (fun flags => P regs flags))
       | CSR_RND_PREFETCH => P regs flags (* no effect on this model *)
       | CSR_RND => P regs flags (* writes ignored *)
@@ -635,7 +658,25 @@ Section Semantics.
                                          read_mem dmem (word.add addr (word.of_Z 28))
                                            (fun v7 =>
                                               P (wide_word_combine v0 v1 v2 v3 v4 v5 v6 v7))))))))).
- 
+    Definition apply_shift (v : word256) (shift : Z) (P : word256 -> T) :=
+      if is_valid_shift_imm (Z.abs shift)
+      then if shift >? 0
+           then P (word.slu v (word.of_Z (Z.abs shift)))
+           else P (word.sru v (word.of_Z (Z.abs shift)))
+      else err ("Invalid shift argument: " ++ HexString.of_Z shift).
+
+    Definition update_mlz
+      (flags : flagfile) (fg : flag_group) (v : word256) (P : flagfile -> T) :=
+      write_flag flags (flagM fg) (Z.testbit (word.unsigned v) 255)
+        (fun flags =>
+           write_flag flags (flagL fg) (Z.testbit (word.unsigned v) 0)
+             (fun flags =>
+                write_flag flags (flagZ fg) (word.unsigned v =? 0)
+                  (fun flags => P flags))).
+
+    Definition carry_bit (x : Z) := x >? (2^256).
+    Definition borrow_bit (x : Z) := x <? 0.
+
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
       (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
@@ -682,6 +723,38 @@ Section Semantics.
                       (fun regs flags =>
                          write_gpr regs x vd
                            (fun regs => post regs wregs flags dmem))))
+      | Bn_add d x y s fg =>
+          read_wdr wregs x
+            (fun vx =>
+               read_wdr wregs y
+               (fun vy =>
+                  apply_shift vy s
+                    (fun vy =>
+                       let result := word.add vx vy in
+                       write_wdr wregs d result
+                         (fun wregs =>
+                            write_flag flags (flagC fg)
+                              (carry_bit (word.unsigned vx + word.unsigned vy))
+                              (fun flags =>
+                                 update_mlz flags fg result
+                                   (fun flags => post regs wregs flags dmem))))))
+      | Bn_addc d x y s fg =>
+          read_wdr wregs x
+            (fun vx =>
+               read_wdr wregs y
+               (fun vy =>
+                  apply_shift vy s
+                    (fun vy =>
+                       read_flag flags (flagC fg)
+                         (fun c =>
+                            let result := word.add (word.add vx vy) (word.of_Z (Z.b2z c)) in
+                            write_wdr wregs d result
+                              (fun wregs =>
+                                 write_flag flags (flagC fg)
+                                   (carry_bit (word.unsigned vx + word.unsigned vy + Z.b2z c))
+                                   (fun flags =>
+                                      update_mlz flags fg result
+                                        (fun flags => post regs wregs flags dmem)))))))
       end.
 
     (* Pop an address off the call stack and jump to that location. *)
@@ -1752,12 +1825,43 @@ Section BuildProofs.
         end.
   Qed.
 
+  Lemma read_wdr_weaken wregs r P Q :
+    read_wdr wregs r P ->
+    (forall wregs, P wregs -> Q wregs) ->
+    read_wdr wregs r Q.
+  Proof.
+    cbv [read_wdr err option_bind proof_semantics]; intros;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | |- Q _ => solve [eauto]
+        end.
+  Qed.
+
+  Lemma read_flag_weaken flags f P Q :
+    read_flag flags f P ->
+    (forall flags, P flags -> Q flags) ->
+    read_flag flags f Q.
+  Proof.
+    cbv [read_flag err option_bind proof_semantics]; intros;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | |- Q _ => solve [eauto]
+        end.
+  Qed.
+
   Lemma read_csr_weaken regs flags r P Q :
     read_csr regs flags r P ->
     (forall regs, P regs -> Q regs) ->
     read_csr regs flags r Q.
   Proof.
-    cbv [read_csr read_flag_group err random urandom option_bind proof_semantics]; intros.
+    cbv [read_csr read_flag read_flag_group err random urandom option_bind proof_semantics];
+      intros.
     destruct r;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
@@ -1799,6 +1903,14 @@ Section BuildProofs.
         end.
   Qed.
 
+  Lemma write_wdr_weaken wregs r v P Q :
+    write_wdr (T:=Prop) wregs r v P ->
+    (forall wregs, P wregs -> Q wregs) ->
+    write_wdr (T:=Prop) wregs r v Q.
+  Proof.
+    cbv [write_wdr write_flag_group extract_flag]; intros. eauto.
+  Qed.
+
   Lemma write_csr_weaken regs flags r v P Q :
     write_csr (T:=Prop) regs flags r v P ->
     (forall regs flags, P regs flags -> Q regs flags) ->
@@ -1815,6 +1927,35 @@ Section BuildProofs.
     cbv [write_mem]; intros; destruct_one_match; eauto.
   Qed.
 
+  Lemma apply_shift_weaken v shift P Q :
+    apply_shift v shift P ->
+    (forall v, P v -> Q v) ->
+    apply_shift v shift Q.
+  Proof.
+    cbv [apply_shift]; intros; repeat destruct_one_match; eauto.
+  Qed.
+
+  Lemma write_flag_weaken flags f v P Q :
+    write_flag (T:=Prop) flags f v P ->
+    (forall flags, P flags -> Q flags) ->
+    write_flag (T:=Prop) flags f v Q.
+  Proof.
+    cbv [write_flag]; intros; repeat destruct_one_match; eauto.
+  Qed.
+
+  Lemma update_mlz_weaken flags fg v P Q :
+    update_mlz (T:=Prop) flags fg v P ->
+    (forall flags, P flags -> Q flags) ->
+    update_mlz (T:=Prop) flags fg v Q.
+  Proof.
+    cbv [update_mlz]; intros.
+    repeat lazymatch goal with
+           | |- write_flag _ _ _ _ =>
+               eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
+           | _ => solve [eauto]
+           end.
+  Qed.
+
   Lemma strt1_weaken regs wregs flags dmem i P Q :
     strt1 regs wregs flags dmem i P ->
     (forall regs wregs flags dmem, P regs wregs flags dmem -> Q regs wregs flags dmem) ->
@@ -1828,16 +1969,28 @@ Section BuildProofs.
         | |- exists _, _ => eexists; ssplit; [ eassumption | ]
         | |- read_gpr _ _ _ =>
             eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_wdr _ _ _ =>
+            eapply read_wdr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_flag _ _ _ =>
+            eapply read_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_mem _ _ _ =>
             eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_wdr _ _ _ _ =>
+            eapply write_wdr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_mem _ _ _ _ =>
             eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
+        | |- apply_shift _ _ _ =>
+            eapply apply_shift_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_flag _ _ _ _ =>
+            eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
+        | |- update_mlz _ _ _ _ =>
+            eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
         | |- Q _ _ _ _ => solve [eauto]
         end.
   Qed.
@@ -1870,16 +2023,28 @@ Section BuildProofs.
         | |- Forall2 _ (_ :: _) (_ :: _) => constructor
         | |- read_gpr _ _ _ =>
             eapply read_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_wdr _ _ _ =>
+            eapply read_wdr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_flag _ _ _ =>
+            eapply read_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_mem _ _ _ =>
             eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_wdr _ _ _ _ =>
+            eapply write_wdr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_mem _ _ _ _ =>
             eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
+        | |- apply_shift _ _ _ =>
+            eapply apply_shift_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_flag _ _ _ _ =>
+            eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
+        | |- update_mlz _ _ _ _ =>
+            eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
         | |- exists _, _ =>
             eexists; ssplit; first [ eassumption
                                    | reflexivity
@@ -3236,7 +3401,6 @@ Module Test.
         (Ret : insn)])%string.
 
   Compute (link [mul_fn; add_fn]).
-
   Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
 
   Lemma prog0_correct :
@@ -3651,10 +3815,10 @@ Module SortedListFlags.
   Definition strict_order : SortedList.parameters.strict_order ltb.
   Proof.
     cbv [ltb]; constructor; intros.
-    { abstract (cbv [flag_to_string];
+    { abstract (cbv [flag_to_string flag_group_to_string];
                 repeat destruct_one_match; apply eq_refl). }
     { abstract (eauto using String.ltb_trans). }
-    { abstract (cbv [flag_to_string] in *;
+    { abstract (cbv [flag_to_string flag_group_to_string] in *;
                 repeat destruct_one_match_hyp; try reflexivity;
                 exfalso; cbv in *; try congruence). }
   Defined.
@@ -3699,11 +3863,12 @@ End ExecTest.
 
 (* Next: wclobbers, fclobbers *)
 (* Next: add bn.add/bn.addc and test these *)
+(* Next: prove fold_bignum, RSA trial div *)
 (* Next: add mulqacc *)
+(* Next: prove sha512 copy *)
 (* Next: try to add more realistic error conditions for e.g. loop errors *)
 (* Next: add notations back *)
 (* Next: provable multiplication blocks *)
 (* Next: add more insns needed for 25519 mul *)
 (* Next: prove 25519 mul *)
 (* Next: prove bignum op with var #regs (e.g. mul) *)
-(* Next: prove sha512 copy *)
