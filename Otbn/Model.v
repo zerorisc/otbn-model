@@ -88,7 +88,7 @@ End Registers.
 Section ISA.
   Definition flag_group : Type := bool.
   Definition FG0 : flag_group := false.
-  Definition FG1 : flag_group := true.
+  Definition FG1 : flag_group := true.  
 
   (* Straightline instructions (no control flow) *)
   Inductive sinsn : Type :=
@@ -100,7 +100,10 @@ Section ISA.
   | Bn_add : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
   | Bn_addc : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
   | Bn_addi : wdr -> wdr -> Z -> flag_group -> sinsn
+  | Bn_and : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
   | Bn_xor : wdr -> wdr -> wdr -> Z -> flag_group -> sinsn
+  | Bn_lid : gpr -> bool -> gpr -> bool -> Z -> sinsn
+  | Bn_sid : gpr -> bool -> gpr -> bool -> Z -> sinsn
   .
 
   (* Control-flow instructions *)
@@ -367,6 +370,9 @@ Section Stringify.
     then ""
     else (if shift >? 0 then " <<" else " >>") ++ HexString.of_Z (Z.abs shift).
 
+  Definition inc_to_string (inc : bool) : string :=
+    if inc then "++" else "".
+
   Definition sinsn_to_string (i : sinsn) : string :=
     match i with
     | Addi rd rs imm =>
@@ -387,6 +393,12 @@ Section Stringify.
         "bn.addi " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ HexString.of_Z imm ++ ", " ++ flag_group_to_string fg
     | Bn_xor wrd wrs1 wrs2 shift fg =>
         "bn.xor " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_and wrd wrs1 wrs2 shift fg =>
+        "bn.and " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_lid grd grd_inc grs1 grs1_inc imm =>
+        "bn.lid " ++ grd ++ inc_to_string grd_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ grs1 ++ inc_to_string grs1_inc
+    | Bn_sid grs2 grs2_inc grs1 grs1_inc imm =>
+        "bn.sid " ++ grs2 ++ inc_to_string grs2_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ grs1 ++ inc_to_string grs1_inc
     end.
 
   Definition cinsn_to_string (i : cinsn (label:=label)) : string :=
@@ -492,9 +504,14 @@ Section Semantics.
     (0 <=? imm) && (imm <=? 1023).
   Definition is_valid_mem_offset (imm : Z) : bool :=
     (-2048 <=? imm) && (imm <=? 2047).
+  Definition is_valid_wide_mem_offset (imm : Z) : bool :=
+    (-16384 <=? imm) && (imm <=? 16352) && (imm mod 32 =? 0).
   Definition is_valid_addr (addr : word32) : bool :=
     word.eqb (word.of_Z 0) (word.and addr (word.of_Z 3))
     && (word.unsigned addr + 4 <? DMEM_BYTES).
+  Definition is_valid_wide_addr (addr : word32) : bool :=
+    word.eqb (word.of_Z 0) (word.and addr (word.of_Z 31))
+    && (word.unsigned addr + 32 <? DMEM_BYTES).
   Definition is_valid_shift_imm (imm : Z) : bool :=
     (0 <=? imm) && (imm <=? 248) && (imm mod 8 =? 0).
 
@@ -551,6 +568,51 @@ Section Semantics.
       option_bind (map.get flags f)
         ("Flag " ++ flag_to_string f ++ " read but not set") P.
 
+    Definition lookup_wdr (i : word32) (P : wdr -> T) : T :=
+      let i := Z.to_nat (word.unsigned (word.and i (word.of_Z 31))) in
+      (match i with
+       | 0 => P w0
+       | 1 => P w1
+       | 2 => P w2
+       | 3 => P w3
+       | 4 => P w4
+       | 5 => P w5
+       | 6 => P w6
+       | 7 => P w7
+       | 8 => P w8
+       | 9 => P w9
+       | 10 => P w10
+       | 11 => P w11
+       | 12 => P w12
+       | 13 => P w13
+       | 14 => P w14
+       | 15 => P w15
+       | 16 => P w16
+       | 17 => P w17
+       | 18 => P w18
+       | 19 => P w19
+       | 20 => P w20
+       | 21 => P w21
+       | 22 => P w22
+       | 23 => P w23
+       | 24 => P w24
+       | 25 => P w25
+       | 26 => P w26
+       | 27 => P w27
+       | 28 => P w28
+       | 29 => P w29
+       | 30 => P w30
+       | 31 => P w31
+       | _ => err ("Invalid wide register lookup: " ++ HexString.of_nat i)
+       end)%nat.
+
+    Definition read_wdr_indirect
+      (i : word32) (wregs : wregfile) (P : word256 -> T) : T :=
+      lookup_wdr i
+        (fun w =>
+           read_wdr wregs w P).
+                     
+
     Definition read_flag_group (group : flag_group) (flags : flagfile) (P : word32 -> T) : T :=
       read_flag flags (flagM group)
         (fun m =>
@@ -604,6 +666,11 @@ Section Semantics.
 
     Definition write_flag (flags : flagfile) (f : flag) (v : bool) (P : flagfile -> T) : T :=
       P (map.put flags f v).
+
+    Definition write_wdr_indirect
+      (i : word32) (wregs : wregfile) (v : word256) (P : wregfile -> T) : T :=
+      lookup_wdr i
+        (fun w => write_wdr wregs w v P).
 
     Definition extract_flag (v : word32) (f : flag) (P : bool -> T) : T :=
       match f with
@@ -734,6 +801,8 @@ Section Semantics.
     Definition carry_bit (x : Z) := x >? (2^256).
     Definition borrow_bit (x : Z) := x <? 0.
 
+    Check read_wdr_indirect.
+    Check wide_word_load.
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
       (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
@@ -826,6 +895,18 @@ Section Semantics.
                            update_mlz flags fg result
                              (fun flags => post regs wregs flags dmem))))
           else err ("Invalid immediate for BN.ADDI: " ++ HexString.of_Z imm)
+      | Bn_and d x y s fg =>
+          read_wdr wregs x
+            (fun vx =>
+               read_wdr wregs y
+               (fun vy =>
+                  apply_shift vy s
+                    (fun vy =>
+                       let result := word.xor vx vy in
+                       write_wdr wregs d result
+                         (fun wregs =>
+                            update_mlz flags fg result
+                              (fun flags => post regs wregs flags dmem)))))
       | Bn_xor d x y s fg =>
           read_wdr wregs x
             (fun vx =>
@@ -838,6 +919,60 @@ Section Semantics.
                          (fun wregs =>
                             update_mlz flags fg result
                               (fun flags => post regs wregs flags dmem)))))
+      | Bn_lid d dinc x xinc imm =>
+          if is_valid_wide_mem_offset imm
+          then
+            read_gpr regs x
+              (fun vx =>
+                 let addr := (word.add vx (word.of_Z imm)) in
+                 if is_valid_wide_addr addr
+                 then
+                   wide_word_load dmem addr
+                     (fun vm =>
+                        read_gpr regs d
+                          (fun vd => 
+                             write_wdr_indirect vd wregs vm
+                               (fun wregs =>
+                                  if dinc
+                                  then if xinc
+                                       then err ("Both increment bits set for BN.LID.")
+                                       else
+                                         write_gpr regs d (word.add vd (word.of_Z 1))
+                                           (fun regs => post regs wregs flags dmem)
+                                  else if xinc
+                                       then 
+                                         write_gpr regs x (word.add vx (word.of_Z 32))
+                                           (fun regs => post regs wregs flags dmem)
+                                       else  post regs wregs flags dmem)))
+                 else err ("Invalid read address for BN.LID: " ++ HexString.of_Z (word.unsigned addr)))
+          else err ("Invalid memory offset for BN.LID: " ++ HexString.of_Z imm)
+      | Bn_sid x xinc y yinc imm =>
+          if is_valid_wide_mem_offset imm
+          then
+            read_gpr regs x
+              (fun ix =>
+                 read_wdr_indirect ix wregs
+                 (fun vx =>
+                    read_gpr regs y
+                      (fun vy =>
+                         let addr := (word.add vy (word.of_Z imm)) in
+                         if is_valid_wide_addr addr
+                         then
+                           wide_word_store dmem addr vx
+                             (fun dmem =>
+                                if xinc
+                                then if yinc
+                                     then err ("Both increment bits set for BN.SID.")
+                                     else
+                                       write_gpr regs x (word.add ix (word.of_Z 1))
+                                         (fun regs => post regs wregs flags dmem)
+                                else if yinc
+                                     then 
+                                       write_gpr regs y (word.add vy (word.of_Z 32))
+                                         (fun regs => post regs wregs flags dmem)
+                                     else  post regs wregs flags dmem)
+                         else err ("Invalid write address for BN.SID: " ++ HexString.of_Z (word.unsigned addr)))))
+          else err ("Invalid memory offset for BN.SID: " ++ HexString.of_Z imm)
       end.
 
     (* Pop an address off the call stack and jump to that location. *)
@@ -1065,7 +1200,7 @@ Section Build.
   Definition symbols : map.map string nat := SortedListString.map _.
   (* Functions consist of a name, internal labels (map of string ->
      offset within the function), and a list of instructions. *)
-  Definition function : Type := string * symbols * list (insn (label:=string)).
+  Definition otbn_function : Type := string * symbols * list (insn (label:=string)).
   (* Programs are lists of instructions that link to each other with
      offsets within the global program. This represents code
      post-linking. *)
@@ -1088,7 +1223,7 @@ Section Build.
 
   (* Returns the symbols plus the overall size of the program *)
   Definition link_symbols_for_function
-    (syms_offset : symbols * nat) (fn : function) : maybe (symbols * nat) :=
+    (syms_offset : symbols * nat) (fn : otbn_function) : maybe (symbols * nat) :=
     let fn_name := fst (fst fn) in
     let fn_syms := snd (fst fn) in
     let fn_insns := snd fn in
@@ -1098,10 +1233,10 @@ Section Build.
   Definition link_symbols'
     (start_syms : symbols)
     (start_offset : nat)
-    (fns : list function)
+    (fns : list otbn_function)
     : maybe (symbols * nat) :=
     maybe_fold_left link_symbols_for_function fns (start_syms, start_offset).
-  Definition link_symbols (fns : list function) : maybe symbols :=
+  Definition link_symbols (fns : list otbn_function) : maybe symbols :=
     (syms_offset <- link_symbols' map.empty 0%nat fns ;
      Ok (fst syms_offset)).
 
@@ -1147,16 +1282,16 @@ Section Build.
     end.
 
   Definition link'
-    (syms : symbols) (prog : program) (fn : function) : maybe program :=
+    (syms : symbols) (prog : program) (fn : otbn_function) : maybe program :=
     (fn_insns <- link_insns syms (snd fn) ;
      Ok (prog ++ fn_insns)).
 
-  Definition link (fns : list function) : maybe program :=
+  Definition link (fns : list otbn_function) : maybe program :=
     (syms <- link_symbols fns ;
      maybe_fold_left (link' syms) fns []).
 
   Definition get_label_offset
-    (fn : function) (label : string) : option nat :=
+    (fn : otbn_function) (label : string) : option nat :=
     let fn_name := fst (fst fn) in
     let fn_syms := snd (fst fn) in
     if (String.eqb label fn_name)
@@ -1165,7 +1300,7 @@ Section Build.
 
   (* Fetch from a function. *)
   Definition fetch_fn
-    (fn : function) (pc : string * nat) : option insn :=
+    (fn : otbn_function) (pc : string * nat) : option insn :=
     let label := fst pc in
     let offset := snd pc in
     let fn_insns := snd fn in
@@ -1176,7 +1311,7 @@ Section Build.
  
   (* Fetch from a collection of functions. *)
   Definition fetch_ctx
-    (fns : list function) (pc : string * nat) : option insn :=
+    (fns : list otbn_function) (pc : string * nat) : option insn :=
     fold_left
       (fun res fn =>
          match res, fetch_fn fn pc with
@@ -1225,7 +1360,7 @@ Section Build.
      particular program at the given global offset. *)
   Definition linked_at
     (prog : program) (syms : symbols)
-    (fn : function) (global_offset : nat) : Prop :=
+    (fn : otbn_function) (global_offset : nat) : Prop :=
     forall fn_offset : nat,
       (fn_offset < length (snd fn))%nat ->
       exists i1 i2,
@@ -1244,7 +1379,7 @@ Section BuildProofs.
 
   (* Returns the overall size of the program containing the functions
      and starting at the given offset. *)
-  Definition program_size (start : nat) (fns : list function) : nat :=
+  Definition program_size (start : nat) (fns : list otbn_function) : nat :=
     fold_left
       (fun offset fn =>
          let fn_insns := snd fn in
@@ -1568,7 +1703,7 @@ Section BuildProofs.
     { apply IHfn_insns; auto; lia. }
   Qed.
 
-  Lemma fetch_fn_name offset (fn : function) :
+  Lemma fetch_fn_name offset (fn : otbn_function) :
     fetch_fn fn (fst (fst fn), offset) = nth_error (snd fn) offset.
   Proof.
     cbv [fetch_fn get_label_offset]. cbn [fst snd].
@@ -1684,7 +1819,7 @@ Section BuildProofs.
              | _ => progress subst                           
              end.
       eapply IHfns1; eauto; [ ].
-      cbv [function] in *; destruct_products; cbn [fst snd] in *.
+      cbv [otbn_function] in *; destruct_products; cbn [fst snd] in *.
       lazymatch goal with H : link' _ _ _ = _ |- _ => apply link'_length in H end.
       cbn [fst snd] in *. lia. }
   Qed.
@@ -2043,6 +2178,57 @@ Section BuildProofs.
            end.
   Qed.
 
+  Lemma wide_word_load_weaken dmem addr P Q :
+    wide_word_load (T:=Prop) dmem addr P ->
+    (forall x, P x -> Q x) ->
+    wide_word_load (T:=Prop) dmem addr Q.
+  Proof.
+    cbv [wide_word_load]; intros.
+    repeat (eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros).
+    eauto.
+  Qed.
+
+  Lemma wide_word_store_weaken dmem addr v P Q :
+    wide_word_store (T:=Prop) dmem addr v P ->
+    (forall x, P x -> Q x) ->
+    wide_word_store (T:=Prop) dmem addr v Q.
+  Proof.
+    cbv [wide_word_store]; intros.
+    repeat (eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros).
+    eauto.
+  Qed.
+
+  Lemma lookup_wdr_weaken i P Q :
+    lookup_wdr (T:=Prop) i P ->
+    (forall x, P x -> Q x) ->
+    lookup_wdr (T:=Prop) i Q.
+  Proof.
+    cbv [lookup_wdr]; intros.
+    repeat destruct_one_match; eauto.
+  Qed.
+
+  Lemma read_wdr_indirect_weaken i wregs P Q :
+    read_wdr_indirect (T:=Prop) i wregs P ->
+    (forall x, P x -> Q x) ->
+    read_wdr_indirect (T:=Prop) i wregs Q.
+  Proof.
+    cbv [read_wdr_indirect]; intros.
+    eapply lookup_wdr_weaken; [ eassumption | ].
+    cbv beta; intros.
+    eapply read_wdr_weaken; eauto.
+  Qed.
+
+  Lemma write_wdr_indirect_weaken i wregs v P Q :
+    write_wdr_indirect (T:=Prop) i wregs v P ->
+    (forall x, P x -> Q x) ->
+    write_wdr_indirect (T:=Prop) i wregs v Q.
+  Proof.
+    cbv [write_wdr_indirect]; intros.
+    eapply lookup_wdr_weaken; [ eassumption | ].
+    cbv beta; intros.
+    eapply write_wdr_weaken; eauto.
+  Qed.
+
   Lemma strt1_weaken regs wregs flags dmem i P Q :
     strt1 regs wregs flags dmem i P ->
     (forall regs wregs flags dmem, P regs wregs flags dmem -> Q regs wregs flags dmem) ->
@@ -2078,6 +2264,15 @@ Section BuildProofs.
             eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- update_mlz _ _ _ _ =>
             eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
+        | |- wide_word_load _ _ _ =>
+            eapply wide_word_load_weaken; [ eassumption | ]; cbv beta; intros
+        | |- wide_word_store _ _ _ _ =>
+            eapply wide_word_store_weaken; [ eassumption | ]; cbv beta; intros
+        | |- read_wdr_indirect _ _ _ =>
+            eapply read_wdr_indirect_weaken; [ eassumption | ]; cbv beta; intros
+        | |- write_wdr_indirect _ _ _ _ =>
+            eapply write_wdr_indirect_weaken; [ eassumption | ]; cbv beta; intros
+        | |- if ?x then _ else _ => destr x
         | |- Q _ _ _ _ => solve [eauto]
         end.
   Qed.
@@ -2269,7 +2464,7 @@ Section BuildProofs.
             end)
       (seq 0 (length l)).
 
-  Definition find_global_offset (fns : list function) (name : string) : option nat :=
+  Definition find_global_offset (fns : list otbn_function) (name : string) : option nat :=
     match find_index (fun fn => String.eqb name (fst (fst fn))) fns with
     | Some idx => Some (program_size 0%nat (firstn idx fns))
     | None => None
@@ -2321,9 +2516,9 @@ Section BuildProofs.
   Lemma program_size_add :
     forall fns start,
       fold_left
-        (fun offset (fn : function) => (offset + length (snd fn))%nat)
+        (fun offset (fn : otbn_function) => (offset + length (snd fn))%nat)
         fns start = (fold_left
-                       (fun offset (fn : function) => (offset + length (snd fn))%nat)
+                       (fun offset (fn : otbn_function) => (offset + length (snd fn))%nat)
                        fns 0 + start)%nat.
   Proof.
     induction fns; cbn [fold_left]; intros; [ lia | ].
@@ -2789,7 +2984,7 @@ Section Helpers.
     eapply eventually_step; eauto using fetch_weaken_run1.
   Qed.
 
-  Definition function_symbols_disjoint (fn1 fn2 : function) : Prop :=
+  Definition function_symbols_disjoint (fn1 fn2 : otbn_function) : Prop :=
     let name1 := fst (fst fn1) in
     let name2 := fst (fst fn2) in
     let syms1 := snd (fst fn1) in
@@ -3486,12 +3681,12 @@ Module Test.
        add  x5, x2, x3
        ret
    *)
-  Definition add_fn : function :=
+  Definition add_fn : otbn_function :=
     ("add"%string,
       map.empty,
       [(Add x5 x2 x3 : insn);
        (Ret : insn)]).
-  Definition start_fn : function :=
+  Definition start_fn : otbn_function :=
     ("start",
       map.empty,
       [ (Addi x2 x0 2 : insn);
@@ -3517,7 +3712,7 @@ Module Test.
        add  x5, x2, x3
        ret
    *)
-  Definition mul_fn : function :=
+  Definition mul_fn : otbn_function :=
     Eval cbn [List.app length] in (
         let syms := map.empty in
         let body : list insn :=
@@ -3540,7 +3735,7 @@ Module Test.
        sw   x5, 0(x12)
        ret
    *)
-  Definition add_mem_fn : function :=
+  Definition add_mem_fn : otbn_function :=
     ("add_mem",
       map.empty,
       [ (Lw x2 x12 0 : insn);
@@ -3556,7 +3751,7 @@ Module Test.
        bn.add w5, w2, w3
        ret
   *)
-  Definition bignum_add_fn : function :=
+  Definition bignum_add_fn : otbn_function :=
     ("bignum_add"%string,
       map.empty,
       [(Bn_add w5 w2 w3 0 FG0: insn);
@@ -3574,7 +3769,7 @@ Module Test.
        _bignum_mul_end:
        ret
    *)
-  Definition bignum_mul_fn : function :=
+  Definition bignum_mul_fn : otbn_function :=
     Eval cbn [List.app length] in (
         let syms := map.empty in
         let body : list insn :=
@@ -4065,11 +4260,11 @@ Module Test.
   Qed.
 
   (* Test scaling with a large codegen. *)
-  Definition repeat_add (n : nat) : function :=
+  Definition repeat_add (n : nat) : otbn_function :=
     (("add" ++ String.of_nat n)%string,
       map.empty,
       (Addi x2 x0 0 : insn) :: repeat (Add x2 x2 x3 : insn) n ++ [(Ret : insn)]).
-  Definition add100_fn : function := Eval vm_compute in (repeat_add 100).
+  Definition add100_fn : otbn_function := Eval vm_compute in (repeat_add 100).
 
   (* helper lemma *)
   Lemma mul_by_add_step x (a : word32) n :

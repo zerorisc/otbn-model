@@ -93,8 +93,8 @@ Module ExecTest.
 
   (* scaling factor; create a program with ~n instructions *)
   Definition n := 10000.
-  Definition add_fn : function := Eval vm_compute in (Test.repeat_add 10000).
-  Definition start_fn : function :=
+  Definition add_fn : otbn_function := Eval vm_compute in (Test.repeat_add 10000).
+  Definition start_fn : otbn_function :=
     ("start",
       map.empty,
       [ (Addi x3 x0 23 : insn);
