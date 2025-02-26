@@ -187,7 +187,6 @@ Section RegisterEquality.
 
   Definition flag_group_eqb (fg1 fg2 : flag_group) : bool.
   Proof. derive_eqb fg1 fg2. Defined.
-  Print flag.
   Definition flag_eqb (f1 f2 : flag) : bool :=
     match f1, f2 with
     | flagM fg1, flagM fg2 => flag_group_eqb fg1 fg2
@@ -1052,10 +1051,14 @@ Section Semantics.
     end.
 End Semantics.
 
+Module Coercions.
+  Coercion Straightline : sinsn >-> insn.
+  Coercion Control : cinsn >-> insn.
+End Coercions.
+Import Coercions.
+
 Require Import coqutil.Map.SortedListZ.
 Require Import coqutil.Map.SortedListString.
-Local Coercion Straightline : sinsn >-> insn.
-Local Coercion Control : cinsn >-> insn.
 
 (* Contains a way to link programs. *)
 Section Build.           
