@@ -3346,7 +3346,7 @@ Ltac track_registers_init :=
 Ltac update_clobbers k l v H :=  
   let H' := fresh in
   pose proof (clobbers_step_if l k v _ _ H) as H';
-  cbn [existsb orb gpr_eqb csr_eqb reg_eqb wdr_eqb wsr_eqb wreg_eqb flag_group_eqb flag_eqb] in H'.
+  cbn [existsb orb gpr_eqb csr_eqb reg_eqb wdr_eqb wsr_eqb wreg_eqb flag_group_eqb FG0 FG1 flag_eqb] in H'.
 Ltac update_live_registers r k v r' :=
   let Heq := fresh in
   remember (map.put r k v) as r' eqn:Heq;
@@ -3398,24 +3398,37 @@ Ltac track_registers_update_step :=
 Ltac track_registers_update :=
   track_registers_update_step; repeat progress track_registers_update_step.
 
-(* use after a jump to combine the postconditions *)
-Ltac track_registers_combine :=
+Ltac infer_eqb_for_type T :=
+  let eqb_spec := constr:(_:forall x y : T, BoolSpec (x = y) (x <> y) (_ x y)) in
+  let eqb := lazymatch type of eqb_spec with Decidable.EqDecider ?f => f end in
+  eqb.
+Ltac combine_clobbers m2 :=
   lazymatch goal with
-  | H0 : clobbers ?l0 ?regs ?regs0,
-      H1 : clobbers ?l1 ?regs0 ?regs1
-    |- context [otbn_busy _ ?regs1] =>
+  | H0 : clobbers ?l0 ?m0 ?m1, H1 : clobbers ?l1 ?m1 m2 |- _ =>
       repeat lazymatch goal with
-        | H : map.get regs0 ?r = _ |- _ =>
+        | H : map.get m1 ?r = _ |- _ =>
             try (let Hnin := fresh in
                  assert (~ In r l1) as Hnin by (cbv [In]; intuition congruence);
                  pose proof (clobbers_not_in l1 _ _ _ _ H1 H Hnin);
                  clear Hnin);
             clear H
         end;
-      let l2 := (eval vm_compute in (List.dedup reg_eqb (l0 ++ l1))) in
-      pose proof (clobbers_trans_dedup (key_eqb:=reg_eqb)
+      let T := lazymatch type of l0 with list ?T => T end in
+      let eqb := infer_eqb_for_type T in
+      let l2 := (eval vm_compute in (List.dedup eqb (l0 ++ l1))) in
+      pose proof (clobbers_trans_dedup (key_eqb:=eqb)
                     _ _ l2 _ _ _ H0 H1 ltac:(reflexivity));
-      clear H0 H1; try clear regs0
+      clear H0 H1; try clear m1
+  | _ => idtac
+  end.
+
+(* use after a jump to combine the postconditions *)
+Ltac track_registers_combine :=
+  lazymatch goal with
+  | |- context [otbn_busy _ ?regs ?wregs ?flags] =>
+      combine_clobbers regs;
+      combine_clobbers wregs;
+      combine_clobbers flags
   end.
 
 Ltac check_register_tracking :=
@@ -3620,13 +3633,12 @@ Module Test.
         "add"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
            map.get regs' (gpreg x5) = Some (word.add a b)
-           (* note: no guarantees about flags *)
            /\ dmem' = dmem
+           /\ clobbers [] flags flags'
            /\ clobbers [] wregs wregs'
            /\ clobbers [gpreg x5] regs regs').
   Proof.
     cbv [add_fn returns]. intros; subst.
-    Print track_registers_init.
     track_registers_init.
     
     eapply eventually_step.
@@ -3634,8 +3646,9 @@ Module Test.
     intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | ].
+    ssplit; try reflexivity; [ | | | ].
     { solve_map. }
+    { assumption. }
     { assumption. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
@@ -3654,8 +3667,8 @@ Module Test.
         (fetch:=fetch_ctx [add_mem_fn])
         "add_mem"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           (* note: no guarantees about flags or specific register values *)
            (ptsto pa (word.add a b) * Ra)%sep dmem'
+           /\ clobbers [] flags flags'
            /\ clobbers [] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x3; gpreg x5] regs regs').
   Proof.
@@ -3679,8 +3692,9 @@ Module Test.
     intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | ].
+    ssplit; try reflexivity; [ | | | ].
     { eauto using sep_put. }
+    { assumption. }
     { assumption. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
@@ -3741,6 +3755,7 @@ Module Test.
            /\ map.get regs' (gpreg x3) = Some a
            /\ map.get regs' (gpreg x4) = Some b
            /\ dmem' = dmem
+           /\ clobbers [] flags flags'
            /\ clobbers [] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x5] regs regs').
     { reflexivity. }
@@ -3788,24 +3803,22 @@ Module Test.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
-        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ | ].
-        { simplify_side_condition; subst_lets; zsimplify.
-          cbv [addi_spec]. destruct_one_match; try lia.
-          apply f_equal. ring. }
-        { eapply (clobbers_trans nil nil); eassumption. } }
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ ].
+        simplify_side_condition; subst_lets; zsimplify.
+        cbv [addi_spec]. destruct_one_match; try lia.
+        apply f_equal. ring. }
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
-        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ | ].
-        { simplify_side_condition. subst_lets; zsimplify.
-          cbv [addi_spec]. destruct_one_match; try lia.
-          apply f_equal.
-          replace (word.of_Z (Z.of_nat (S (S i))))
-            with (word.add (word:=word32) (word.of_Z (Z.of_nat (S i))) (word.of_Z 1));
-            [ ring | ].
-          apply word.unsigned_inj.
-          rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap, word.unsigned_of_Z by lia.
-          rewrite Z.add_1_r, <-Nat2Z.inj_succ. reflexivity. }
-        { eapply (clobbers_trans nil nil); eassumption. } } }
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ ].
+        simplify_side_condition. subst_lets; zsimplify.
+        cbv [addi_spec]. destruct_one_match; try lia.
+        apply f_equal.
+        replace (word.of_Z (Z.of_nat (S (S i))))
+          with (word.add (word:=word32) (word.of_Z (Z.of_nat (S i))) (word.of_Z 1));
+          [ ring | ].
+        apply word.unsigned_inj.
+        rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap, word.unsigned_of_Z by lia.
+        rewrite Z.add_1_r, <-Nat2Z.inj_succ. reflexivity. } }
  
     (* invariant implies postcondition (i.e. post-loop code) *)
     zsimplify. rewrite word.sub_0_r. intros.
@@ -3852,6 +3865,143 @@ Module Test.
       cbv. tauto. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
+  Qed.
+
+  Lemma word_xor_same {width : Z} {word : word width} {word_ok : word.ok word} :
+    forall x : word, word.xor x x = word.of_Z 0.
+  Proof.
+    intros. apply word.unsigned_inj.
+    rewrite word.unsigned_xor, word.unsigned_of_Z_0.
+    rewrite Z.lxor_nilpotent. pose proof word.modulus_pos.
+    apply Z.mod_0_l. lia.
+  Qed.
+
+  Lemma bignum_mul_correct :
+    forall regs wregs flags dmem cstack lstack (a v : word256) (b: word32),
+      map.get wregs (wdreg w2) = Some v -> (* ignored, xored *)
+      map.get wregs (wdreg w3) = Some a ->
+      map.get regs (gpreg x4) = Some b ->
+      (length cstack < 8)%nat ->
+      (length lstack < 8)%nat ->
+      returns
+        (fetch:=fetch_ctx [bignum_mul_fn; bignum_add_fn])
+        "bignum_mul"%string regs wregs flags dmem cstack lstack
+        (fun regs' wregs' flags' dmem' =>
+           map.get wregs' (wdreg w2) = Some (word.mul a (word.of_Z (word.unsigned b)))
+           /\ dmem' = dmem
+           /\ clobbers [wdreg w2; wdreg w5] wregs wregs'
+           /\ clobbers [] regs regs').
+  Proof.
+    cbv [bignum_mul_fn returns]. intros; subst.
+    repeat straightline_step.
+ 
+    (* branch; use branch helper lemma *)
+    eapply eventually_beq.
+    { reflexivity. }
+    { simplify_side_condition; reflexivity. }
+    { simplify_side_condition; reflexivity. }
+    { (* case: b = 0, exit early *)
+      intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
+      rewrite word.unsigned_of_Z_0. rewrite word.mul_0_r.
+      ssplit; try reflexivity; [ | | ].
+      { (* result value *)
+        solve_map; subst_lets.
+        rewrite word_xor_same. reflexivity. }
+      { eapply clobbers_incl; eauto.
+        cbv [incl In]; tauto. }
+      { assumption. } }
+    (* case: b <> 0, proceed *)
+    intros; subst.
+
+    pose proof (word.unsigned_range b).
+    assert (0 < word.unsigned b).
+    { lazymatch goal with H : b <> word.of_Z 0 |- _ =>
+                            apply word.unsigned_inj' in H end.
+      rewrite word.unsigned_of_Z_0 in *.
+      lia. }
+ 
+    (* loop; use loop invariant lemma *)
+    let loop_end_pc := find_loop_end in
+    eapply loop_invariant
+      with
+      (end_pc:=loop_end_pc)
+      (invariant :=
+         fun i regs' wregs' flags' dmem' =>
+           map.get wregs' (wdreg w2) = Some (word.mul a (word.sub (word.of_Z (word.unsigned b)) (word.of_Z (Z.of_nat i))))
+           /\ map.get wregs' (wdreg w3) = Some a
+           /\ map.get regs' (gpreg x4) = Some b
+           /\ dmem' = dmem
+           /\ clobbers [wdreg w2; wdreg w5] wregs wregs'
+           /\ clobbers [] regs regs').
+    { reflexivity. }
+    { reflexivity. }
+    { simplify_side_condition; reflexivity. }
+    { apply Z2Nat.id; lia. }
+    { lia. }
+    { lia. }
+    { (* prove invariant holds at start *)
+      ssplit; simplify_side_condition; zsimplify; try reflexivity.
+      { (* accumulator value *)
+        subst_lets. apply f_equal. rewrite word_xor_same.
+        ring. }
+      { (* clobbered registers *)
+        eapply clobbers_incl; eauto. cbv [incl In]; tauto. } }
+    { (* invariant step; proceed through loop and prove invariant still holds *)
+      intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+
+      (* helper assertion that mul and add don't share symbols *)
+      assert (function_symbols_disjoint bignum_add_fn bignum_mul_fn).
+      { cbv [function_symbols_disjoint]; cbn [bignum_add_fn bignum_mul_fn fst snd].
+        ssplit; solve_map; try congruence; [ ].
+        cbv [map.disjoint]; intros *. rewrite map.get_empty; congruence. }
+
+      (* jump to "bignum_add" function *)
+      eapply eventually_jump.
+      { reflexivity. }
+      { lia. }
+      { apply bignum_add_correct; eauto. }
+      { intros.
+        rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+        eapply fetch_fn_disjoint; eauto; [ ].
+        eapply fetch_ctx_singleton_iff; eauto. }
+
+      (* post-jump; continue *)
+      cbv beta. intros; subst.
+      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      track_registers_combine.
+
+      repeat straightline_step.
+
+      (* end of loop; use loop-end helper lemma *)
+      eapply eventually_loop_end; [ reflexivity .. | ].
+      destruct_one_match.
+      { (* case: i = 0, loop ends *)
+        intros; subst. eapply eventually_done.
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ ].
+        simplify_side_condition; subst_lets; zsimplify.
+        apply f_equal. ring. }
+      { (* case: 0 < i, loop continues *)
+        intros; subst. eapply eventually_done.
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ ].
+        simplify_side_condition. subst_lets; zsimplify.
+        apply f_equal.
+        replace (word.of_Z (width:=256) (Z.of_nat (S (S i))))
+          with (word.add (width:=256) (word.of_Z (Z.of_nat (S i))) (word.of_Z 1));
+          [ ring | ].
+        apply word.unsigned_inj.
+        rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
+        cbv [word.wrap]. rewrite Z.mod_small by lia. lia. } }
+ 
+    (* invariant implies postcondition (i.e. post-loop code) *)
+    zsimplify. rewrite word.sub_0_r. intros.
+    repeat lazymatch goal with
+           | H : _ /\ _ |- _ => destruct H
+           | H : Some _ = Some _ |- _ => inversion H; clear H; subst
+           end.
+    simplify_side_condition.
+    repeat straightline_step.
+    intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
+    ssplit; eauto.
   Qed.
 
   Lemma prog0_correct_prelink regs wregs flags dmem :
