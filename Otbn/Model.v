@@ -566,50 +566,49 @@ Section Semantics.
       option_bind (map.get flags f)
         ("Flag " ++ flag_to_string f ++ " read but not set") P.
 
-    Definition lookup_wdr (i : word32) (P : wdr -> T) : T :=
-      let i := Z.to_nat (word.unsigned (word.and i (word.of_Z 31))) in
+    Definition lookup_wdr' (i : nat) : wdr :=
       (match i with
-       | 0 => P w0
-       | 1 => P w1
-       | 2 => P w2
-       | 3 => P w3
-       | 4 => P w4
-       | 5 => P w5
-       | 6 => P w6
-       | 7 => P w7
-       | 8 => P w8
-       | 9 => P w9
-       | 10 => P w10
-       | 11 => P w11
-       | 12 => P w12
-       | 13 => P w13
-       | 14 => P w14
-       | 15 => P w15
-       | 16 => P w16
-       | 17 => P w17
-       | 18 => P w18
-       | 19 => P w19
-       | 20 => P w20
-       | 21 => P w21
-       | 22 => P w22
-       | 23 => P w23
-       | 24 => P w24
-       | 25 => P w25
-       | 26 => P w26
-       | 27 => P w27
-       | 28 => P w28
-       | 29 => P w29
-       | 30 => P w30
-       | 31 => P w31
-       | _ => err ("Invalid wide register lookup: " ++ HexString.of_nat i)
+       | 0 => w0
+       | 1 => w1
+       | 2 => w2
+       | 3 => w3
+       | 4 => w4
+       | 5 => w5
+       | 6 => w6
+       | 7 => w7
+       | 8 => w8
+       | 9 => w9
+       | 10 => w10
+       | 11 => w11
+       | 12 => w12
+       | 13 => w13
+       | 14 => w14
+       | 15 => w15
+       | 16 => w16
+       | 17 => w17
+       | 18 => w18
+       | 19 => w19
+       | 20 => w20
+       | 21 => w21
+       | 22 => w22
+       | 23 => w23
+       | 24 => w24
+       | 25 => w25
+       | 26 => w26
+       | 27 => w27
+       | 28 => w28
+       | 29 => w29
+       | 30 => w30
+       | 31 => w31
+       | _ => w0 (* unreachable *)
        end)%nat.
+    Definition lookup_wdr (i : word32) : wdr :=
+      let i := Z.to_nat (word.unsigned (word.and i (word.of_Z 31))) in
+      lookup_wdr' i.
 
     Definition read_wdr_indirect
       (i : word32) (wregs : wregfile) (P : word256 -> T) : T :=
-      lookup_wdr i
-        (fun w =>
-           read_wdr wregs w P).
-                     
+      read_wdr wregs (lookup_wdr i) P.                     
 
     Definition read_flag_group (group : flag_group) (flags : flagfile) (P : word32 -> T) : T :=
       read_flag flags (flagM group)
@@ -683,8 +682,7 @@ Section Semantics.
 
     Definition write_wdr_indirect
       (i : word32) (wregs : wregfile) (v : word256) (P : wregfile -> T) : T :=
-      lookup_wdr i
-        (fun w => write_wdr wregs w v P).
+      write_wdr wregs (lookup_wdr i) v P.
 
     Definition extract_flag (v : word32) (f : flag) (P : bool -> T) : T :=
       match f with
@@ -2195,36 +2193,17 @@ Section BuildProofs.
            end.
   Qed.
 
-  Lemma lookup_wdr_weaken i P Q :
-    lookup_wdr (T:=Prop) i P ->
-    (forall x, P x -> Q x) ->
-    lookup_wdr (T:=Prop) i Q.
-  Proof.
-    cbv [lookup_wdr]; intros.
-    repeat destruct_one_match; eauto.
-  Qed.
-
   Lemma read_wdr_indirect_weaken i wregs P Q :
     read_wdr_indirect (T:=Prop) i wregs P ->
     (forall x, P x -> Q x) ->
     read_wdr_indirect (T:=Prop) i wregs Q.
-  Proof.
-    cbv [read_wdr_indirect]; intros.
-    eapply lookup_wdr_weaken; [ eassumption | ].
-    cbv beta; intros.
-    eapply read_wdr_weaken; eauto.
-  Qed.
+  Proof. eapply read_wdr_weaken; eauto. Qed.
 
   Lemma write_wdr_indirect_weaken i wregs v P Q :
     write_wdr_indirect (T:=Prop) i wregs v P ->
     (forall x, P x -> Q x) ->
     write_wdr_indirect (T:=Prop) i wregs v Q.
-  Proof.
-    cbv [write_wdr_indirect]; intros.
-    eapply lookup_wdr_weaken; [ eassumption | ].
-    cbv beta; intros.
-    eapply write_wdr_weaken; eauto.
-  Qed.
+  Proof. eapply write_wdr_weaken; eauto. Qed.
 
   Lemma strt1_weaken regs wregs flags dmem i P Q :
     strt1 regs wregs flags dmem i P ->
@@ -3626,6 +3605,31 @@ Section Helpers.
     load_word dmem addr P.
   Proof. intros; eapply load_word_step; eauto. Qed.
 
+  Lemma read_wdr_indirect_step i wregs (P : _ -> Prop) :
+    (exists w, lookup_wdr i = w /\ read_wdr wregs w P) ->
+    read_wdr_indirect i wregs P.
+  Proof. cbv [read_wdr_indirect]; intros [? [? ?]]. subst. eauto. Qed.
+
+  Lemma write_wdr_indirect_step i wregs v (P : _ -> Prop) :
+    (exists w, lookup_wdr i = w /\ write_wdr wregs w v P) ->
+    write_wdr_indirect i wregs v P.
+  Proof. cbv [write_wdr_indirect]; intros [? [? ?]]. subst. eauto. Qed.
+  
+
+  Lemma lookup_wdr_li imm :
+    0 <= imm < 32 ->
+    lookup_wdr (addi_spec (word.of_Z 0) imm) = lookup_wdr' (Z.to_nat imm).
+  Proof.
+    cbv [lookup_wdr addi_spec]; intros.
+    destruct_one_match; try lia; [ ]. do 2 apply f_equal.
+    rewrite word.add_0_l.
+    rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
+    change 31 with (Z.ones 5).
+    rewrite Z.land_ones by lia. change (2^5) with 32.
+    rewrite Z.mod_small by lia. cbv [word.wrap].
+    apply Z.mod_small; lia.
+  Qed.
+
   Definition start_state (dmem : mem) : otbn_state :=
     otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty dmem [] [].
 End Helpers.
@@ -3640,6 +3644,7 @@ Ltac solve_is_word_aligned t :=
   | _ => t
   end.
 
+Search write_wdr_indirect.
 Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
@@ -3671,14 +3676,32 @@ Ltac simplify_side_condition_step :=
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
-| |- @store_word _ _ _ _ 32 _ _ _ _ _ =>
-    eapply store_word32_step; [ assumption | lia | eassumption | ]
-| |- @load_word _ _ _ _ 32 _ _ _ _ =>
-    eapply load_word32_step; [ assumption | lia | eassumption | ]
-| |- @store_word _ _ _ _ 256 _ _ _ _ _ =>
-    eapply store_word256_step; [ assumption | lia | eassumption | ]
-| |- @load_word _ _ _ _ 256 _ _ _ _ =>
-    eapply load_word256_step; [ assumption | lia | eassumption | ]
+  | H : sep (word_at ?a _) _ ?m |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
+      eapply store_word32_step; [ assumption | lia | eapply H | ]
+  | H : sep (word_at ?a _) _ ?m |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
+      eapply load_word32_step; [ assumption | lia | eapply H | ]
+  | H : sep (word_at ?a _) _ ?m |- @store_word _ _ _ _ 256 _ ?m ?a _ _ =>
+      eapply store_word256_step; [ assumption | lia | eapply H | ]
+  | H : sep (word_at ?a _) _ ?m |- @load_word _ _ _ _ 256 _ ?m ?a _ =>
+      eapply load_word256_step; [ assumption | lia | eapply H | ]
+  | |- read_wdr_indirect ?v _ _ =>
+      eapply read_wdr_indirect_step; eexists;
+      (* when the indirect register value is supplied as an li immediate, compute it *)
+      try (split; [ apply lookup_wdr_li; lia | ];
+           lazymatch goal with
+             |- context[lookup_wdr' (Z.to_nat ?i)] =>
+               let x := eval vm_compute in (lookup_wdr' (Z.to_nat i)) in
+                 change (lookup_wdr' (Z.to_nat i)) with x
+           end)
+  | |- write_wdr_indirect ?v _ _ _ =>
+      eapply write_wdr_indirect_step; eexists;
+      (* when the indirect register value is supplied as an li immediate, compute it *)
+      try (split; [ apply lookup_wdr_li; lia | ];
+           lazymatch goal with
+             |- context[lookup_wdr' (Z.to_nat ?i)] =>
+               let x := eval vm_compute in (lookup_wdr' (Z.to_nat i)) in
+                 change (lookup_wdr' (Z.to_nat i)) with x
+           end)
   | |- (_ < _) => lia
   | |- (_ <= _) => lia                                   
   | |- (_ < _)%nat => lia
@@ -3693,7 +3716,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value]
+               | progress cbv [gpr_has_value write_wdr]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -4469,22 +4492,22 @@ Module Test.
     ssplit; eauto.
   Qed.
 
-  Check map.of_list_word_at.
-  Print wide_word_load.  
   Lemma bignum_add_mem_correct :
-    forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
-      is_valid_wide_addr pa = true ->
-      is_valid_wide_addr pb = true ->
+    forall regs wregs flags dmem cstack lstack (a b : word256) pa pb Ra Rb,
+      is_word_aligned 256 pa = true ->
+      is_word_aligned 256 pb = true ->
+      word.unsigned pa + 32 < DMEM_BYTES ->
+      word.unsigned pb + 32 < DMEM_BYTES ->
       map.get regs (gpreg x12) = Some pa ->
       map.get regs (gpreg x13) = Some pb ->
       (* note: the separation-logic setup does not require the operands to be disjoint *)
-      (ptsto pa a * Ra)%sep dmem ->
-      (ptsto pb b * Rb)%sep dmem ->
+      (word_at pa a * Ra)%sep dmem ->
+      (word_at pb b * Rb)%sep dmem ->
       returns
         (fetch:=fetch_ctx [bignum_add_mem_fn])
         "bignum_add_mem"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           (ptsto pa (word.add a b) * Ra)%sep dmem'
+           (word_at pa (word.add a b) * Ra)%sep dmem'
            /\ clobbers [flagM FG0; flagL FG0; flagZ FG0; flagC FG0] flags flags'
            /\ clobbers [wdreg w2; wdreg w3] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x3] regs regs').
@@ -4492,25 +4515,36 @@ Module Test.
     cbv [bignum_add_mem_fn returns]. intros; subst.
     track_registers_init.
     
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition.
-      
-      
-      apply eq_refl. }
+
+    eapply eventually_step_cps.
+    simplify_side_condition.    
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+
+    eapply eventually_step_cps.
+    simplify_side_condition.    
     intros; subst.
     track_registers_update.
+
+    eapply eventually_step_cps.
+    simplify_side_condition.    
+    intros; subst.
+    track_registers_update.
+
+    eapply eventually_step_cps.
+    simplify_side_condition.    
+    intros; subst.
+    track_registers_update.
+
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ | | | ].
     { eauto using sep_put. }
@@ -4521,7 +4555,6 @@ Module Test.
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
   Qed.
-
 
   Lemma prog0_correct_prelink regs wregs flags dmem :
     exits
