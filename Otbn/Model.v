@@ -15,6 +15,7 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.LittleEndianList.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
+Require Import coqutil.Z.ZLib.
 Require Coq.Strings.HexString.
 Import ListNotations.
 Local Open Scope Z_scope.
@@ -3455,6 +3456,22 @@ Section Helpers.
     rewrite map.get_of_list_word_at, nth_error_None.
     rewrite Nat2Z.inj_le, ?Znat.Z2Nat.id; intuition.
   Qed.
+
+  Lemma map_of_list_word_at_get_pred {width} {word : word width} {word_ok : word.ok word}
+    {value : Type} {map : map.map word value} {map_ok : map.ok map}
+    (addr : word) (vs : list value) :
+    Z.of_nat (length vs) < 2^width ->
+    map.get (map.of_list_word_at (word.add addr (word.of_Z 1)) vs) addr = None.
+  Proof.
+    intros; pose proof word.width_pos.
+    pose proof proj1 (Z.pow_gt_1 2 width ltac:(lia)) ltac:(lia).
+    eapply map_get_of_list_word_at_None. right.
+    rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
+    cbv [word.wrap]. Z.push_pull_mod.
+    rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
+    rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
+    rewrite Z.mod_small by lia. lia.
+  Qed.
     
   Lemma store_bytes_step dmem addr (bs : list byte) (P : mem -> Prop) old_bs R :
     word.unsigned addr + Z.of_nat (length bs) < DMEM_BYTES ->
@@ -3498,19 +3515,9 @@ Section Helpers.
         end.
     { apply sep_assoc, sep_comm. eapply sep_put.
       use_sep_assumption. rewrite put_iff1; [ ecancel | ].
-      eapply map_get_of_list_word_at_None. right.
-      rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
-      cbv [word.wrap]. Z.push_pull_mod.
-      rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
-      rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
-      rewrite Z.mod_small by lia. lia. }
+      eapply map_of_list_word_at_get_pred. lia. }
     { seprewrite put_iff1; [ | use_sep_assumption; ecancel ].
-      eapply map_get_of_list_word_at_None. right.
-      rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
-      cbv [word.wrap]. Z.push_pull_mod.
-      rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
-      rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
-      rewrite Z.mod_small by lia. lia. }
+      eapply map_of_list_word_at_get_pred. lia. }
   Qed.
   
   Lemma store_word_step
@@ -3533,6 +3540,91 @@ Section Helpers.
     { intros. lazymatch goal with H : forall m, _ -> P m |- P _ => apply H end.
       use_sep_assumption. cbv [word_at]. ecancel. }
   Qed.
+  
+  Lemma store_word32_step
+    dmem addr (v old_v : word32) (P : mem -> Prop) R :
+    is_word_aligned 32 addr = true ->
+    word.unsigned addr + 4 < DMEM_BYTES ->
+    (word_at addr old_v * R)%sep dmem ->
+    (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
+    store_word dmem addr v P.
+  Proof.  intros; eapply store_word_step; eauto. Qed.
+  
+  Lemma store_word256_step
+    dmem addr (v old_v : word256) (P : mem -> Prop) R :
+    is_word_aligned 256 addr = true ->
+    word.unsigned addr + 32 < DMEM_BYTES ->
+    (word_at addr old_v * R)%sep dmem ->
+    (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
+    store_word dmem addr v P.
+  Proof.  intros; eapply store_word_step; eauto. Qed.
+
+  Lemma load_bytes_step dmem addr bs len (P : _ -> Prop) R :
+    word.unsigned addr + Z.of_nat len < DMEM_BYTES ->
+    (bytes_at addr bs * R)%sep dmem ->
+    length bs = len ->
+    P bs ->
+    load_bytes dmem addr len P.
+  Proof.
+    assert (DMEM_BYTES < 2^32) by (cbv [DMEM_BYTES]; lia).
+    generalize dependent addr. generalize dependent bs. generalize dependent P.
+    generalize dependent R.
+    induction len; destruct bs; cbn [load_bytes length] in *; try lia; eauto; [ ].
+    intros. cbv [load_byte]. destruct_one_match; try lia; [ ].
+    cbn [option_bind proof_semantics].
+    pose proof word.unsigned_range addr.
+    lazymatch goal with
+      | H : sep (eq (map.of_list_word_at _ (_ :: _))) _ _ |- _ =>
+          rewrite map.of_list_word_at_cons in H;
+          seprewrite_in put_iff1 H
+    end; [ | ].
+    { eapply map_of_list_word_at_get_pred. lia. }
+    { eexists.
+      ssplit; [ eapply get_sep; use_sep_assumption; ecancel | ].
+      eapply IHlen with (R:=sep _ R); try eassumption; try lia; [ | ].
+      { rewrite word.unsigned_add, word.unsigned_of_Z_1.
+        cbv [word.wrap]. rewrite Z.mod_small by lia. lia. }
+      { use_sep_assumption. ecancel. } }
+  Qed.
+
+  Lemma load_word_step
+    {width} {word : word.word width} {word_ok : word.ok word}
+    dmem addr (v : word) (P : _ -> Prop) R :
+    width mod 8 = 0 ->
+    is_word_aligned width addr = true ->
+    word.unsigned addr + width / 8 < DMEM_BYTES ->
+    (word_at addr v * R)%sep dmem ->
+    P v ->
+    load_word dmem addr P.
+  Proof.
+    intros. pose proof word.width_pos (word:=word).
+    cbv [load_word]. destruct_one_match; [ | congruence ].
+    eapply load_bytes_step.
+    { rewrite Z2Nat.id by (apply Z.div_pos; lia). lia. }
+    { use_sep_assumption. cbv [word_at]. ecancel. }
+    { rewrite !length_le_split. reflexivity. }
+    { intros. pose proof Z.div_pos width 8 ltac:(lia) ltac:(lia).
+      rewrite le_combine_split. rewrite Z2Nat.id by lia.
+      rewrite Z.div_mul_undo by lia.
+      rewrite Z.mod_small by (apply word.unsigned_range).
+      rewrite word.of_Z_unsigned. assumption. }
+  Qed.
+
+  Lemma load_word32_step dmem addr (v :word32) (P : _ -> Prop) R :
+    is_word_aligned 32 addr = true ->
+    word.unsigned addr + 4 < DMEM_BYTES ->
+    (word_at addr v * R)%sep dmem ->
+    P v ->
+    load_word dmem addr P.
+  Proof. intros; eapply load_word_step; eauto. Qed.
+
+  Lemma load_word256_step dmem addr (v :word256) (P : _ -> Prop) R :
+    is_word_aligned 256 addr = true ->
+    word.unsigned addr + 32 < DMEM_BYTES ->
+    (word_at addr v * R)%sep dmem ->
+    P v ->
+    load_word dmem addr P.
+  Proof. intros; eapply load_word_step; eauto. Qed.
 
   Definition start_state (dmem : mem) : otbn_state :=
     otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty dmem [] [].
@@ -3552,6 +3644,7 @@ Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
   | |- _ /\ _ => split
+  | |- context [word.add ?a (word.of_Z 0)] => rewrite (word.add_0_r a)
   | |- context [if is_valid_addi_imm ?v then _ else _] =>
         replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
   | |- context [if is_valid_bn_imm ?v then _ else _] =>
@@ -3578,9 +3671,14 @@ Ltac simplify_side_condition_step :=
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
-  | H : is_word_aligned ?width ?a = true
-    |- context [is_word_aligned ?width (word.add ?a (word.of_Z 0))] =>
-      rewrite (word.add_0_r a); rewrite H
+| |- @store_word _ _ _ _ 32 _ _ _ _ _ =>
+    eapply store_word32_step; [ assumption | lia | eassumption | ]
+| |- @load_word _ _ _ _ 32 _ _ _ _ =>
+    eapply load_word32_step; [ assumption | lia | eassumption | ]
+| |- @store_word _ _ _ _ 256 _ _ _ _ _ =>
+    eapply store_word256_step; [ assumption | lia | eassumption | ]
+| |- @load_word _ _ _ _ 256 _ _ _ _ =>
+    eapply load_word256_step; [ assumption | lia | eassumption | ]
   | |- (_ < _) => lia
   | |- (_ <= _) => lia                                   
   | |- (_ < _)%nat => lia
@@ -3971,9 +4069,9 @@ Module Test.
     eapply eventually_step_cps.
     simplify_side_condition.
     eapply store_word_step.
-    { rewrite word.add_0_l; apply is_word_aligned_0. lia. }
-    { rewrite word.add_0_l, word.unsigned_of_Z_0. vm_compute; reflexivity. }
-    { rewrite word.add_0_l. use_sep_assumption. ecancel. }
+    { apply is_word_aligned_0. lia. }
+    { rewrite word.unsigned_of_Z_0. vm_compute; reflexivity. }
+    { use_sep_assumption. ecancel. }
     intros.
     eapply eventually_step_cps.
     simplify_side_condition.
@@ -4023,6 +4121,8 @@ Module Test.
     forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
       is_word_aligned 32 pa = true ->
       is_word_aligned 32 pb = true ->
+      word.unsigned pa + 4 < DMEM_BYTES ->
+      word.unsigned pb + 4 < DMEM_BYTES ->
       map.get regs (gpreg x12) = Some pa ->
       map.get regs (gpreg x13) = Some pb ->
       (* note: the separation-logic setup does not require the operands to be disjoint *)
@@ -4042,21 +4142,18 @@ Module Test.
  
     eapply eventually_step_cps.
     simplify_side_condition.
-    (* TODO: load_word_step *)
-    (* TODO: move store_word_step to helpers and add to simplify_side_condition *)
-    { simplify_side_condition. apply eq_refl. }
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
