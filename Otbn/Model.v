@@ -1,4 +1,5 @@
 Require Import Coq.Strings.String.
+Require Import Coq.Init.Byte.
 Require Import Coq.Init.Datatypes.
 Require Import Coq.Lists.List.
 Require Import Coq.micromega.Lia.
@@ -11,6 +12,7 @@ Require Import coqutil.Map.Separation.
 Require Import coqutil.Map.SeparationLogic.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
+Require Import coqutil.Word.LittleEndianList.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
 Require Coq.Strings.HexString.
@@ -19,7 +21,6 @@ Local Open Scope Z_scope.
 
 (*** Model of OTBN. ***)
 
-(* Size of DMEM. *)
 Definition DMEM_BYTES := 8192.
 
 Section Registers.
@@ -493,7 +494,7 @@ Section Semantics.
   Context {regfile : map.map reg word32}
     {wregfile : map.map wreg word256}
     {flagfile : map.map flag bool}
-    {mem : map.map word32 word32}
+    {mem : map.map word32 byte}
     {fetch : label * nat -> option (insn (label:=label))}.
 
   Definition advance_pc (pc : label * nat) := (fst pc, S (snd pc)).
@@ -506,12 +507,8 @@ Section Semantics.
     (-2048 <=? imm) && (imm <=? 2047).
   Definition is_valid_wide_mem_offset (imm : Z) : bool :=
     (-16384 <=? imm) && (imm <=? 16352) && (imm mod 32 =? 0).
-  Definition is_valid_addr (addr : word32) : bool :=
-    word.eqb (word.of_Z 0) (word.and addr (word.of_Z 3))
-    && (word.unsigned addr + 4 <? DMEM_BYTES).
-  Definition is_valid_wide_addr (addr : word32) : bool :=
-    word.eqb (word.of_Z 0) (word.and addr (word.of_Z 31))
-    && (word.unsigned addr + 32 <? DMEM_BYTES).
+  Definition is_word_aligned width (addr : word32) : bool :=
+    word.eqb (word.of_Z 0) (word.and addr (word.of_Z (Z.ones width))).
   Definition is_valid_shift_imm (imm : Z) : bool :=
     (0 <=? imm) && (imm <=? 248) && (imm mod 8 =? 0).
 
@@ -647,12 +644,28 @@ Section Semantics.
       | CSR_URND => urandom P
       end.
 
-    Definition read_mem (dmem : mem) (addr : word32) (P : word32 -> T) : T :=
-      if is_valid_addr addr
-      then option_bind (map.get dmem addr)
-             ("Memory address " ++ HexString.of_Z (word.unsigned addr) ++ " read but not set.")
-             P
-      else err ("Memory read from invalid address: " ++ HexString.of_Z (word.unsigned addr)).
+    Definition load_byte (dmem : mem) (addr : word32) (P : byte -> T) : T :=
+      if word.unsigned addr <? DMEM_BYTES
+      then 
+        option_bind (map.get dmem addr)
+          ("Memory address " ++ HexString.of_Z (word.unsigned addr) ++ " read but not set.")
+          P
+      else err ("Load from out-of-bounds address: " ++ HexString.of_Z (word.unsigned addr)).
+
+    Fixpoint load_bytes (dmem : mem) (addr : word32) (len : nat) (P : list byte -> T) : T :=
+      match len with
+      | 0%nat => P []
+      | S len =>
+          load_byte dmem addr
+            (fun b =>
+               load_bytes dmem (word.add addr (word.of_Z 1)) len (fun bs => P (b :: bs)))
+      end.      
+
+    Definition load_word {width} {word : word.word width}
+      (dmem : mem) (addr : word32) (P : word -> T) : T :=
+      if is_word_aligned width addr
+      then load_bytes dmem addr (Z.to_nat (width / 8)) (fun bs => P (word.of_Z (le_combine bs)))
+      else err ("Attempt to load word from unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
 
     Definition write_gpr (regs : regfile) (r : gpr) (v : word32) (P : regfile -> T) : T :=
       match r with
@@ -718,68 +731,31 @@ Section Semantics.
       | CSR_URND => P regs flags (* writes ignored *)
       end.
 
-    Definition write_mem (dmem : mem) (addr v : word32) (P : mem -> T) : T :=
-      if is_valid_addr addr
+    Definition store_byte (dmem : mem) (addr : word32) (v : byte) (P : mem -> T) : T :=
+      if word.unsigned addr <? DMEM_BYTES
       then P (map.put dmem addr v)
-      else err ("Memory write to invalid address: " ++ HexString.of_Z (word.unsigned addr)).
+      else err ("Store to out-of-bounds address: " ++ HexString.of_Z (word.unsigned addr)).
 
+    Fixpoint store_bytes (dmem : mem) (addr : word32) (bs : list byte) (P : mem -> T) : T :=
+      match bs with
+      | [] => P dmem
+      | b :: bs =>
+          store_byte dmem addr b
+            (fun dmem =>
+               store_bytes dmem (word.add addr (word.of_Z 1)) bs P)
+      end.
+
+    Definition store_word {width} {word : word.word width}
+      (dmem : mem) (addr : word32) (v : word) (P : mem -> T) : T :=
+      if is_word_aligned width addr
+      then store_bytes dmem addr (le_split (Z.to_nat (width / 8)) (word.unsigned v)) P
+      else err ("Attempt to store word at unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
+ 
     Definition addi_spec (v : word32) (imm : Z) : word32 :=
       if (0 <=? imm)
       then word.add v (word.of_Z imm)
       else word.sub v (word.of_Z imm).
 
-    Definition wide_word_combine (v0 v1 v2 v3 v4 v5 v6 v7: word32) : word256 :=
-      let v := word.unsigned v0 in
-      let v := Z.lor v (Z.shiftl (word.unsigned v1) 32) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v2) 64) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v3) 96) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v4) 128) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v5) 160) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v6) 192) in
-      let v := Z.lor v (Z.shiftl (word.unsigned v7) 224) in
-      word.of_Z v.
-
-    Definition wide_word_store (dmem : mem) (addr : word32) (v : word256) (P : mem -> T) : T :=
-      let v := word.unsigned v in
-      write_mem dmem addr (word.of_Z v)
-        (fun dmem =>
-           write_mem dmem (word.add addr (word.of_Z 4)) (word.of_Z (Z.shiftr v 32))
-             (fun dmem =>
-                write_mem dmem (word.add addr (word.of_Z 8)) (word.of_Z (Z.shiftr v 64))
-                  (fun dmem =>
-                     write_mem dmem (word.add addr (word.of_Z 12)) (word.of_Z (Z.shiftr v 96))
-                       (fun dmem =>
-                          write_mem dmem
-                            (word.add addr (word.of_Z 16)) (word.of_Z (Z.shiftr v 128))
-                            (fun dmem =>
-                               write_mem dmem
-                                 (word.add addr (word.of_Z 20)) (word.of_Z (Z.shiftr v 160))
-                                 (fun dmem =>
-                                    write_mem dmem
-                                      (word.add addr (word.of_Z 24)) (word.of_Z (Z.shiftr v 192))
-                                      (fun dmem =>
-                                         write_mem dmem
-                                           (word.add addr (word.of_Z 28))
-                                           (word.of_Z (Z.shiftr v 224)) P))))))).
-
-    Definition wide_word_load (dmem : mem) (addr : word32) (P : word256 -> T) : T :=
-      read_mem dmem addr
-        (fun v0 =>
-           read_mem dmem (word.add addr (word.of_Z 4))
-             (fun v1 =>
-                read_mem dmem (word.add addr (word.of_Z 8))
-                  (fun v2 =>
-                     read_mem dmem (word.add addr (word.of_Z 12))
-                       (fun v3 =>
-                          read_mem dmem (word.add addr (word.of_Z 16))
-                            (fun v4 =>
-                               read_mem dmem (word.add addr (word.of_Z 20))
-                                 (fun v5 =>
-                                    read_mem dmem (word.add addr (word.of_Z 24))
-                                      (fun v6 =>
-                                         read_mem dmem (word.add addr (word.of_Z 28))
-                                           (fun v7 =>
-                                              P (wide_word_combine v0 v1 v2 v3 v4 v5 v6 v7))))))))).
     Definition apply_shift (v : word256) (shift : Z) (P : word256 -> T) :=
       if is_valid_shift_imm (Z.abs shift)
       then if shift =? 0
@@ -801,8 +777,6 @@ Section Semantics.
     Definition carry_bit (x : Z) := x >? (2^256).
     Definition borrow_bit (x : Z) := x <? 0.
 
-    Check read_wdr_indirect.
-    Check wide_word_load.
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
       (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
@@ -826,7 +800,7 @@ Section Semantics.
           if is_valid_mem_offset imm
           then read_gpr regs x
                  (fun vx =>
-                    read_mem dmem (word.add vx (word.of_Z imm))
+                    load_word dmem (word.add vx (word.of_Z imm))
                       (fun vm =>
                          write_gpr regs d vm
                            (fun regs => post regs wregs flags dmem)))
@@ -837,7 +811,7 @@ Section Semantics.
                  (fun vx =>
                     (read_gpr regs y
                        (fun vy =>
-                          write_mem dmem (word.add vx (word.of_Z imm)) vy
+                          store_word dmem (word.add vx (word.of_Z imm)) vy
                             (fun dmem => post regs wregs flags dmem))))
           else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
       | Csrrs d x =>
@@ -925,26 +899,23 @@ Section Semantics.
             read_gpr regs x
               (fun vx =>
                  let addr := (word.add vx (word.of_Z imm)) in
-                 if is_valid_wide_addr addr
-                 then
-                   wide_word_load dmem addr
-                     (fun vm =>
-                        read_gpr regs d
-                          (fun vd => 
-                             write_wdr_indirect vd wregs vm
-                               (fun wregs =>
-                                  if dinc
-                                  then if xinc
-                                       then err ("Both increment bits set for BN.LID.")
-                                       else
-                                         write_gpr regs d (word.add vd (word.of_Z 1))
-                                           (fun regs => post regs wregs flags dmem)
-                                  else if xinc
-                                       then 
-                                         write_gpr regs x (word.add vx (word.of_Z 32))
-                                           (fun regs => post regs wregs flags dmem)
-                                       else  post regs wregs flags dmem)))
-                 else err ("Invalid read address for BN.LID: " ++ HexString.of_Z (word.unsigned addr)))
+                 load_word dmem addr
+                   (fun vm =>
+                      read_gpr regs d
+                        (fun vd => 
+                           write_wdr_indirect vd wregs vm
+                             (fun wregs =>
+                                if dinc
+                                then if xinc
+                                     then err ("Both increment bits set for BN.LID.")
+                                     else
+                                       write_gpr regs d (word.add vd (word.of_Z 1))
+                                         (fun regs => post regs wregs flags dmem)
+                                else if xinc
+                                     then 
+                                       write_gpr regs x (word.add vx (word.of_Z 32))
+                                         (fun regs => post regs wregs flags dmem)
+                                     else  post regs wregs flags dmem))))
           else err ("Invalid memory offset for BN.LID: " ++ HexString.of_Z imm)
       | Bn_sid x xinc y yinc imm =>
           if is_valid_wide_mem_offset imm
@@ -956,22 +927,19 @@ Section Semantics.
                     read_gpr regs y
                       (fun vy =>
                          let addr := (word.add vy (word.of_Z imm)) in
-                         if is_valid_wide_addr addr
-                         then
-                           wide_word_store dmem addr vx
-                             (fun dmem =>
-                                if xinc
-                                then if yinc
-                                     then err ("Both increment bits set for BN.SID.")
-                                     else
-                                       write_gpr regs x (word.add ix (word.of_Z 1))
-                                         (fun regs => post regs wregs flags dmem)
-                                else if yinc
-                                     then 
-                                       write_gpr regs y (word.add vy (word.of_Z 32))
-                                         (fun regs => post regs wregs flags dmem)
-                                     else  post regs wregs flags dmem)
-                         else err ("Invalid write address for BN.SID: " ++ HexString.of_Z (word.unsigned addr)))))
+                         store_word dmem addr vx
+                           (fun dmem =>
+                              if xinc
+                              then if yinc
+                                   then err ("Both increment bits set for BN.SID.")
+                                   else
+                                     write_gpr regs x (word.add ix (word.of_Z 1))
+                                       (fun regs => post regs wregs flags dmem)
+                              else if yinc
+                                   then 
+                                     write_gpr regs y (word.add vy (word.of_Z 32))
+                                       (fun regs => post regs wregs flags dmem)
+                                   else  post regs wregs flags dmem))))
           else err ("Invalid memory offset for BN.SID: " ++ HexString.of_Z imm)
       end.
 
@@ -1375,7 +1343,7 @@ Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
 Section BuildProofs.
   Context {word32 : word.word 32} {regfile : map.map reg word32}.
   Context {word256 : word.word 256} {wregfile : map.map wreg word256}.
-  Context {flagfile : map.map flag bool} {mem : map.map word32 word32}.
+  Context {flagfile : map.map flag bool} {mem : map.map word32 byte}.
 
   (* Returns the overall size of the program containing the functions
      and starting at the given offset. *)
@@ -2094,13 +2062,12 @@ Section BuildProofs.
         end.
   Qed.
 
-  Lemma read_mem_weaken dmem addr P Q :
-    read_mem dmem addr P ->
-    (forall dmem, P dmem -> Q dmem) ->
-    read_mem dmem addr Q.
+  Lemma load_byte_weaken dmem addr P Q :
+    load_byte (T:=Prop) dmem addr P ->
+    (forall x, P x -> Q x) ->
+    load_byte (T:=Prop) dmem addr Q.
   Proof.
-    cbv [read_mem err option_bind proof_semantics]; intros.
-    destruct_one_match;
+    cbv [load_byte err option_bind proof_semantics]; destruct_one_match; intros;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
         | H : _ /\ _ |- _ => destruct H
@@ -2108,6 +2075,63 @@ Section BuildProofs.
         | |- exists _, _ => eexists; ssplit; [ eassumption | ]
         | _ => solve [eauto]
         end.
+  Qed.
+
+  Lemma load_bytes_weaken dmem addr len P Q :
+    load_bytes (T:=Prop) dmem addr len P ->
+    (forall x, P x -> Q x) ->
+    load_bytes (T:=Prop) dmem addr len Q.
+  Proof.
+    intros; generalize dependent addr. generalize dependent P. generalize dependent Q.
+    induction len; cbn [load_bytes]; [ solve [auto] | ].
+    intros. eapply load_byte_weaken; [ eassumption | ].
+    cbv beta; intros. eapply IHlen; eauto; [ ].
+    cbv beta; eauto.
+  Qed.
+
+  Lemma load_word_weaken {width} {word} dmem addr P Q :
+    load_word (width:=width) (word:=word) dmem addr P ->
+    (forall x, P x -> Q x) ->
+    load_word (width:=width) (word:=word) dmem addr Q.
+  Proof.
+    cbv [load_word]. destruct_one_match; eauto; [ ].
+    intros. eapply load_bytes_weaken; eauto.
+  Qed.
+
+  Lemma store_byte_weaken dmem addr v P Q :
+    store_byte (T:=Prop) dmem addr v P ->
+    (forall x, P x -> Q x) ->
+    store_byte (T:=Prop) dmem addr v Q.
+  Proof.
+    cbv [store_byte err option_bind proof_semantics]; destruct_one_match; intros;
+      repeat lazymatch goal with
+        | H : exists _, _ |- _ => destruct H
+        | H : _ /\ _ |- _ => destruct H
+        | H : False |- _ => contradiction H
+        | |- exists _, _ => eexists; ssplit; [ eassumption | ]
+        | _ => solve [eauto]
+        end.
+  Qed.
+
+  Lemma store_bytes_weaken dmem addr bs P Q :
+    store_bytes (T:=Prop) dmem addr bs P ->
+    (forall x, P x -> Q x) ->
+    store_bytes (T:=Prop) dmem addr bs Q.
+  Proof.
+    intros; generalize dependent addr. generalize dependent dmem.
+    generalize dependent P. generalize dependent Q.
+    induction bs; cbn [store_bytes]; [ solve [auto] | ].
+    intros. eapply store_byte_weaken; [ eassumption | ].
+    cbv beta; intros. eapply IHbs; eauto.
+  Qed.
+
+  Lemma store_word_weaken {width} {word} dmem addr v P Q :
+    store_word (T:=Prop) (width:=width) (word:=word) dmem addr v P ->
+    (forall x, P x -> Q x) ->
+    store_word (T:=Prop) (width:=width) (word:=word) dmem addr v Q.
+  Proof.
+    cbv [store_word]. destruct_one_match; eauto; [ ].
+    intros. eapply store_bytes_weaken; eauto.
   Qed.
 
   Lemma write_gpr_weaken regs r v P Q :
@@ -2141,14 +2165,6 @@ Section BuildProofs.
     cbv [write_csr write_flag_group extract_flag]; intros; destruct_one_match; eauto.
   Qed.
 
-  Lemma write_mem_weaken dmem addr v P Q :
-    write_mem dmem addr v P ->
-    (forall dmem, P dmem -> Q dmem) ->
-    write_mem dmem addr v Q.
-  Proof.
-    cbv [write_mem]; intros; destruct_one_match; eauto.
-  Qed.
-
   Lemma apply_shift_weaken v shift P Q :
     apply_shift v shift P ->
     (forall v, P v -> Q v) ->
@@ -2176,26 +2192,6 @@ Section BuildProofs.
                eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
            | _ => solve [eauto]
            end.
-  Qed.
-
-  Lemma wide_word_load_weaken dmem addr P Q :
-    wide_word_load (T:=Prop) dmem addr P ->
-    (forall x, P x -> Q x) ->
-    wide_word_load (T:=Prop) dmem addr Q.
-  Proof.
-    cbv [wide_word_load]; intros.
-    repeat (eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros).
-    eauto.
-  Qed.
-
-  Lemma wide_word_store_weaken dmem addr v P Q :
-    wide_word_store (T:=Prop) dmem addr v P ->
-    (forall x, P x -> Q x) ->
-    wide_word_store (T:=Prop) dmem addr v Q.
-  Proof.
-    cbv [wide_word_store]; intros.
-    repeat (eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros).
-    eauto.
   Qed.
 
   Lemma lookup_wdr_weaken i P Q :
@@ -2248,26 +2244,30 @@ Section BuildProofs.
             eapply read_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- read_mem _ _ _ =>
-            eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_byte _ _ _ =>
+            eapply load_byte_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_bytes _ _ _ _ =>
+            eapply load_bytes_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_word _ _ _ =>
+            eapply load_word_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_byte _ _ _ _ =>
+            eapply store_byte_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_bytes _ _ _ _ =>
+            eapply store_bytes_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_word _ _ _ _ =>
+            eapply store_word_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_wdr _ _ _ _ =>
             eapply write_wdr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- write_mem _ _ _ _ =>
-            eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- apply_shift _ _ _ =>
             eapply apply_shift_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_flag _ _ _ _ =>
             eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- update_mlz _ _ _ _ =>
             eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
-        | |- wide_word_load _ _ _ =>
-            eapply wide_word_load_weaken; [ eassumption | ]; cbv beta; intros
-        | |- wide_word_store _ _ _ _ =>
-            eapply wide_word_store_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_wdr_indirect _ _ _ =>
             eapply read_wdr_indirect_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_wdr_indirect _ _ _ _ =>
@@ -2311,16 +2311,24 @@ Section BuildProofs.
             eapply read_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- read_mem _ _ _ =>
-            eapply read_mem_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_byte _ _ _ =>
+            eapply load_byte_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_bytes _ _ _ _ =>
+            eapply load_bytes_weaken; [ eassumption | ]; cbv beta; intros
+        | |- load_word _ _ _ =>
+            eapply load_word_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_byte _ _ _ _ =>
+            eapply store_byte_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_bytes _ _ _ _ =>
+            eapply store_bytes_weaken; [ eassumption | ]; cbv beta; intros
+        | |- store_word _ _ _ _ =>
+            eapply store_word_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_gpr _ _ _ _ =>
             eapply write_gpr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_wdr _ _ _ _ =>
             eapply write_wdr_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_csr _ _ _ _ _ =>
             eapply write_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- write_mem _ _ _ _ =>
-            eapply write_mem_weaken; [ eassumption | ]; cbv beta; intros
         | |- apply_shift _ _ _ =>
             eapply apply_shift_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_flag _ _ _ _ =>
@@ -2942,6 +2950,38 @@ Ltac solve_map_step t :=
     ].
 Ltac solve_map := repeat (solve_map_step ltac:(congruence)).
 
+Ltac zsimplify_step :=
+  lazymatch goal with
+  | |- context [_ + 0] => rewrite Z.add_0_r
+  | |- context [0 + _] => rewrite Z.add_0_l
+  | |- context [_ - 0] => rewrite Z.sub_0_r
+  | |- context [?x - ?x] => rewrite Z.sub_diag
+  | |- context [_ * 0] => rewrite Z.mul_0_r
+  | |- context [0 * _] => rewrite Z.mul_0_l
+  | |- context [_ * 1] => rewrite Z.mul_1_r
+  | |- context [1 * _] => rewrite Z.mul_1_l
+  | |- context [0 mod _] => rewrite Z.mod_0_l by lia
+  | |- context [?x mod ?x] => rewrite (Z.mod_same x) by lia
+  | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
+  | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
+  | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
+  | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
+  | _ => progress Z.push_pull_mod
+  end.
+Ltac zsimplify := repeat zsimplify_step.
+
+Notation bytes_at ptr bs := (emp (word.unsigned ptr + Z.of_nat (length bs) < DMEM_BYTES)
+                             * eq (map.of_list_word_at ptr bs))%sep (only parsing).
+Definition word_at {word32 : word.word 32} {mem : map.map word32 byte}
+  {width} {word : word.word width}
+  (ptr : word32) (v : word) : mem -> Prop :=
+  bytes_at ptr (le_split (Z.to_nat (width / 8)) (word.unsigned v)).
+Notation word32_at := (word_at (width:=32)) (only parsing).
+Notation word256_at := (word_at (width:=256)) (only parsing).
+Definition anybytes {word32 : word.word 32} {mem : map.map word32 byte}
+  ptr len : mem -> Prop :=
+  Lift1Prop.ex1 (fun bs => (emp (length bs = len) * bytes_at ptr bs)%sep).
+
 (* Helper lemmas for proving things about programs. *)
 Section Helpers.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
@@ -2949,7 +2989,7 @@ Section Helpers.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
   Context {wregfile : map.map wreg word256} {wregfile_ok : map.ok wregfile}.
   Context {flagfile : map.map flag bool} {flagfile_ok : map.ok flagfile}.
-  Context {mem : map.map word32 word32} {mem_ok : map.ok mem}.
+  Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
 
   Definition gpr_has_value (regs : regfile) (r : gpr) (v : word32) : Prop :=
     read_gpr regs r (eq v).
@@ -3315,103 +3355,213 @@ Section Helpers.
     intros; subst. eauto.
   Qed.
 
-  Lemma is_valid_addr_iff addr :
-    is_valid_addr addr = true <-> (word.unsigned addr mod 4 = 0
-                                   /\ word.unsigned addr + 4 < DMEM_BYTES).
+  Lemma is_word_aligned_imm width imm :
+    0 <= width <= 32 ->
+    is_word_aligned width (word.of_Z imm) = true <-> (imm mod 2^width = 0).
   Proof.
-    cbv [is_valid_addr]. rewrite Bool.andb_true_iff, word.unsigned_eqb, Z.eqb_eq.
-    rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
-    rewrite Z.land_ones with (n:=2) by lia. change (2^2) with 4.
-    pose proof Z.mod_pos_bound (word.unsigned addr) 4 ltac:(lia).
-    cbv [word.wrap]. rewrite Z.mod_small; lia.
+    cbv [is_word_aligned]. intros.
+    pose proof Z.pow_pos_nonneg 2 width ltac:(lia) ltac:(lia).
+    assert (2^width <= 2^32) by (apply Z.pow_le_mono; lia).
+    assert (0 <= Z.ones width < 2^32) by (rewrite Z.ones_equiv; split; lia).
+    rewrite word.unsigned_eqb, Z.eqb_eq.
+    rewrite word.unsigned_of_Z_0, word.unsigned_and.
+    rewrite (word.unsigned_of_Z_nowrap (Z.ones width)) by lia.
+    rewrite Z.land_ones by lia.
+    rewrite word.unsigned_of_Z.
+    cbv [word.wrap]. pose proof Z.mod_pos_bound (imm mod 2^32) (2^width) ltac:(lia).
+    rewrite Z.mod_small by lia.
+    replace (2^32) with (2^width * (2^(32-width)))
+      by (rewrite <-Z.pow_add_r by lia; apply f_equal; lia).
+    rewrite Z.rem_mul_r by lia.
+    Z.push_mod. zsimplify. split; lia.
   Qed.
 
-  Lemma is_valid_addr_0 : is_valid_addr (word.of_Z 0) = true.
+  Lemma is_word_aligned_0 width :
+    0 <= width <= 32 ->
+    is_word_aligned width (word.of_Z 0) = true.
   Proof.
-    cbv [is_valid_addr]. apply Bool.andb_true_iff. ssplit.
-    { apply word.eqb_eq, word.unsigned_inj.
-      rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
-      cbv [Z.land word.wrap]. rewrite Z.mod_small; lia. }
-    { cbv [DMEM_BYTES]. rewrite word.unsigned_of_Z_nowrap by lia.
-      lia. }
+    cbv [is_word_aligned]. intros. apply word.eqb_eq, word.unsigned_inj.
+    rewrite word.unsigned_and, !word.unsigned_of_Z_0.
+    rewrite Z.land_0_l. cbv [word.wrap]. rewrite Z.mod_0_l; lia.
   Qed.
 
-  Lemma is_valid_addr_add addr offset :
-    is_valid_addr addr = true ->
-    offset mod 4 = 0 ->
-    0 <= offset ->
-    0 <= word.unsigned addr + offset + 4 < DMEM_BYTES ->
-    is_valid_addr (word.add addr (word.of_Z offset)) = true.
+  Lemma is_word_aligned_add width addr offset :
+    0 <= width <= 32 ->
+    is_word_aligned width addr = true ->
+    is_word_aligned width offset = true ->
+    is_word_aligned width (word.add addr offset) = true.
   Proof.
-    cbv [is_valid_addr DMEM_BYTES]. rewrite !Bool.andb_true_iff. intros.
+    cbv [is_word_aligned]; intros. apply word.eqb_eq.
     repeat lazymatch goal with
            | H : _ /\ _ |- _ => destruct H
            | H : word.eqb ?x ?y = true |- _ =>
                rewrite word.unsigned_eqb in H
            | H : (_ =? _)%Z = true |- _ => apply Z.eqb_eq in H
-           | H : word.ltu ?x ?y = true |- _ =>
-               destruct (word.ltu_spec x y); [ | congruence ]; clear H;
-               rewrite ?word.unsigned_of_Z_nowrap in * by lia
            end.
-    pose proof (word.unsigned_range addr).
-    ssplit.
-    { apply word.eqb_eq, word.unsigned_inj.
-      rewrite word.unsigned_and, word.unsigned_add, !word.unsigned_of_Z_nowrap in * by lia.
-      cbv [word.wrap] in *. rewrite (Z.mod_small (_ + _)) by lia.
-      rewrite !(Z.land_ones _ 2) in * by lia. change (2 ^ 2) with 4 in *.
-      repeat lazymatch goal with
-             | H : context [(?x mod 4) mod _] |- _ =>
-                 rewrite (Z.mod_small (x mod 4) _) in H;
-                 [ | pose proof (Z.mod_pos_bound x 4 ltac:(lia)); lia ]
-             | |- context [(?x mod 4) mod _] =>
-                 rewrite (Z.mod_small (x mod 4) _);
-                 [ | pose proof (Z.mod_pos_bound x 4 ltac:(lia)); lia ]
-             end.
-      rewrite Z.add_mod by lia.
-      repeat lazymatch goal with
-             | H : ?x = 0 |- context[?x] => rewrite H
-             | H : 0 = ?x |- context[?x] => rewrite <-H
-             end.
-      rewrite Z.mod_0_l by lia.
-      reflexivity. }
-    { rewrite word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
-      apply Z.ltb_lt.
-      cbv [word.wrap]. rewrite Z.mod_small by lia.
-      lia. }
+    apply word.unsigned_inj.
+    rewrite !word.unsigned_of_Z_0 in * by lia.
+    rewrite !word.unsigned_and, !word.unsigned_add in *.
+    pose proof Z.pow_pos_nonneg 2 width ltac:(lia) ltac:(lia).
+    assert (2^width <= 2^32) by (apply Z.pow_le_mono; lia).
+    assert (0 <= Z.ones width < 2^32) by (rewrite Z.ones_equiv; split; lia).
+    rewrite !word.unsigned_of_Z_nowrap in * by lia.
+    rewrite !Z.land_ones in * by lia.
+    cbv [word.wrap] in *.
+    repeat lazymatch goal with
+           | |- context [(?x mod 2^width) mod 2^32] =>
+               pose proof Z.mod_pos_bound x (2^width) ltac:(lia);
+               rewrite (Z.mod_small (x mod (2^width)) (2^32)) by lia
+           | H: context [(?x mod 2^width) mod 2^32] |- _ =>
+               pose proof Z.mod_pos_bound x (2^width) ltac:(lia);
+               rewrite (Z.mod_small (x mod (2^width)) (2^32)) in H by lia
+           end.
+    replace (2^32) with (2^width * (2^(32-width)))
+      by (rewrite <-Z.pow_add_r by lia; apply f_equal; lia).
+    rewrite Z.rem_mul_r by lia.
+    Z.push_mod. zsimplify.
+    rewrite Z.add_mod by lia.
+    repeat lazymatch goal with H : 0 = ?x |- context [?x] => rewrite <-H end.
+    rewrite Z.mod_0_l by lia. reflexivity.
   Qed.
 
-  Definition start_state : otbn_state :=
-    otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty map.empty [] [].
+  Lemma anybytes_0_iff1 addr :
+    Lift1Prop.iff1 (anybytes addr 0) (emp (word.unsigned addr < DMEM_BYTES)).
+  Proof.
+    cbv [anybytes]. split; intros.
+    { extract_ex1_and_emp_in_hyps.
+      lazymatch goal with H : length ?x = 0%nat |- _ =>
+                            apply length_zero_iff_nil in H; subst end.
+      cbn [length] in *.
+      extract_ex1_and_emp_in_goal. cbv [emp].
+      rewrite map.of_list_word_nil.
+      ssplit; eauto; lia. }
+    { cbv [emp] in *|-. intuition idtac. subst.
+      extract_ex1_and_emp_in_goal.
+      ssplit; [ | apply length_zero_iff_nil; reflexivity |  ].      
+      { rewrite map.of_list_word_nil; reflexivity. }
+      { cbn [length]; lia. } }
+  Qed.
+
+  (* complement of map.get_of_list_word_at_domain *)
+  (* TODO: move to coqutil.Map.OfListWord *)
+  Lemma map_get_of_list_word_at_None {width} {word : word width} {word_ok : word.ok word} :
+    forall (value : Type) (map : map.map word value) {map_ok : map.ok map},
+      forall (a : word) (xs : list value) (i : word),
+        map.get (map.of_list_word_at a xs) i = None <->
+          (word.unsigned (word.sub i a) < 0
+           \/ Z.of_nat (length xs) <= word.unsigned (word.sub i a)).
+  Proof.
+    intros. pose proof word.unsigned_range (word.sub i a).
+    rewrite map.get_of_list_word_at, nth_error_None.
+    rewrite Nat2Z.inj_le, ?Znat.Z2Nat.id; intuition.
+  Qed.
+
+  Lemma anybytes_S_iff1 n addr :
+    Lift1Prop.iff1 (anybytes addr (S n))
+      (Lift1Prop.ex1 (fun v => ptsto addr v) * anybytes (word.add addr (word.of_Z 1)) n)%sep.
+  Proof.
+    cbv [anybytes].
+    pose proof word.unsigned_range addr.
+    assert (DMEM_BYTES < 2^32) by (cbv [DMEM_BYTES]; lia).
+    split; intros.
+    { extract_ex1_and_emp_in_hyps. subst.
+      lazymatch goal with H : length ?x = S _ |- _ =>
+                            destruct x; cbn [length] in H; [ lia | ] end.
+      cbn [length] in *.
+      extract_ex1_and_emp_in_goal.
+      rewrite word.unsigned_add, word.unsigned_of_Z_1.
+      ssplit; [ | solve [eauto] | ].
+      { rewrite map.of_list_word_at_cons.
+        eapply sepeq_on_undef_put.
+        apply map_get_of_list_word_at_None; eauto; [ ].
+        right. rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
+        cbv [word.wrap]. Z.push_pull_mod.
+        rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
+        rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
+        rewrite Z.mod_small by lia.
+        lia. }
+      { cbv [word.wrap]. rewrite Z.mod_small by lia. lia. } }
+    { extract_ex1_and_emp_in_hyps.
+      cbv [sep] in *|-.
+      repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             end.
+      cbv [ptsto] in *. subst.
+      lazymatch goal with
+      | H : map.split _ (map.put map.empty _ _) _ |- _ =>
+          apply map.split_put_l2r in H; [ | solve [ apply map.get_empty ] ];
+          apply map.split_empty_l in H
+      end.
+      subst. eexists (_ :: _).
+      extract_ex1_and_emp_in_goal.
+      ssplit; [ | cbn [length]; solve [eauto] | ].
+      { apply map.of_list_word_at_cons. }
+      { cbn [length].
+        rewrite word.unsigned_add, word.unsigned_of_Z_1 in *.
+        Search map.of_list_word_at.
+        cbv [word.wrap] in *. rewrite Z.mod_small in *.
+        2:split; try lia.
+        2:{
+          (* bad case: addr = 2^32-1 *)
+          (* then (word.add addr 1) + length bs < DMEM_BYTES *)
+          (* but word.addr + 1 + length bs is not < DMEM_BYTES *)
+        Search word.wrap.
+        rewrite word
+  Qed.
+    
+  Lemma store_bytes_step dmem addr (bs : list byte) (P : mem -> Prop) R :
+    (anybytes addr (length bs) * R)%sep dmem ->
+    (forall dmem, (bytes_at addr bs * R)%sep dmem -> P dmem) ->
+    store_bytes dmem addr bs P.
+  Proof.
+    generalize dependent dmem. generalize dependent addr.
+    generalize dependent P. generalize dependent R.
+    induction bs; cbn [store_bytes length] in *; intros.
+    { cbv [anybytes] in *.
+      extract_ex1_and_emp_in_hyps.
+      lazymatch goal with H : length ?x = 0%nat |- _ => apply length_zero_iff_nil in H; subst end.
+      rewrite !map.of_list_word_nil in *.
+      eauto. }
+    { cbv [store_byte]. eapply IHbs.
+      {
+      cbv [anybytes] in *.
+      extract_ex1_and_emp_in_hyps.
+      Search sep map.put.
+      2:{
+        
+        rewrite map.of_list_word_at_cons in *.
+        Search Lift1Prop.iff1.
+        Search sep map.put.
+        Search map.of_list_word_at.
+        eapply H0.
+        eauto.
+      cbv [store_byte].
+  Qed.
+  
+  Lemma store_word_step {width} {word : word.word width} dmem addr (v : word) (P : mem -> Prop) R :
+    is_word_aligned width addr = true ->
+    (anybytes addr (Z.to_nat (width / 8)) * R)%sep dmem ->
+    (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
+    store_word dmem addr v P.
+  Proof.
+    intros. cbv [store_word]. destruct_one_match; [ | congruence ].
+    eapply store_bytes_step; eauto; [ ].
+    rewrite length_le_split. eauto.    
+  Qed.
+
+  Definition start_state (dmem : mem) : otbn_state :=
+    otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty dmem [] [].
 End Helpers.
 
-
-Ltac zsimplify_step :=
+Ltac solve_is_word_aligned t :=
   lazymatch goal with
-  | |- context [_ + 0] => rewrite Z.add_0_r
-  | |- context [0 + _] => rewrite Z.add_0_l
-  | |- context [_ - 0] => rewrite Z.sub_0_r
-  | |- context [?x - ?x] => rewrite Z.sub_diag
-  | |- context [_ * 0] => rewrite Z.mul_0_r
-  | |- context [0 * _] => rewrite Z.mul_0_l
-  | |- context [_ * 1] => rewrite Z.mul_1_r
-  | |- context [1 * _] => rewrite Z.mul_1_l
-  | |- context [0 mod _] => rewrite Z.mod_0_l by lia
-  | |- context [?x mod ?x] => rewrite (Z.mod_same x) by lia
-  | |- context [Z.of_nat (Z.to_nat _)] => rewrite Z2Nat.id by lia
-  | |- context [Z.to_nat (Z.of_nat _)] => rewrite Nat2Z.id by lia
-  | |- context [Z.of_nat 0] => change (Z.of_nat 0) with 0
-  | |- context [Z.of_nat 1] => change (Z.of_nat 1) with 1
-  | _ => progress Z.push_pull_mod
-  end.
-Ltac zsimplify := repeat zsimplify_step.
-
-Ltac solve_is_valid_addr :=
-  lazymatch goal with
-  | H : is_valid_addr ?a = true |- is_valid_addr ?a = true => exact H
-  | |- is_valid_addr (word.of_Z 0) = true => apply is_valid_addr_0
-  | |- is_valid_addr (word.add ?a (word.of_Z ?offset)) = true =>
-      assert (is_valid_addr a = true) by solve_is_valid_addr; apply is_valid_addr_add;
-      eauto; cbv[DMEM_BYTES] in *; rewrite ?word.unsigned_of_Z_nowrap by lia; lia
+  | H : is_word_aligned ?width ?a = true |- is_word_aligned ?width ?a = true => exact H
+  | |- is_word_aligned _ (word.of_Z 0) = true => apply is_word_aligned_0; t
+  | |- is_word_aligned _ (word.of_Z _) = true => apply is_word_aligned_imm; t
+  | |- is_word_aligned ?width (word.add ?a ?offset) = true =>
+      apply is_word_aligned_add; solve_is_word_aligned t
+  | _ => t
   end.
 
 Ltac simplify_side_condition_step :=
@@ -3423,9 +3573,11 @@ Ltac simplify_side_condition_step :=
   | |- context [if is_valid_bn_imm ?v then _ else _] =>
         replace (is_valid_bn_imm v) with true by (cbv [is_valid_bn_imm]; lia)
   | |- context [if is_valid_mem_offset ?v then _ else _] =>
-        replace (is_valid_mem_offset v) with true by (cbv [is_valid_mem_offset]; lia)
-  | |- context [if is_valid_addr ?a then _ else _] =>
-        replace (is_valid_addr a) with true by (symmetry; solve_is_valid_addr)
+        replace (is_valid_mem_offset v) with true by (cbv [is_valid_mem_offset]; cbn; lia)
+  | |- context [if is_valid_wide_mem_offset ?v then _ else _] =>
+        replace (is_valid_wide_mem_offset v) with true by (cbv [is_valid_wide_mem_offset]; cbn; lia)
+  | |- context [if is_word_aligned ?width ?a then _ else _] =>
+        replace (is_word_aligned width a) with true by (symmetry; solve_is_word_aligned ltac:(lia))
   | |- context [if is_valid_shift_imm ?s then _ else _] =>
         replace (is_valid_shift_imm s) with true by (cbv [is_valid_shift_imm]; lia)
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
@@ -3442,7 +3594,8 @@ Ltac simplify_side_condition_step :=
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
-  | H : is_valid_addr ?a = true |- context [is_valid_addr (word.add ?a (word.of_Z 0))] =>
+  | H : is_word_aligned ?width ?a = true
+    |- context [is_word_aligned ?width (word.add ?a (word.of_Z 0))] =>
       rewrite (word.add_0_r a); rewrite H
   | |- (_ < _) => lia
   | |- (_ <= _) => lia                                   
@@ -3458,7 +3611,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_mem read_mem]
+               | progress cbv [gpr_has_value]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -3664,7 +3817,7 @@ Module Test.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
   Context {wregfile : map.map wreg word256} {wregfile_ok : map.ok wregfile}.
   Context {flagfile : map.map flag bool} {flagfile_ok : map.ok flagfile}.
-  Context {mem : map.map word32 word32} {mem_ok : map.ok mem}.
+  Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
   
@@ -3783,42 +3936,69 @@ Module Test.
         let body := (body ++  [(Ret : insn)])%list in
         ("bignum_mul", syms, body))%string.
 
+  (* Test program : add two bignums from memory using pointers
+
+     bignum_add_mem:
+       li       x2, 2
+       li       x3, 3
+       bn.lid   x2, 0(x12)
+       bn.lid   x3, 0(x13)
+       bn,add   w2, w2, w3
+       bn.sid   x2, 0(x12)
+       ret
+   *)
+  Definition bignum_add_mem_fn : otbn_function :=
+    ("bignum_add_mem",
+      map.empty,
+      [ (Addi x2 x0 2 : insn);
+        (Addi x3 x0 3 : insn);
+        (Bn_lid x2 false x12 false  0 : insn);
+        (Bn_lid x3 false x13 false  0 : insn);
+        (Bn_add w2 w2 w3 0 FG0 : insn);
+        (Bn_sid x2 false x12 false  0 : insn);
+        (Ret : insn)])%string.
+
   Compute (link [mul_fn; add_fn]).
   Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
 
-  Lemma prog0_correct :
+  Lemma prog0_correct dmem R :
+    (anybytes (word.of_Z 0) 4 * R)%sep dmem ->
     eventually
       (run1 (fetch:=fetch prog0))
       (fun st =>
          match st with
          | otbn_done _ dmem =>
-             map.get dmem (word.of_Z 0) = Some (word.of_Z 5)
+             (word32_at (word.of_Z 0) (word.of_Z 5) * R)%sep dmem
          | _ => False
          end)
-      start_state.
+      (start_state dmem).
   Proof.
     cbv [prog0 start_state]; intros.
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
-    intros; subst. eapply eventually_done.
-    rewrite word.add_0_r.
-    solve_map. apply f_equal.
-    cbv [addi_spec]. repeat destruct_one_match; try lia; [ ].    
-    rewrite !word.add_0_l.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply store_word_step; [ rewrite word.add_0_l; solve [eauto] | ].
+    intros.
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    eapply eventually_done.
+    cbv [addi_spec] in *. repeat destruct_one_match_hyp; try lia; [ ].
+    rewrite !word.add_0_l in *.
+    lazymatch goal with
+    | H : (word_at ?p ?x * ?R)%sep ?m |- (word_at ?p ?y * ?R)%sep ?m =>
+        replace y with x; [ apply H | ]
+    end.
     apply word.unsigned_inj.
-    rewrite !word.unsigned_add, !word.unsigned_of_Z by lia.
+    rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
     cbv [word.wrap]. Z.push_pull_mod. reflexivity.
   Qed.
 
@@ -3839,8 +4019,8 @@ Module Test.
     cbv [add_fn returns]. intros; subst.
     track_registers_init.
     
-    eapply eventually_step.
-    { simplify_side_condition. apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
@@ -3854,26 +4034,29 @@ Module Test.
 
   Lemma add_mem_correct :
     forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
-      is_valid_addr pa = true ->
-      is_valid_addr pb = true ->
+      is_word_aligned 32 pa = true ->
+      is_word_aligned 32 pb = true ->
       map.get regs (gpreg x12) = Some pa ->
       map.get regs (gpreg x13) = Some pb ->
       (* note: the separation-logic setup does not require the operands to be disjoint *)
-      (ptsto pa a * Ra)%sep dmem ->
-      (ptsto pb b * Rb)%sep dmem ->
+      (word32_at pa a * Ra)%sep dmem ->
+      (word32_at pb b * Rb)%sep dmem ->
       returns
         (fetch:=fetch_ctx [add_mem_fn])
         "add_mem"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           (ptsto pa (word.add a b) * Ra)%sep dmem'
+           (word32_at pa (word.add a b) * Ra)%sep dmem'
            /\ clobbers [] flags flags'
            /\ clobbers [] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x3; gpreg x5] regs regs').
   Proof.
     cbv [add_mem_fn returns]. intros; subst.
     track_registers_init.
-    
-    eapply eventually_step.
+ 
+    eapply eventually_step_cps.
+    simplify_side_condition.
+    (* TODO: load_word_step *)
+    (* TODO: move store_word_step to helpers and add to simplify_side_condition *)
     { simplify_side_condition. apply eq_refl. }
     intros; subst.
     track_registers_update.
@@ -4201,6 +4384,60 @@ Module Test.
     intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; eauto.
   Qed.
+
+  Check map.of_list_word_at.
+  Print wide_word_load.  
+  Lemma bignum_add_mem_correct :
+    forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
+      is_valid_wide_addr pa = true ->
+      is_valid_wide_addr pb = true ->
+      map.get regs (gpreg x12) = Some pa ->
+      map.get regs (gpreg x13) = Some pb ->
+      (* note: the separation-logic setup does not require the operands to be disjoint *)
+      (ptsto pa a * Ra)%sep dmem ->
+      (ptsto pb b * Rb)%sep dmem ->
+      returns
+        (fetch:=fetch_ctx [bignum_add_mem_fn])
+        "bignum_add_mem"%string regs wregs flags dmem cstack lstack
+        (fun regs' wregs' flags' dmem' =>
+           (ptsto pa (word.add a b) * Ra)%sep dmem'
+           /\ clobbers [flagM FG0; flagL FG0; flagZ FG0; flagC FG0] flags flags'
+           /\ clobbers [wdreg w2; wdreg w3] wregs wregs'
+           /\ clobbers [gpreg x2; gpreg x3] regs regs').
+  Proof.
+    cbv [bignum_add_mem_fn returns]. intros; subst.
+    track_registers_init.
+    
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition.
+      
+      
+      apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_step.
+    { simplify_side_condition. apply eq_refl. }
+    intros; subst.
+    track_registers_update.
+    eapply eventually_ret; [ reflexivity | eassumption | ].
+    ssplit; try reflexivity; [ | | | ].
+    { eauto using sep_put. }
+    { eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
+    { eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
+    { eapply map.only_differ_subset; [ | eassumption ].
+      cbv. tauto. }
+  Qed.
+
 
   Lemma prog0_correct_prelink regs wregs flags dmem :
     exits
