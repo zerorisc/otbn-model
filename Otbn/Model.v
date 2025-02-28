@@ -2970,17 +2970,13 @@ Ltac zsimplify_step :=
   end.
 Ltac zsimplify := repeat zsimplify_step.
 
-Notation bytes_at ptr bs := (emp (word.unsigned ptr + Z.of_nat (length bs) < DMEM_BYTES)
-                             * eq (map.of_list_word_at ptr bs))%sep (only parsing).
+Notation bytes_at ptr bs := (eq (map.of_list_word_at ptr bs)) (only parsing).
 Definition word_at {word32 : word.word 32} {mem : map.map word32 byte}
   {width} {word : word.word width}
   (ptr : word32) (v : word) : mem -> Prop :=
   bytes_at ptr (le_split (Z.to_nat (width / 8)) (word.unsigned v)).
 Notation word32_at := (word_at (width:=32)) (only parsing).
 Notation word256_at := (word_at (width:=256)) (only parsing).
-Definition anybytes {word32 : word.word 32} {mem : map.map word32 byte}
-  ptr len : mem -> Prop :=
-  Lift1Prop.ex1 (fun bs => (emp (length bs = len) * bytes_at ptr bs)%sep).
 
 (* Helper lemmas for proving things about programs. *)
 Section Helpers.
@@ -3424,134 +3420,118 @@ Section Helpers.
     rewrite Z.mod_0_l by lia. reflexivity.
   Qed.
 
-  Lemma anybytes_0_iff1 addr :
-    Lift1Prop.iff1 (anybytes addr 0) (emp (word.unsigned addr < DMEM_BYTES)).
+  (* TODO: put somewhere useful? *)
+  Lemma put_iff1 {K V} {map : map.map K V} {map_ok : map.ok map}
+                 {key_eqb : K -> K -> bool}
+                 {key_eqb_spec : forall k1 k2, BoolSpec (k1 = k2) (k1 <> k2) (key_eqb k1 k2)}
+                 (m : map) k v :
+    map.get m k = None -> Lift1Prop.iff1 (eq (map.put m k v)) (ptsto k v * eq m)%sep.
   Proof.
-    cbv [anybytes]. split; intros.
-    { extract_ex1_and_emp_in_hyps.
-      lazymatch goal with H : length ?x = 0%nat |- _ =>
-                            apply length_zero_iff_nil in H; subst end.
-      cbn [length] in *.
-      extract_ex1_and_emp_in_goal. cbv [emp].
-      rewrite map.of_list_word_nil.
-      ssplit; eauto; lia. }
-    { cbv [emp] in *|-. intuition idtac. subst.
-      extract_ex1_and_emp_in_goal.
-      ssplit; [ | apply length_zero_iff_nil; reflexivity |  ].      
-      { rewrite map.of_list_word_nil; reflexivity. }
-      { cbn [length]; lia. } }
+    repeat intro. cbv [sep ptsto]. split; intros; subst.
+    { do 2 eexists; ssplit; eauto.
+      eapply map.split_put_r2l; eauto; [ ].
+      eapply map.split_empty_l; reflexivity. }
+    { repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             | H : map.split _ (map.put map.empty _ _) _ |- _ =>
+                 apply map.split_put_l2r in H; [ | solve [apply map.get_empty ] ];
+                 eapply map.split_empty_l in H
+             | |- ?x = ?x => reflexivity
+             | _ => progress subst
+             end. }      
   Qed.
-
+  
   (* complement of map.get_of_list_word_at_domain *)
   (* TODO: move to coqutil.Map.OfListWord *)
-  Lemma map_get_of_list_word_at_None {width} {word : word width} {word_ok : word.ok word} :
-    forall (value : Type) (map : map.map word value) {map_ok : map.ok map},
-      forall (a : word) (xs : list value) (i : word),
-        map.get (map.of_list_word_at a xs) i = None <->
-          (word.unsigned (word.sub i a) < 0
-           \/ Z.of_nat (length xs) <= word.unsigned (word.sub i a)).
+  Lemma map_get_of_list_word_at_None {width} {word : word width} {word_ok : word.ok word}
+    {value : Type} {map : map.map word value} {map_ok : map.ok map} :
+    forall (a : word) (xs : list value) (i : word),
+      map.get (map.of_list_word_at a xs) i = None <->
+        (word.unsigned (word.sub i a) < 0
+         \/ Z.of_nat (length xs) <= word.unsigned (word.sub i a)).
   Proof.
     intros. pose proof word.unsigned_range (word.sub i a).
     rewrite map.get_of_list_word_at, nth_error_None.
     rewrite Nat2Z.inj_le, ?Znat.Z2Nat.id; intuition.
   Qed.
-
-  Lemma anybytes_S_iff1 n addr :
-    Lift1Prop.iff1 (anybytes addr (S n))
-      (emp (word.unsigned addr < DMEM_BYTES)
-       * Lift1Prop.ex1 (fun v => ptsto addr v)
-       * anybytes (word.add addr (word.of_Z 1)) n)%sep.
-  Proof.
-    cbv [anybytes].
-    pose proof word.unsigned_range addr.
-    assert (DMEM_BYTES < 2^32) by (cbv [DMEM_BYTES]; lia).
-    split; intros.
-    { extract_ex1_and_emp_in_hyps. subst.
-      lazymatch goal with H : length ?x = S _ |- _ =>
-                            destruct x; cbn [length] in H; [ lia | ] end.
-      cbn [length] in *.
-      extract_ex1_and_emp_in_goal.
-      rewrite word.unsigned_add, word.unsigned_of_Z_1.
-      ssplit; [ | lia | solve [eauto] | ].
-      { rewrite map.of_list_word_at_cons.
-        eapply sepeq_on_undef_put.
-        apply map_get_of_list_word_at_None; eauto; [ ].
-        right. rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
-        cbv [word.wrap]. Z.push_pull_mod.
-        rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
-        rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
-        rewrite Z.mod_small by lia.
-        lia. }
-      { cbv [word.wrap]. rewrite Z.mod_small by lia. lia. } }
-    { extract_ex1_and_emp_in_hyps.
-      cbv [sep] in *|-.
-      repeat lazymatch goal with
-             | H : exists _, _ |- _ => destruct H
-             | H : _ /\ _ |- _ => destruct H
-             end.
-      cbv [ptsto] in *. subst.
-      lazymatch goal with
-      | H : map.split _ (map.put map.empty _ _) _ |- _ =>
-          apply map.split_put_l2r in H; [ | solve [ apply map.get_empty ] ];
-          apply map.split_empty_l in H
-      end.
-      subst. eexists (_ :: _).
-      extract_ex1_and_emp_in_goal.
-      ssplit; [ | cbn [length]; solve [eauto] | ].
-      { apply map.of_list_word_at_cons. }
-      { cbn [length].
-        rewrite word.unsigned_add, word.unsigned_of_Z_1 in *.
-        cbv [word.wrap] in *. rewrite Z.mod_small in * by lia.
-        lia. } }
-  Qed.
     
-  Lemma store_bytes_step dmem addr (bs : list byte) (P : mem -> Prop) R :
-    (anybytes addr (length bs) * R)%sep dmem ->
+  Lemma store_bytes_step dmem addr (bs : list byte) (P : mem -> Prop) old_bs R :
+    word.unsigned addr + Z.of_nat (length bs) < DMEM_BYTES ->
+    length old_bs = length bs ->
+    (bytes_at addr old_bs * R)%sep dmem ->
     (forall dmem, (bytes_at addr bs * R)%sep dmem -> P dmem) ->
     store_bytes dmem addr bs P.
   Proof.
+    pose proof word.unsigned_range addr.
+    assert (DMEM_BYTES < 2^32) by (cbv [DMEM_BYTES]; lia).
     generalize dependent dmem. generalize dependent addr.
-    generalize dependent P. generalize dependent R.
-    induction bs; cbn [store_bytes length] in *; cbv [store_byte]; intros;
+    generalize dependent P. generalize dependent R. generalize dependent old_bs.    
+    induction bs; destruct old_bs; cbn [store_bytes length] in *; try lia;
+      cbv [store_byte]; intros;
       repeat lazymatch goal with
-        | H : context [anybytes _ 0] |- _ => seprewrite_in anybytes_0_iff1 H
-        | H : context [anybytes _ (S _)] |- _ => seprewrite_in anybytes_S_iff1 H
-        | H : forall m, _ -> ?P m |- ?P _ => eapply H
+        | H : context [map.of_list_word_at _ nil] |- _ =>
+            rewrite map.of_list_word_nil in H
+        | H : context [map.of_list_word_at _ (cons _ _)] |- _ =>
+            rewrite map.of_list_word_at_cons in H
         | |- context [map.of_list_word_at _ nil] => rewrite map.of_list_word_nil
         | |- context [map.of_list_word_at _ (cons _ _)] => rewrite map.of_list_word_at_cons
-        | H : ?x < ?y |- if ?x <? ?y then _ else _ => destr (x <? y); [ | lia ]
-        | |- store_bytes _ _ bs _ => eapply IHbs with (R:=sep R (ptsto _ _)); intros
-        | |- _ /\ _ => ssplit
-        | H : ?P ?m |- (eq map.empty * ?P)%sep ?m =>
-            do 2 eexists; ssplit; eauto; apply map.split_empty_l; reflexivity
+        | H : length ?x = 0%nat |- _ => apply length_zero_iff_nil in H; subst
+        | |- store_bytes _ _ bs _ =>
+            eapply IHbs with (R:=sep R (ptsto _ _)) (old_bs:=old_bs); intros
+        | H : forall m, _ -> ?P m |- ?P _ => eapply H
+        | |- if ?x <? ?y then _ else _ => destr (x <? y); try lia
+        | |- context [word.unsigned (word.add _ _)] => rewrite word.unsigned_add
+        | |- context [word.unsigned (word.of_Z 1)] => rewrite word.unsigned_of_Z_1
+        | |- context [word.wrap (word.unsigned ?addr + 1)] =>
+            cbv [word.wrap]; rewrite Z.mod_small by lia
+        | |- _ /\ _ => ssplit            
+        | H : ?P |- ?P => exact H
         | _ => first [ progress extract_ex1_and_emp_in_hyps
                      | progress extract_ex1_and_emp_in_goal
                      | lazymatch goal with
                        | |- _ < _ => lia
+                       | |- _ <= _ => lia
+                       | |- length _ = length _ => lia
                        | _ => fail
                        end ]
         end.
-     { apply sep_assoc, sep_comm.  eapply sep_put.
-       use_sep_assumption. ecancel. }
-     { use_sep_assumption. ecancel.
-     { rewrite map.of_list_word_at_cons in *.
-        Search Lift1Prop.iff1.
-        Search sep map.put.
-        Search map.of_list_word_at.
-        eapply H0.
-        eauto.
-      cbv [store_byte].
+    { apply sep_assoc, sep_comm. eapply sep_put.
+      use_sep_assumption. rewrite put_iff1; [ ecancel | ].
+      eapply map_get_of_list_word_at_None. right.
+      rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
+      cbv [word.wrap]. Z.push_pull_mod.
+      rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
+      rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
+      rewrite Z.mod_small by lia. lia. }
+    { seprewrite put_iff1; [ | use_sep_assumption; ecancel ].
+      eapply map_get_of_list_word_at_None. right.
+      rewrite word.unsigned_sub, word.unsigned_add, word.unsigned_of_Z_1.
+      cbv [word.wrap]. Z.push_pull_mod.
+      rewrite Z.sub_add_distr. zsimplify. rewrite Z.sub_0_l.
+      rewrite Z.mod_opp_l_nz by (rewrite ?Z.mod_small by lia; lia).
+      rewrite Z.mod_small by lia. lia. }
   Qed.
   
-  Lemma store_word_step {width} {word : word.word width} dmem addr (v : word) (P : mem -> Prop) R :
+  Lemma store_word_step
+    {width} {word : word.word width} {word_ok : word.ok word}
+    dmem addr (v old_v : word) (P : mem -> Prop) R :
     is_word_aligned width addr = true ->
-    (anybytes addr (Z.to_nat (width / 8)) * R)%sep dmem ->
+    word.unsigned addr + width / 8 < DMEM_BYTES ->
+    (word_at addr old_v * R)%sep dmem ->
     (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
     store_word dmem addr v P.
   Proof.
-    intros. cbv [store_word]. destruct_one_match; [ | congruence ].
-    eapply store_bytes_step; eauto; [ ].
-    rewrite length_le_split. eauto.    
+    intros.
+    pose proof word.width_pos (word:=word).
+    cbv [store_word]. destruct_one_match; [ | congruence ].
+    eapply store_bytes_step.
+    { rewrite length_le_split.
+      rewrite Z2Nat.id by (apply Z.div_pos; lia). lia. }
+    { rewrite !length_le_split. reflexivity. }    
+    { use_sep_assumption. cbv [word_at]. ecancel. }
+    { intros. lazymatch goal with H : forall m, _ -> P m |- P _ => apply H end.
+      use_sep_assumption. cbv [word_at]. ecancel. }
   Qed.
 
   Definition start_state (dmem : mem) : otbn_state :=
@@ -3965,8 +3945,8 @@ Module Test.
   Compute (link [mul_fn; add_fn]).
   Definition prog0 : program := ltac:(link_program [start_fn; add_fn]).
 
-  Lemma prog0_correct dmem R :
-    (anybytes (word.of_Z 0) 4 * R)%sep dmem ->
+  Lemma prog0_correct v dmem R :
+    (word32_at (word.of_Z 0) v * R)%sep dmem ->
     eventually
       (run1 (fetch:=fetch prog0))
       (fun st =>
@@ -3990,7 +3970,10 @@ Module Test.
     simplify_side_condition.
     eapply eventually_step_cps.
     simplify_side_condition.
-    eapply store_word_step; [ rewrite word.add_0_l; solve [eauto] | ].
+    eapply store_word_step.
+    { rewrite word.add_0_l; apply is_word_aligned_0. lia. }
+    { rewrite word.add_0_l, word.unsigned_of_Z_0. vm_compute; reflexivity. }
+    { rewrite word.add_0_l. use_sep_assumption. ecancel. }
     intros.
     eapply eventually_step_cps.
     simplify_side_condition.
