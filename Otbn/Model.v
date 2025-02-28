@@ -3458,7 +3458,9 @@ Section Helpers.
 
   Lemma anybytes_S_iff1 n addr :
     Lift1Prop.iff1 (anybytes addr (S n))
-      (Lift1Prop.ex1 (fun v => ptsto addr v) * anybytes (word.add addr (word.of_Z 1)) n)%sep.
+      (emp (word.unsigned addr < DMEM_BYTES)
+       * Lift1Prop.ex1 (fun v => ptsto addr v)
+       * anybytes (word.add addr (word.of_Z 1)) n)%sep.
   Proof.
     cbv [anybytes].
     pose proof word.unsigned_range addr.
@@ -3470,7 +3472,7 @@ Section Helpers.
       cbn [length] in *.
       extract_ex1_and_emp_in_goal.
       rewrite word.unsigned_add, word.unsigned_of_Z_1.
-      ssplit; [ | solve [eauto] | ].
+      ssplit; [ | lia | solve [eauto] | ].
       { rewrite map.of_list_word_at_cons.
         eapply sepeq_on_undef_put.
         apply map_get_of_list_word_at_None; eauto; [ ].
@@ -3499,15 +3501,8 @@ Section Helpers.
       { apply map.of_list_word_at_cons. }
       { cbn [length].
         rewrite word.unsigned_add, word.unsigned_of_Z_1 in *.
-        Search map.of_list_word_at.
-        cbv [word.wrap] in *. rewrite Z.mod_small in *.
-        2:split; try lia.
-        2:{
-          (* bad case: addr = 2^32-1 *)
-          (* then (word.add addr 1) + length bs < DMEM_BYTES *)
-          (* but word.addr + 1 + length bs is not < DMEM_BYTES *)
-        Search word.wrap.
-        rewrite word
+        cbv [word.wrap] in *. rewrite Z.mod_small in * by lia.
+        lia. } }
   Qed.
     
   Lemma store_bytes_step dmem addr (bs : list byte) (P : mem -> Prop) R :
@@ -3517,20 +3512,29 @@ Section Helpers.
   Proof.
     generalize dependent dmem. generalize dependent addr.
     generalize dependent P. generalize dependent R.
-    induction bs; cbn [store_bytes length] in *; intros.
-    { cbv [anybytes] in *.
-      extract_ex1_and_emp_in_hyps.
-      lazymatch goal with H : length ?x = 0%nat |- _ => apply length_zero_iff_nil in H; subst end.
-      rewrite !map.of_list_word_nil in *.
-      eauto. }
-    { cbv [store_byte]. eapply IHbs.
-      {
-      cbv [anybytes] in *.
-      extract_ex1_and_emp_in_hyps.
-      Search sep map.put.
-      2:{
-        
-        rewrite map.of_list_word_at_cons in *.
+    induction bs; cbn [store_bytes length] in *; cbv [store_byte]; intros;
+      repeat lazymatch goal with
+        | H : context [anybytes _ 0] |- _ => seprewrite_in anybytes_0_iff1 H
+        | H : context [anybytes _ (S _)] |- _ => seprewrite_in anybytes_S_iff1 H
+        | H : forall m, _ -> ?P m |- ?P _ => eapply H
+        | |- context [map.of_list_word_at _ nil] => rewrite map.of_list_word_nil
+        | |- context [map.of_list_word_at _ (cons _ _)] => rewrite map.of_list_word_at_cons
+        | H : ?x < ?y |- if ?x <? ?y then _ else _ => destr (x <? y); [ | lia ]
+        | |- store_bytes _ _ bs _ => eapply IHbs with (R:=sep R (ptsto _ _)); intros
+        | |- _ /\ _ => ssplit
+        | H : ?P ?m |- (eq map.empty * ?P)%sep ?m =>
+            do 2 eexists; ssplit; eauto; apply map.split_empty_l; reflexivity
+        | _ => first [ progress extract_ex1_and_emp_in_hyps
+                     | progress extract_ex1_and_emp_in_goal
+                     | lazymatch goal with
+                       | |- _ < _ => lia
+                       | _ => fail
+                       end ]
+        end.
+     { apply sep_assoc, sep_comm.  eapply sep_put.
+       use_sep_assumption. ecancel. }
+     { use_sep_assumption. ecancel.
+     { rewrite map.of_list_word_at_cons in *.
         Search Lift1Prop.iff1.
         Search sep map.put.
         Search map.of_list_word_at.
