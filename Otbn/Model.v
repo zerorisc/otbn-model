@@ -3644,12 +3644,13 @@ Ltac solve_is_word_aligned t :=
   | _ => t
   end.
 
-Search write_wdr_indirect.
 Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
   | |- _ /\ _ => split
   | |- context [word.add ?a (word.of_Z 0)] => rewrite (word.add_0_r a)
+  | |- context [?x =? ?x] => rewrite (Z.eqb_refl x)
+  | |- context [?x <? ?x] => rewrite (Z.ltb_irrefl x)
   | |- context [if is_valid_addi_imm ?v then _ else _] =>
         replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
   | |- context [if is_valid_bn_imm ?v then _ else _] =>
@@ -3661,7 +3662,7 @@ Ltac simplify_side_condition_step :=
   | |- context [if is_word_aligned ?width ?a then _ else _] =>
         replace (is_word_aligned width a) with true by (symmetry; solve_is_word_aligned ltac:(lia))
   | |- context [if is_valid_shift_imm ?s then _ else _] =>
-        replace (is_valid_shift_imm s) with true by (cbv [is_valid_shift_imm]; lia)
+        replace (is_valid_shift_imm s) with true by (vm_compute; lia)
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
   | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
@@ -3716,7 +3717,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_wdr]
+               | progress cbv [gpr_has_value write_wdr apply_shift update_mlz write_flag]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -3902,9 +3903,9 @@ Ltac straightline_step :=
   let i := get_next_insn in
   lazymatch i with
   | Some (Straightline _) =>
-      intros; subst; eapply eventually_step;
-      [ simplify_side_condition; [ .. | try eapply eq_refl]
-      | intros; subst; track_registers_update ]
+      intros; subst; eapply eventually_step_cps;
+      simplify_side_condition; [ ];
+      intros; subst; track_registers_update
   | Some ?i => fail "next instruction is not straightline:" i
   | None => fail "pc is invalid?"
   end.
@@ -4382,7 +4383,7 @@ Module Test.
   Proof.
     cbv [bignum_mul_fn returns]. intros; subst.
     repeat straightline_step.
- 
+
     (* branch; use branch helper lemma *)
     eapply eventually_beq.
     { reflexivity. }
@@ -4556,12 +4557,12 @@ Module Test.
       cbv. tauto. }
   Qed.
 
-  Lemma prog0_correct_prelink regs wregs flags dmem :
+  Lemma prog0_correct_prelink regs wregs flags dmem (v : word32) R :
+    (word_at (word.of_Z 0) v * R)%sep dmem ->
     exits
       (fetch:=fetch_ctx [start_fn; add_fn])
       "start"%string regs wregs flags dmem [] []
-      (fun dmem' =>
-         map.get dmem' (word.of_Z 0) = Some (word.of_Z 5))
+      (word_at (width:=32) (word.of_Z 0) (word.of_Z 5) * R)%sep
       (fun errs => False).
   Proof.
     cbv [exits start_fn start_state]; intros.
@@ -4582,25 +4583,39 @@ Module Test.
     track_registers_combine.
 
     repeat straightline_step.
+    eapply store_word32_step.
+    { apply is_word_aligned_0; lia. }
+    { rewrite word.unsigned_of_Z_0; cbv [DMEM_BYTES]; lia. }
+    { use_sep_assumption; ecancel. }
+    simplify_side_condition.
+    intros; subst.
+    track_registers_update.
+    
+    repeat straightline_step.
 
     eapply eventually_ecall; ssplit; [ reflexivity .. | ].
     subst_lets. cbv [addi_spec]. repeat destruct_one_match; try lia; [ ].
-    rewrite !word.add_0_l. solve_map.
-    apply f_equal. apply word.unsigned_inj.
-    rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
+    use_sep_assumption.
+    lazymatch goal with |- Lift1Prop.iff1 (?P ?x * ?Q)%sep (?P ?y * ?Q)%sep =>
+                          replace y with x; [ reflexivity | ]
+    end.
+    subst_lets. cbv [addi_spec].
+    repeat destruct_one_match; try lia.
+    rewrite !word.add_0_l.
+    rewrite <-word.ring_morph_add.
     reflexivity.
   Qed.
 
   (* check that link_run1 works by using add_fn proof to prove link_run1 program *)
-  Lemma prog0_correct_postlink :
+  Lemma prog0_correct_postlink dmem (v : word32) R :
+    (word_at (word.of_Z 0) v * R)%sep dmem ->
     exits
       (fetch:=fetch prog0)
-      0%nat map.empty map.empty map.empty map.empty [] []
-      (fun dmem' =>
-         map.get dmem' (word.of_Z 0) = Some (word.of_Z 5))
+      0%nat map.empty map.empty map.empty dmem [] []
+      (word_at (width:=32) (word.of_Z 0) (word.of_Z 5) * R)%sep
       (fun errs => False).
   Proof.
-    set (fns:=[start_fn; add_fn]).
+    set (fns:=[start_fn; add_fn]). intros.
     assert (link fns = inl prog0) by reflexivity.
     let x := eval vm_compute in (link_symbols [start_fn; add_fn]) in
       match x with
