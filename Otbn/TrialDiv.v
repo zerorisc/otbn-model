@@ -237,6 +237,16 @@ Section __.
                        * bignum_at ptr v1)%sep)))).
   Admitted.
 
+  (* helper lemma for shift expressions *)
+  Lemma and_shift_right_ones (x : word256) n :
+    word.unsigned (word.and x (word.sru (word.of_Z (2^256 - 1)) (word.of_Z n))) = word.unsigned x mod 2^n.
+  Admitted.
+
+  (* helper lemma for shift expressions *)
+  Lemma shift_right_ones (x : word256) n :
+    word.unsigned (word.sru x (word.of_Z n)) = word.unsigned x / 2^n.
+  Admitted.
+
   (* helper lemma that makes it easier to prove the folding steps *)
   Lemma pow2_mod1_multiple w i m :
     0 <= w ->
@@ -293,7 +303,7 @@ Section __.
                   /\ 0 <= word.unsigned v < 2^33)
            /\ clobbers [flagM FG0; flagL FG0; flagZ FG0; flagC FG0] flags flags'
            /\ clobbers [wdreg w22; wdreg w23] wregs wregs'
-           /\ clobbers [gpreg x2] regs regs').
+           /\ clobbers [gpreg x2; gpreg x22] regs regs').
   Proof.    
     cbv [fold_bignum returns]. intros; subst.
     track_registers_init.
@@ -474,16 +484,26 @@ Section __.
 
     track_registers_combine.
 
-    print_next_insn.
-    Print
-      straightline_step.
-    eapply eventually_step_cps; simplify_side_condition.
-
-    
+    straightline_step.
+    straightline_step.
+    straightline_step.
+    straightline_step.
+    straightline_step.
+    straightline_step.
     
     intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; eauto.
-    print_next_insn.
-    (* end of loop *)
+    ssplit; eauto; [ ].
+    eexists; ssplit; eauto.
+    all:subst_lets.
+    all:repeat first [ rewrite word.unsigned_add
+                     | rewrite shift_right_ones
+                     | rewrite and_shift_right_ones ].
+    Search 
+      all:repeat lazymatch goal with
+            | |- context [word.unsigned [word.add _ _]] => rewrite word.unsigned_add
+                                                                   
+      { clear. 
+      repeat 
+      rewrite !word.unsigned_add.
 
   Qed.

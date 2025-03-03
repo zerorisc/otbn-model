@@ -875,7 +875,7 @@ Section Semantics.
                (fun vy =>
                   apply_shift vy s
                     (fun vy =>
-                       let result := word.xor vx vy in
+                       let result := word.and vx vy in
                        write_wdr wregs d result
                          (fun wregs =>
                             update_mlz flags fg result
@@ -3650,6 +3650,35 @@ Section Helpers.
     apply Z.mod_small; lia.
   Qed.
 
+  Lemma apply_shift_0 x P : P x -> apply_shift x 0 P.
+  Proof.
+    intros; cbv [apply_shift is_valid_shift_imm].
+    change (Z.abs 0) with 0. rewrite Z.mod_0_l by lia.
+    repeat destruct_one_match; try lia. eauto.
+  Qed.
+
+  Lemma apply_shiftl x s P :
+    0 < s <= 248 ->
+    s mod 8 = 0 ->
+    P (word.slu x (word.of_Z s)) ->
+    apply_shift x s P.
+  Proof.
+    intros; cbv [apply_shift is_valid_shift_imm].
+    rewrite Z.abs_eq by lia.
+    repeat destruct_one_match; try lia; eauto.
+  Qed.
+
+  Lemma apply_shiftr x s P :
+    0 < s <= 248 ->
+    s mod 8 = 0 ->
+    P (word.sru x (word.of_Z s)) ->
+    apply_shift x (-s) P.
+  Proof.
+    intros; cbv [apply_shift is_valid_shift_imm].
+    rewrite Z.abs_opp, Z.abs_eq by lia.
+    repeat destruct_one_match; try lia; eauto.
+  Qed.
+
   Definition start_state (dmem : mem) : otbn_state :=
     otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty dmem [] [].
 End Helpers.
@@ -3716,6 +3745,10 @@ Ltac simplify_side_condition_step :=
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
+  | |- apply_shift _ 0 _ => eapply apply_shift_0
+  | |- apply_shift _ (Zneg ?p) _ => change (Zneg p) with (Z.opp (Zpos p))
+  | |- apply_shift _ (- _) _ => eapply apply_shiftr; [ lia | cbn; congruence | ]
+  | |- apply_shift _ _ _ => eapply apply_shiftl; [ lia | cbn; congruence | ]
   | |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
       eapply store_word32_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
   | |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
