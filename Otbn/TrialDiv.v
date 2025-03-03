@@ -183,9 +183,12 @@ Section __.
        (Bn_add w23 w22 w23 (-32) FG0 : insn);
        (Ret : insn)]).
 
-  Definition fold_bignum_spec (x : list word256) (n : nat) : Z :=
-    let x := fold_left Z.add (map word.unsigned x) 0 in
-    let x := x mod 2^128 + x / 2^128 in
+  Definition fold_bignum_array (x : list word256) : Z :=
+    fold_left (fun acc x => (acc mod 2^256 + x + acc / 2^256)) (map word.unsigned x) 0.
+
+  Definition fold_bignum_spec (x : list word256) : Z :=
+    let x := fold_bignum_array x in
+    let x := x mod 2^128 + (x / 2^128) mod 2^128 + x / 2^256 in
     let x := x mod 2^64 + x / 2^64 in
     let x := x mod 2^32 + x / 2^32 in
     x.
@@ -239,13 +242,47 @@ Section __.
 
   (* helper lemma for shift expressions *)
   Lemma and_shift_right_ones (x : word256) n :
-    word.unsigned (word.and x (word.sru (word.of_Z (2^256 - 1)) (word.of_Z n))) = word.unsigned x mod 2^n.
+    word.unsigned (word.and x (word.sru (word.of_Z (2^256 - 1)) (word.of_Z n))) = word.unsigned x mod 2^(256 - n).
   Admitted.
 
   (* helper lemma for shift expressions *)
   Lemma shift_right_ones (x : word256) n :
     word.unsigned (word.sru x (word.of_Z n)) = word.unsigned x / 2^n.
   Admitted.
+
+  (* helper lemma for stepwise equivalence *)
+  Lemma fold_bignum_step_word (x : word256) y n :
+    0 < n < 256 ->
+    word.unsigned x = y ->
+    word.unsigned
+      (word.add (word.and x (word.sru (word.of_Z (2 ^ 256 - 1)) (word.of_Z (256 - n))))
+         (word.sru x (word.of_Z n))) = y mod 2 ^ n + y / 2 ^ n.
+  Proof.
+    intros; subst. rewrite word.unsigned_add.
+    rewrite and_shift_right_ones, shift_right_ones.    
+    pose proof word.unsigned_range x.
+    pose proof Z.mod_pos_bound (word.unsigned x) (2^n) ltac:(lia).
+    pose proof Z.div_lt_upper_bound
+      (word.unsigned x) (2^n) (2^(256-n))
+      ltac:(lia) ltac:(rewrite <-Z.pow_add_r by lia; replace (n + (256 - n)) with 256; lia).
+    pose proof Z.div_pos (word.unsigned x) (2^n) ltac:(lia) ltac:(lia).
+    replace (256 - (256 - n)) with n by lia.
+    assert (2^n + 2^(256 - n) < 2^256); [ | apply Z.mod_small; lia ].
+    destr (n =? 1); [ lia | ].
+    change (2^256) with (2^255 + 2^255).
+    assert (2^(256 - n) < 2^255) by (apply Z.pow_lt_mono_r; lia).
+    assert (2^n <= 2^255) by (apply Z.pow_le_mono; lia).
+    lia.
+  Qed.
+
+  (* helper lemma for expressions with carries *)
+  Lemma addc_high_bit (x : word256) (y : Z):
+    (word.unsigned x + 2 ^ 256 * y) / 2 ^ 256 = y.
+  Proof.
+    rewrite Z.add_comm, Z.mul_comm.
+    rewrite Z.div_add_l by lia. rewrite Z.div_small; [ lia | ].
+    apply word.unsigned_range.
+  Qed.
 
   (* helper lemma that makes it easier to prove the folding steps *)
   Lemma pow2_mod1_multiple w i m :
@@ -268,6 +305,13 @@ Section __.
   Qed.
 
   (* TODO: move *)
+  Lemma carry_bit_add_div x y :
+    0 <= x < 2^256 ->
+    0 <= y < 2^256 ->
+    Z.b2z (carry_bit (x + y)) = (x + y) / 2^256.
+  Admitted.
+
+  (* TODO: move *)
   Lemma carry_bit_addc_div x y c :
     0 <= x < 2^256 ->
     0 <= y < 2^256 ->
@@ -288,9 +332,7 @@ Section __.
       (2^32 mod m = 1) ->
       1 < m ->
       word.unsigned plen = Z.of_nat (length x) ->
-      (* TODO: probably 0 < length x is enough here with a bit more
-         proof effort, but it's not clearly necessary *)
-      (1 < length x)%nat ->
+      (length x <> 0)%nat ->
       (bignum_at dptr_x x * R)%sep dmem ->
       returns
         (fetch:=fetch_ctx [fold_bignum])
@@ -299,8 +341,7 @@ Section __.
            dmem = dmem'
            /\ (exists v,
                   map.get wregs' (wdreg w23) = Some v
-                  /\ word.unsigned v mod m = eval x mod m
-                  /\ 0 <= word.unsigned v < 2^33)
+                  /\ word.unsigned v = fold_bignum_spec x)
            /\ clobbers [flagM FG0; flagL FG0; flagZ FG0; flagC FG0] flags flags'
            /\ clobbers [wdreg w22; wdreg w23] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x22] regs regs').
@@ -323,7 +364,6 @@ Section __.
        x22 = 22
        (w23 + FG0.C) \equiv x[0] + x[1] + ... + x[n-i] (mod m)
      *)
-    (* loop; use loop invariant lemma *)
     let regs := lazymatch goal with
                   |- eventually run1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
                     regs end in
@@ -348,8 +388,8 @@ Section __.
            /\ (exists acc c,
                   map.get wregs' (wdreg w23) = Some acc
                   /\ map.get flags' (flagC FG0) = Some c
-                  /\ (word.unsigned acc + Z.b2z c) mod m
-                     = eval (List.firstn (length x - i) x) mod m)
+                  /\ word.unsigned acc + 2^256 * Z.b2z c
+                     = fold_bignum_array (List.firstn (length x - i) x))
            /\ dmem' = dmem
            /\ clobbers [flagM FG0; flagL FG0; flagZ FG0; flagC FG0] flags flags'
            /\ clobbers [wdreg w22; wdreg w23] wregs wregs'
@@ -370,7 +410,7 @@ Section __.
         cbv [addi_spec]. destruct_one_match; try lia; [ ].
         apply f_equal. apply f_equal. ring. }
       { (* accumulator equation *)
-        rewrite @eval_nil. subst_lets.
+        cbn [fold_left List.firstn]. subst_lets.
         rewrite word.unsigned_of_Z_0.
         reflexivity. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
@@ -405,6 +445,13 @@ Section __.
       
       (* end of loop; use loop-end helper lemma *)
       eapply eventually_loop_end; [ reflexivity .. | ].
+      (* prove that the remaining length of the bignum matches the remaining iterations *)
+      lazymatch goal with
+      | H : (?i < Z.to_nat (word.unsigned plen))%nat |- context[?x ++ [?y] ++ ?z] =>
+          assert (i = length z)%nat
+          by (rewrite ?app_length in *; cbn [length] in *; destruct x, z; cbn [length] in *;
+              lia)
+      end.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
@@ -413,7 +460,7 @@ Section __.
           apply (f_equal Some). apply word.unsigned_inj.
           rewrite !word.unsigned_add, !word.unsigned_of_Z.
           cbv [word.wrap]. Z.push_pull_mod. f_equal. lia. }
-        { do 2 eexists; subst_lets; ssplit; try reflexivity; [ ].
+        {
           (* at this point the remainder of the bignum is nil *)
           lazymatch goal with
           | |- context[?x ++ [?y] ++ ?z] =>
@@ -421,26 +468,27 @@ Section __.
               [ rewrite !app_nil_r in *
               | rewrite ?app_length in *; cbn [length] in *; lia ]
           end.
-          rewrite Nat.sub_0_r, List.firstn_all.
-          erewrite !eval_app, eval_cons, eval_nil by eauto.
-          rewrite Z.add_0_r.
-          lazymatch goal with
-          | H : _ = eval (List.firstn (length (?a ++ [?b]) - 1) (?a ++ [?b])) mod m |- _ =>
-              rewrite List.firstn_app_l in H by (rewrite app_length; cbn [length]; lia)
-          end.
-          rewrite carry_bit_addc_div by (eauto using word.unsigned_range).
+          rewrite Nat.sub_0_r. cbv [fold_bignum_array] in *.
+          rewrite List.firstn_all. rewrite map_app. cbn [map].
+          rewrite fold_left_app. cbn [fold_left].
+          repeat lazymatch goal with
+                 | H : context [List.firstn (length (?a ++ [?b]) - 1) (_ ++ [_])] |- _ =>
+                     rewrite List.firstn_app_l in H by (rewrite ?app_length; cbn [length]; lia)
+                 end.
+          do 2 eexists; subst_lets; ssplit; try reflexivity; [ ].
           rewrite !word.unsigned_add, !word.unsigned_of_Z by lia.
-          cbv [word.wrap]. Z.push_pull_mod.
-          (* for some reason the mod m doesn't get fully pulled out *)
-          rewrite <-Z.add_mod by lia.
-          rewrite fold_bignum_step by lia.
-          Z.push_mod. rewrite pow2_mod1_multiple by lia.
-          lazymatch goal with H : _ = eval ?v mod m |- _ => rewrite <-H end.
-          rewrite Z.mul_1_l. Z.push_pull_mod.
-          f_equal; lia. } }
+          cbv [word.wrap]. Z.push_mod.
+          lazymatch goal with H : _ = fold_left ?f ?x ?a0
+                              |- context [fold_left ?f ?x ?a0] => rewrite <-H end.
+          Z.push_mod. rewrite Z.mod_same, Z.mul_0_l, Z.mod_0_l, Z.add_0_r by lia.
+          rewrite carry_bit_addc_div by (eauto using word.unsigned_range).
+          Z.push_pull_mod.
+          rewrite (Z.mod_eq (_ + _ + _) (2^256)) by lia.
+          rewrite addc_high_bit.
+          rewrite (Z.mod_small (word.unsigned _)) by apply word.unsigned_range.
+          lia. } }
       { (* case: 0 < i, loop continues *)
         intros; subst. eapply eventually_done.
-        (* prove that the remaining length of the bignum matches the remaining iterations *)
         lazymatch goal with
         | H : (?i < Z.to_nat (word.unsigned plen))%nat |- context[?x ++ [?y] ++ ?z] =>
             assert (i = length z)%nat
@@ -454,26 +502,27 @@ Section __.
           cbv [word.wrap]. Z.push_pull_mod. f_equal. lia. }
         { do 2 eexists. ssplit; eauto; [ ]. subst_lets.
           lazymatch goal with
-          | H : _ = eval (List.firstn (length (?a ++ [?b] ++ ?c) - _) (?a ++ [?b] ++ ?c)) mod m
+          | H : context [List.firstn (length (?a ++ [?b] ++ ?c) - _) (?a ++ [?b] ++ ?c)]
             |- _ =>
               rewrite List.firstn_app_l in H by (rewrite ?app_length; cbn [length]; lia)
           end.
           rewrite app_assoc.
           rewrite List.firstn_app_l by (rewrite ?app_length; cbn [length]; lia).
-          erewrite eval_app, eval_cons, eval_nil by reflexivity.
+          cbv [fold_bignum_array] in *. rewrite map_app, fold_left_app; cbn [map fold_left].
           rewrite carry_bit_addc_div by (eauto using word.unsigned_range).
           rewrite !word.unsigned_add, !word.unsigned_of_Z by lia.
           cbv [word.wrap]. Z.push_pull_mod.
-          (* for some reason the mod m doesn't get fully pulled out *)
-          rewrite <-Z.add_mod by lia.
-          rewrite fold_bignum_step by lia.
-          zsimplify. Z.push_mod. rewrite pow2_mod1_multiple by lia.
-          lazymatch goal with H : _ = eval ?v mod m |- _ => rewrite <-H end.
-          zsimplify. f_equal; lia. } } }
+          lazymatch goal with H : _ = fold_left ?f ?x ?a0
+                              |- context [fold_left ?f ?x ?a0] => rewrite <-H end.
+          rewrite (Z.mod_eq (_ + _ + _)) by lia.
+          Z.push_mod. zsimplify. Z.pull_mod.
+          rewrite addc_high_bit.
+          rewrite (Z.mod_small (word.unsigned _)) by apply word.unsigned_range.
+          lia. } } }
 
     
     (* invariant implies postcondition (i.e. post-loop code) *)
-    rewrite Nat.sub_0_r. intros.
+    rewrite Nat.sub_0_r, List.firstn_all. intros.
     repeat lazymatch goal with
            | H : exists _, _ |- _ => destruct H
            | H : _ /\ _ |- _ => destruct H
@@ -493,17 +542,48 @@ Section __.
     
     intros; subst. eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; eauto; [ ].
-    eexists; ssplit; eauto.
-    all:subst_lets.
-    all:repeat first [ rewrite word.unsigned_add
-                     | rewrite shift_right_ones
-                     | rewrite and_shift_right_ones ].
-    Search 
-      all:repeat lazymatch goal with
-            | |- context [word.unsigned [word.add _ _]] => rewrite word.unsigned_add
-                                                                   
-      { clear. 
-      repeat 
-      rewrite !word.unsigned_add.
+    eexists; ssplit; eauto; [ ].
+    (* prove the equality one let at a time *)
+    cbv beta delta [fold_bignum_spec].
+    repeat lazymatch goal with
+           | |- ?lhs = (let x := ?y in ?e) =>
+               change (let x := y in lhs = e); intro
+           end.
+    repeat lazymatch goal with
+           | |- word.unsigned _ = ?z mod 2^?n + ?z / 2^?n =>
+               apply (fold_bignum_step_word _ _ n); [ lia | ]
+           | |- word.unsigned ?v = ?x => progress subst x
+           end.
 
+    (* first fold is different from the others because it has a carry *)
+    subst_lets.
+    rewrite !word.unsigned_add.
+    rewrite and_shift_right_ones, shift_right_ones.
+    lazymatch goal with |- context [Z.b2z ?c] =>
+                          assert (0 <= Z.b2z c < 2) by (destruct c; cbn; lia) end.
+    rewrite word.unsigned_of_Z_nowrap by lia.
+    change (256 - 128) with 128.
+    lazymatch goal with H : _ = fold_bignum_array _ |- _ => rewrite <-H end.
+    cbv [word.wrap]. Z.push_mod. change (2^256 mod 2^128) with 0.
+    zsimplify. rewrite (Z.mod_small (Z.b2z _)) by lia.
+    lazymatch goal with |- context [(?x mod (2^128)) mod 2^256] =>
+                          pose proof Z.mod_pos_bound x (2^128) ltac:(lia);
+                          rewrite (Z.mod_small (x mod 2^128) (2^256)) by lia
+    end.
+    lazymatch goal with |- context [(word.unsigned ?x / (2^128)) mod 2^256] =>
+                          pose proof word.unsigned_range x;
+                          pose proof Z.div_pos (word.unsigned x) (2^128) ltac:(lia) ltac:(lia);
+                          pose proof Z.div_lt_upper_bound (word.unsigned x) (2^128) (2^128) ltac:(lia) ltac:(lia);
+                          rewrite (Z.mod_small (word.unsigned x / 2^128) (2^256)) by lia
+    end.
+    rewrite (Z.mod_small (_ + _ / 2^128)) by lia.
+    rewrite addc_high_bit.
+    lazymatch goal with |- context [(?a + 2^256 * ?b) / 2^128] =>
+                          replace (a + 2^256 * b) with ((2^128*b)*2^128 + a) by lia;
+                          rewrite Z.div_add_l by lia
+    end.
+    rewrite (Z.mod_small _ (2^256)) by lia.
+    Z.push_mod. rewrite Z.mod_same by lia. zsimplify.
+    rewrite (Z.mod_small (_ / 2^128)) by lia.
+    lia.
   Qed.
