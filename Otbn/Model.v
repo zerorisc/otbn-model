@@ -509,7 +509,7 @@ Section Semantics.
   Definition is_valid_wide_mem_offset (imm : Z) : bool :=
     (-16384 <=? imm) && (imm <=? 16352) && (imm mod 32 =? 0).
   Definition is_word_aligned width (addr : word32) : bool :=
-    word.eqb (word.of_Z 0) (word.and addr (word.of_Z (Z.ones width))).
+    word.eqb (word.of_Z 0) (word.and addr (word.of_Z (width - 1))).
   Definition is_valid_shift_imm (imm : Z) : bool :=
     (0 <=? imm) && (imm <=? 248) && (imm mod 8 =? 0).
 
@@ -663,7 +663,7 @@ Section Semantics.
 
     Definition load_word {width} {word : word.word width}
       (dmem : mem) (addr : word32) (P : word -> T) : T :=
-      if is_word_aligned width addr
+      if is_word_aligned (width / 8) addr
       then load_bytes dmem addr (Z.to_nat (width / 8)) (fun bs => P (word.of_Z (le_combine bs)))
       else err ("Attempt to load word from unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
 
@@ -746,7 +746,7 @@ Section Semantics.
 
     Definition store_word {width} {word : word.word width}
       (dmem : mem) (addr : word32) (v : word) (P : mem -> T) : T :=
-      if is_word_aligned width addr
+      if is_word_aligned (width / 8) addr
       then store_bytes dmem addr (le_split (Z.to_nat (width / 8)) (word.unsigned v)) P
       else err ("Attempt to store word at unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
  
@@ -3133,7 +3133,7 @@ Section Helpers.
       invariant iters regs wregs flags dmem ->
       (* invariant step condition; if `invariant` holds at start, we reach end *)
       (forall i regs wregs flags dmem,
-          (0 <= i <= iters)%nat ->
+          (0 <= i < iters)%nat ->
           invariant (S i) regs wregs flags dmem ->
           eventually (run1 (fetch:=fetch))
           (fun st => (exists regs wregs flags dmem,
@@ -3333,7 +3333,7 @@ Section Helpers.
 
   Lemma is_word_aligned_imm width imm :
     0 <= width <= 32 ->
-    is_word_aligned width (word.of_Z imm) = true <-> (imm mod 2^width = 0).
+    is_word_aligned (2^width) (word.of_Z imm) = true <-> (imm mod 2^width = 0).
   Proof.
     cbv [is_word_aligned]. intros.
     pose proof Z.pow_pos_nonneg 2 width ltac:(lia) ltac:(lia).
@@ -3341,6 +3341,7 @@ Section Helpers.
     assert (0 <= Z.ones width < 2^32) by (rewrite Z.ones_equiv; split; lia).
     rewrite word.unsigned_eqb, Z.eqb_eq.
     rewrite word.unsigned_of_Z_0, word.unsigned_and.
+    replace (2^width - 1) with (Z.ones width) by (rewrite Z.ones_equiv; lia).
     rewrite (word.unsigned_of_Z_nowrap (Z.ones width)) by lia.
     rewrite Z.land_ones by lia.
     rewrite word.unsigned_of_Z.
@@ -3352,8 +3353,15 @@ Section Helpers.
     Z.push_mod. zsimplify. split; lia.
   Qed.
 
+  Lemma is_word32_aligned_imm imm :
+    is_word_aligned 4 (word.of_Z imm) = true <-> (imm mod 4 = 0).
+  Proof. apply (is_word_aligned_imm 2). lia. Qed.
+
+  Lemma is_word256_aligned_imm imm :
+    is_word_aligned 32 (word.of_Z imm) = true <-> (imm mod 32 = 0).
+  Proof. apply (is_word_aligned_imm 5). lia. Qed.
+
   Lemma is_word_aligned_0 width :
-    0 <= width <= 32 ->
     is_word_aligned width (word.of_Z 0) = true.
   Proof.
     cbv [is_word_aligned]. intros. apply word.eqb_eq, word.unsigned_inj.
@@ -3363,9 +3371,9 @@ Section Helpers.
 
   Lemma is_word_aligned_add width addr offset :
     0 <= width <= 32 ->
-    is_word_aligned width addr = true ->
-    is_word_aligned width offset = true ->
-    is_word_aligned width (word.add addr offset) = true.
+    is_word_aligned (2^width) addr = true ->
+    is_word_aligned (2^width) offset = true ->
+    is_word_aligned (2^width) (word.add addr offset) = true.
   Proof.
     cbv [is_word_aligned]; intros. apply word.eqb_eq.
     repeat lazymatch goal with
@@ -3379,8 +3387,8 @@ Section Helpers.
     rewrite !word.unsigned_and, !word.unsigned_add in *.
     pose proof Z.pow_pos_nonneg 2 width ltac:(lia) ltac:(lia).
     assert (2^width <= 2^32) by (apply Z.pow_le_mono; lia).
-    assert (0 <= Z.ones width < 2^32) by (rewrite Z.ones_equiv; split; lia).
     rewrite !word.unsigned_of_Z_nowrap in * by lia.
+    replace (2^width - 1) with (Z.ones width) in * by (rewrite Z.ones_equiv; lia).
     rewrite !Z.land_ones in * by lia.
     cbv [word.wrap] in *.
     repeat lazymatch goal with
@@ -3399,6 +3407,18 @@ Section Helpers.
     repeat lazymatch goal with H : 0 = ?x |- context [?x] => rewrite <-H end.
     rewrite Z.mod_0_l by lia. reflexivity.
   Qed.
+
+  Lemma is_word32_aligned_add addr offset :
+    is_word_aligned 4 addr = true ->
+    is_word_aligned 4 offset = true ->
+    is_word_aligned 4 (word.add addr offset) = true.
+  Proof. apply (is_word_aligned_add 2). lia. Qed.
+
+  Lemma is_word256_aligned_add addr offset :
+    is_word_aligned 32 addr = true ->
+    is_word_aligned 32 offset = true ->
+    is_word_aligned 32 (word.add addr offset) = true.
+  Proof. apply (is_word_aligned_add 5). lia. Qed.
 
   (* TODO: put somewhere useful? *)
   Lemma put_iff1 {K V} {map : map.map K V} {map_ok : map.ok map}
@@ -3502,13 +3522,13 @@ Section Helpers.
   Lemma store_word_step
     {width} {word : word.word width} {word_ok : word.ok word}
     dmem addr (v old_v : word) (P : mem -> Prop) R :
-    is_word_aligned width addr = true ->
+    is_word_aligned (width / 8) addr = true ->
     word.unsigned addr + width / 8 < DMEM_BYTES ->
     (word_at addr old_v * R)%sep dmem ->
     (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
     store_word dmem addr v P.
   Proof.
-    intros.
+    intros. subst.
     pose proof word.width_pos (word:=word).
     cbv [store_word]. destruct_one_match; [ | congruence ].
     eapply store_bytes_step.
@@ -3522,7 +3542,7 @@ Section Helpers.
   
   Lemma store_word32_step
     dmem addr (v old_v : word32) (P : mem -> Prop) R :
-    is_word_aligned 32 addr = true ->
+    is_word_aligned 4 addr = true ->
     word.unsigned addr + 4 < DMEM_BYTES ->
     (word_at addr old_v * R)%sep dmem ->
     (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
@@ -3531,7 +3551,7 @@ Section Helpers.
   
   Lemma store_word256_step
     dmem addr (v old_v : word256) (P : mem -> Prop) R :
-    is_word_aligned 256 addr = true ->
+    is_word_aligned 32 addr = true ->
     word.unsigned addr + 32 < DMEM_BYTES ->
     (word_at addr old_v * R)%sep dmem ->
     (forall dmem, (word_at addr v * R)%sep dmem -> P dmem) ->
@@ -3570,7 +3590,7 @@ Section Helpers.
     {width} {word : word.word width} {word_ok : word.ok word}
     dmem addr (v : word) (P : _ -> Prop) R :
     width mod 8 = 0 ->
-    is_word_aligned width addr = true ->
+    is_word_aligned (width / 8) addr = true ->
     word.unsigned addr + width / 8 < DMEM_BYTES ->
     (word_at addr v * R)%sep dmem ->
     P v ->
@@ -3590,7 +3610,7 @@ Section Helpers.
   Qed.
 
   Lemma load_word32_step dmem addr (v :word32) (P : _ -> Prop) R :
-    is_word_aligned 32 addr = true ->
+    is_word_aligned 4 addr = true ->
     word.unsigned addr + 4 < DMEM_BYTES ->
     (word_at addr v * R)%sep dmem ->
     P v ->
@@ -3598,7 +3618,7 @@ Section Helpers.
   Proof. intros; eapply load_word_step; eauto. Qed.
 
   Lemma load_word256_step dmem addr (v :word256) (P : _ -> Prop) R :
-    is_word_aligned 256 addr = true ->
+    is_word_aligned 32 addr = true ->
     word.unsigned addr + 32 < DMEM_BYTES ->
     (word_at addr v * R)%sep dmem ->
     P v ->
@@ -3636,12 +3656,31 @@ End Helpers.
 
 Ltac solve_is_word_aligned t :=
   lazymatch goal with
-  | H : is_word_aligned ?width ?a = true |- is_word_aligned ?width ?a = true => exact H
+  | H : is_word_aligned ?sz ?a = true |- is_word_aligned ?sz ?a = true => exact H
   | |- is_word_aligned _ (word.of_Z 0) = true => apply is_word_aligned_0; t
-  | |- is_word_aligned _ (word.of_Z _) = true => apply is_word_aligned_imm; t
-  | |- is_word_aligned ?width (word.add ?a ?offset) = true =>
-      apply is_word_aligned_add; solve_is_word_aligned t
+  | |- is_word_aligned 4 4 = true =>
+      apply is_word32_aligned_imm; apply Z.mod_same; t
+  | |- is_word_aligned 32 32 = true =>
+      apply is_word256_aligned_imm; apply Z.mod_same; t
+  | |- is_word_aligned 4 (word.of_Z (_ * 4)) = true =>
+      apply is_word32_aligned_imm; apply Z.mod_mul; t
+  | |- is_word_aligned 32 (word.of_Z (_ * 32)) = true =>
+      apply is_word256_aligned_imm; apply Z.mod_mul; t
+  | |- is_word_aligned ?sz (word.of_Z (?sz * ?x)) = true =>
+      rewrite (Z.mul_comm sz x); solve_is_word_aligned t
+  | |- is_word_aligned 4 (word.of_Z _) = true => apply is_word32_aligned_imm; t
+  | |- is_word_aligned 32 (word.of_Z _) = true => apply is_word256_aligned_imm; t
+  | |- is_word_aligned 4 (word.add ?a ?offset) = true =>
+      apply is_word32_aligned_add; solve_is_word_aligned t
+  | |- is_word_aligned 32 (word.add ?a ?offset) = true =>
+      apply is_word256_aligned_add; solve_is_word_aligned t
   | _ => t
+  end.
+
+Ltac solve_word_at :=
+  match goal with
+  | H : sep (word_at ?p _) _ ?m |- sep (word_at ?p _) _ ?m => eapply H
+  | _ => use_sep_assumption; ecancel
   end.
 
 Ltac simplify_side_condition_step :=
@@ -3677,14 +3716,14 @@ Ltac simplify_side_condition_step :=
   | |- context [match map.get _ _ with _ => _ end] => solve_map
   | |- context [advance_pc (?dst, ?off)] =>
       change (advance_pc (dst, off)) with (dst, S off)
-  | H : sep (word_at ?a _) _ ?m |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
-      eapply store_word32_step; [ assumption | lia | eapply H | ]
-  | H : sep (word_at ?a _) _ ?m |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
-      eapply load_word32_step; [ assumption | lia | eapply H | ]
-  | H : sep (word_at ?a _) _ ?m |- @store_word _ _ _ _ 256 _ ?m ?a _ _ =>
-      eapply store_word256_step; [ assumption | lia | eapply H | ]
-  | H : sep (word_at ?a _) _ ?m |- @load_word _ _ _ _ 256 _ ?m ?a _ =>
-      eapply load_word256_step; [ assumption | lia | eapply H | ]
+  | |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
+      eapply store_word32_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+  | |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
+      eapply load_word32_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+  | |- @store_word _ _ _ _ 256 _ ?m ?a _ _ =>
+      eapply store_word256_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+  | |- @load_word _ _ _ _ 256 _ ?m ?a _ =>
+      eapply load_word256_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
   | |- read_wdr_indirect ?v _ _ =>
       eapply read_wdr_indirect_step; eexists;
       (* when the indirect register value is supplied as an li immediate, compute it *)
@@ -3717,7 +3756,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_wdr apply_shift update_mlz write_flag]
+               | progress cbv [gpr_has_value write_wdr update_mlz write_flag]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -4093,7 +4132,7 @@ Module Test.
     eapply eventually_step_cps.
     simplify_side_condition.
     eapply store_word_step.
-    { apply is_word_aligned_0. lia. }
+    { apply is_word_aligned_0. }
     { rewrite word.unsigned_of_Z_0. vm_compute; reflexivity. }
     { use_sep_assumption. ecancel. }
     intros.
@@ -4143,8 +4182,8 @@ Module Test.
 
   Lemma add_mem_correct :
     forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
-      is_word_aligned 32 pa = true ->
-      is_word_aligned 32 pb = true ->
+      is_word_aligned 4 pa = true ->
+      is_word_aligned 4 pb = true ->
       word.unsigned pa + 4 < DMEM_BYTES ->
       word.unsigned pb + 4 < DMEM_BYTES ->
       map.get regs (gpreg x12) = Some pa ->
@@ -4306,8 +4345,9 @@ Module Test.
           with (word.add (word:=word32) (word.of_Z (Z.of_nat (S i))) (word.of_Z 1));
           [ ring | ].
         apply word.unsigned_inj.
-        rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap, word.unsigned_of_Z by lia.
-        rewrite Z.add_1_r, <-Nat2Z.inj_succ. reflexivity. } }
+        rewrite !word.unsigned_add, !word.unsigned_of_Z_1 by lia.
+        rewrite !word.unsigned_of_Z_nowrap by lia.
+        cbv [word.wrap]; rewrite Z.mod_small by lia. lia. } }
  
     (* invariant implies postcondition (i.e. post-loop code) *)
     zsimplify. rewrite word.sub_0_r. intros.
@@ -4495,8 +4535,8 @@ Module Test.
 
   Lemma bignum_add_mem_correct :
     forall regs wregs flags dmem cstack lstack (a b : word256) pa pb Ra Rb,
-      is_word_aligned 256 pa = true ->
-      is_word_aligned 256 pb = true ->
+      is_word_aligned 32 pa = true ->
+      is_word_aligned 32 pb = true ->
       word.unsigned pa + 32 < DMEM_BYTES ->
       word.unsigned pb + 32 < DMEM_BYTES ->
       map.get regs (gpreg x12) = Some pa ->
@@ -4527,7 +4567,7 @@ Module Test.
     track_registers_update.
 
     eapply eventually_step_cps.
-    simplify_side_condition.    
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
 
