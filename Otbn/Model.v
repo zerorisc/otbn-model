@@ -3979,6 +3979,13 @@ Ltac subst_lets_step :=
   end.
 Ltac subst_lets := repeat subst_lets_step.
 
+Ltac solve_clobbers :=
+  lazymatch goal with
+  | H : clobbers ?l ?x ?y |- clobbers ?l ?x ?y => exact H
+  | H : clobbers ?l1 ?x ?y |- clobbers ?l2 ?x ?y =>
+      apply (clobbers_incl l1 l2); cbv [incl In]; tauto
+  end.
+
 Module Test.
   Section __.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
@@ -4196,12 +4203,8 @@ Module Test.
     intros; subst.
     track_registers_update.
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | | ].
-    { solve_map. }
-    { assumption. }
-    { assumption. }
-    { eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
+    ssplit; try reflexivity; [ | solve_clobbers .. ].
+    solve_map.
   Qed.
 
   Lemma add_mem_correct :
@@ -4226,30 +4229,12 @@ Module Test.
   Proof.
     cbv [add_mem_fn returns]. intros; subst.
     track_registers_init.
- 
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
+
+    repeat straightline_step.
+
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | | ].
-    { eauto using sep_put. }
-    { assumption. }
-    { assumption. }
-    { eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
+    ssplit; try reflexivity; [ | solve_clobbers .. ].
+    ecancel_assumption.
   Qed.
 
   Lemma mul_correct :
@@ -4323,7 +4308,7 @@ Module Test.
         cbv [addi_spec]. destruct_one_match; try lia; [ ].
         rewrite word.of_Z_unsigned. ring. }
       { (* clobbered registers *)
-        eapply clobbers_incl; eauto. cbv [incl In]; tauto. } }
+        solve_clobbers. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
       intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
 
@@ -4498,7 +4483,7 @@ Module Test.
         subst_lets. apply f_equal. rewrite word_xor_same.
         ring. }
       { (* clobbered registers *)
-        eapply clobbers_incl; eauto. cbv [incl In]; tauto. } }
+        solve_clobbers. } }
     { (* invariant step; proceed through loop and prove invariant still holds *)
       intros; subst. repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
 
@@ -4583,45 +4568,11 @@ Module Test.
     cbv [bignum_add_mem_fn returns]. intros; subst.
     track_registers_init.
     
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-
-    eapply eventually_step_cps.
-    simplify_side_condition.
-    intros; subst.
-    track_registers_update.
-
-    eapply eventually_step_cps.
-    simplify_side_condition.    
-    intros; subst.
-    track_registers_update.
-
-    eapply eventually_step_cps.
-    simplify_side_condition.    
-    intros; subst.
-    track_registers_update.
-
-    eapply eventually_step_cps.
-    simplify_side_condition.    
-    intros; subst.
-    track_registers_update.
+    repeat straightline_step.
 
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | | ].
-    { eauto using sep_put. }
-    { eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
-    { eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
-    { eapply map.only_differ_subset; [ | eassumption ].
-      cbv. tauto. }
+    ssplit; try reflexivity; [ | solve_clobbers .. ].
+    ecancel_assumption.
   Qed.
 
   Lemma prog0_correct_prelink regs wregs flags dmem (v : word32) R :
@@ -4739,16 +4690,13 @@ Module Test.
     Time do 10 straightline_step. (* .57s *)
 
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | ].
-    { solve_map. apply (f_equal Some).
-      repeat (apply mul_by_add_step; [ lia | ];
-              cbn [Z.sub Z.add Z.opp Z.pos_sub Pos.pred_double]).
-      lazymatch goal with |- ?x = word.mul _ (word.of_Z 0) => subst x end.
-      cbv [addi_spec]. destruct_one_match; try lia; [ ].
-      ring. }
-    { eassumption. }
-    { (* only_differ clause *)
-      eapply clobbers_incl; eauto. cbv [incl In]. tauto. }
+    ssplit; try reflexivity; [ | solve_clobbers ..].
+    solve_map. apply (f_equal Some).
+    repeat (apply mul_by_add_step; [ lia | ];
+            cbn [Z.sub Z.add Z.opp Z.pos_sub Pos.pred_double]).
+    lazymatch goal with |- ?x = word.mul _ (word.of_Z 0) => subst x end.
+    cbv [addi_spec]. destruct_one_match; try lia; [ ].
+    ring.
   Time Qed. (* 0.75s *)
 End __.
 End Test.
