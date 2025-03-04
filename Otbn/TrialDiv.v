@@ -352,8 +352,12 @@ Section __.
 
   (* helper lemma for shift expressions *)
   Lemma shift_right_ones (x : word256) n :
+    0 <= n < 256 ->
     word.unsigned (word.sru x (word.of_Z n)) = word.unsigned x / 2^n.
-  Admitted.
+  Proof.
+    intros. rewrite word.unsigned_sru_shamtZ by lia.
+    rewrite Z.shiftr_div_pow2 by lia. reflexivity.
+  Qed.
 
   (* helper lemma for stepwise equivalence *)
   Lemma fold_bignum_step_word (x : word256) y n :
@@ -410,18 +414,18 @@ Section __.
   Qed.
 
   (* TODO: move *)
-  Lemma carry_bit_add_div x y :
-    0 <= x < 2^256 ->
-    0 <= y < 2^256 ->
-    Z.b2z (carry_bit (x + y)) = (x + y) / 2^256.
-  Admitted.
-
-  (* TODO: move *)
   Lemma carry_bit_addc_div x y c :
     0 <= x < 2^256 ->
     0 <= y < 2^256 ->
     Z.b2z (carry_bit (x + y + Z.b2z c)) = (x + y + Z.b2z c) / 2^256.
-  Admitted.
+  Proof.
+    intros. cbv [carry_bit].
+    pose proof Z.div_small (x + y + Z.b2z c) (2^256).
+    assert (0 <= Z.b2z c < 2) by (destr c; cbn; lia).
+    pose proof Z.div_lt_upper_bound (x + y + Z.b2z c) (2^256) 2 ltac:(lia) ltac:(lia).
+    pose proof Z.div_le_lower_bound (x + y + Z.b2z c) (2^256) 1 ltac:(lia).
+    cbv [Z.b2z] in *; repeat destruct_one_match; lia.    
+  Qed.
 
   Lemma fold_bignum_correct :
     forall regs wregs flags dmem cstack lstack

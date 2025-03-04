@@ -773,7 +773,7 @@ Section Semantics.
                 write_flag flags (flagZ fg) (word.unsigned v =? 0)
                   (fun flags => P flags))).
 
-    Definition carry_bit (x : Z) := x >? (2^256).
+    Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
 
     Definition strt1
@@ -4403,7 +4403,7 @@ Module Test.
         "bignum_add"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
            map.get wregs' (wdreg w5) = Some (word.add a b)
-           /\ map.get flags' (flagC FG0) = Some ((word.unsigned a + word.unsigned b) >? 2^256)
+           /\ map.get flags' (flagC FG0) = Some (2^256 <=? (word.unsigned a + word.unsigned b))
            /\ dmem' = dmem
            /\ clobbers [flagC FG0; flagM FG0; flagZ FG0; flagL FG0] flags flags'
            /\ clobbers [wdreg w5] wregs wregs'
