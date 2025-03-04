@@ -3,6 +3,7 @@ Require Import Coq.Strings.String.
 Require Import Coq.micromega.Lia.
 Require Import Coq.Lists.List.
 Require Import Coq.ZArith.ZArith.
+Require Import coqutil.Byte.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.OfListWord.
 Require Import coqutil.Map.Properties.
@@ -13,6 +14,7 @@ Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Word.LittleEndianList.
+Require Import coqutil.Z.bitblast.
 Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
 Require Import Otbn.Model.
@@ -153,6 +155,51 @@ Section WithWord.
     rewrite eval_cons. rewrite Nat2Z.inj_succ, Z.mul_succ_r, Z.pow_add_r by lia.
     nia.
   Qed.
+
+  Lemma le_split_eval n (x : list word) :
+    (n = Z.to_nat (width / 8) * length x)%nat ->
+    width mod 8 = 0 ->
+    le_split n (eval x) = concat (map (fun w => le_split
+                                                  (Z.to_nat (width / 8)) (word.unsigned w)) x).
+  Proof.
+    intros; subst; induction x; cbn [map length concat];
+      [ rewrite Nat.mul_0_r; reflexivity | ].
+    rewrite eval_cons, <-IHx.
+    apply nth_error_ext; intro n.
+    destr (n <? Z.to_nat (width / 8))%nat.
+    { rewrite nth_error_app1 by (rewrite length_le_split; lia).
+      rewrite !nth_error_le_split by lia.
+      apply (f_equal Some). apply byte.unsigned_inj.
+      rewrite !byte.unsigned_of_Z. cbv [byte.wrap].
+      Z.bitblast. rewrite ?Bool.andb_true_l.
+      pose proof Z.div_mod width 8 ltac:(lia).
+      rewrite <-(Z.mod_pow2_bits_low (_ + _) width) by lia.
+      Z.push_mod. zsimplify. rewrite Z.mod_pow2_bits_low by lia.
+      reflexivity. }
+    { rewrite nth_error_app2 by (rewrite length_le_split; lia).
+      rewrite !length_le_split.
+      (* handle out-of-bounds index case *)
+      destr (n <? Z.to_nat (width / 8) * S (length x))%nat;
+        [ | repeat 
+              lazymatch goal with
+              | |- context [@nth_error ?A ?n ?l] =>
+                  replace (@nth_error A n l) with (@None A)
+                  by (symmetry; apply nth_error_None;
+                      rewrite length_le_split; lia)
+              end; reflexivity ].
+      rewrite !nth_error_le_split by lia.
+      apply (f_equal Some). apply byte.unsigned_inj.
+      rewrite !byte.unsigned_of_Z. cbv [byte.wrap].
+      Z.bitblast. rewrite ?Bool.andb_true_l.
+      pose proof Z.div_mod width 8 ltac:(lia).
+      lazymatch goal with |- Z.testbit (?a + 2^width * ?b) ?i = Z.testbit ?b ?j =>
+                            replace i with (j+width) by lia; rewrite (Z.mul_comm (2^width) b)
+      end.
+      rewrite <-Z.div_pow2_bits, Z.div_add by lia.
+      rewrite Z.div_small by apply word.unsigned_range.
+      zsimplify; reflexivity. }
+  Qed.
+
 End WithWord.
 
 Section __.
@@ -223,27 +270,54 @@ Section __.
 
   Definition bignum_at (ptr : word32) (v : list word256) : mem -> Prop :=
     bytes_at ptr (le_split (Z.to_nat 32 * length v) (eval v)).
-
+  
   Lemma split_bignum_nth n ptr v :
     (n < length v)%nat ->
+    (32*Z.of_nat (length v) < 2^32) ->
     Lift1Prop.iff1 (bignum_at ptr v)
-      (Lift1Prop.ex1
-         (fun v0 =>
-            Lift1Prop.ex1
-              (fun vn =>
-                 Lift1Prop.ex1
-                   (fun v1 =>
-                      (emp (length v0 = n)
-                       * emp (v = v0 ++ [vn] ++ v1)
-                       * bignum_at ptr v0
-                       * word_at (word.add ptr (word.of_Z (32*Z.of_nat n))) vn
-                       * bignum_at ptr v1)%sep)))).
-  Admitted.
+      (bignum_at ptr (List.firstn n v)
+       * word_at (word.add ptr (word.of_Z (Z.of_nat n*32))) (nth n v (word.of_Z 0))
+       * bignum_at (word.add ptr (word.of_Z (Z.of_nat (S n)*32))) (List.skipn (S n) v))%sep.
+  Proof.
+    intros; cbv [bignum_at].
+    rewrite !le_split_eval by reflexivity.
+    rewrite <-(List.firstn_nth_skipn _ n v (word.of_Z 0)) at 1 by lia.
+    change (256 / 8) with 32.
+    do 2 (rewrite map_app, concat_app, map.of_list_word_at_app;
+          rewrite sep_eq_putmany by
+            (apply map.adjacent_arrays_disjoint;
+             erewrite !List.length_concat_same_length
+               by (apply List.Forall_map, Forall_forall; intros; apply length_le_split);
+             rewrite !map_length, ?app_length, ?firstn_length, ?skipn_length by lia;
+             cbn [length]; lia)).
+    cbn [List.app map concat]. rewrite app_nil_r.
+    erewrite !List.length_concat_same_length
+      by (apply List.Forall_map, Forall_forall; intros; apply length_le_split).
+    rewrite ?map_length, ?length_le_split.
+    rewrite ?firstn_length, ?Nat.min_l by lia.
+    cbv [word_at]. change (256 / 8) with 32.
+    rewrite Nat2Z.inj_mul, Z2Nat.id in * by lia.
+    rewrite Nat2Z.inj_succ, Z.mul_succ_l.
+    rewrite word.ring_morph_add, word.add_assoc.
+    cancel.
+  Qed.
 
   (* helper lemma for shift expressions *)
   Lemma and_shift_right_ones (x : word256) n :
+    0 <= n < 256 ->
     word.unsigned (word.and x (word.sru (word.of_Z (2^256 - 1)) (word.of_Z n))) = word.unsigned x mod 2^(256 - n).
-  Admitted.
+  Proof.
+    intros. rewrite word.unsigned_and.
+    rewrite word.unsigned_sru_shamtZ by lia.
+    rewrite word.unsigned_of_Z_nowrap by lia.
+    change (2^256-1) with (Z.ones 256).
+    rewrite Z.shiftr_div_pow2, Z.ones_div_pow2 by lia.
+    rewrite Z.land_ones by lia.
+    apply Z.mod_small.
+    pose proof Z.mod_pos_bound (word.unsigned x) (2^(256-n)) ltac:(lia).
+    assert (2^(256-n) <= 2^256) by (apply Z.pow_le_mono; lia).
+    lia.
+  Qed.
 
   (* helper lemma for shift expressions *)
   Lemma shift_right_ones (x : word256) n :
@@ -259,7 +333,7 @@ Section __.
          (word.sru x (word.of_Z n))) = y mod 2 ^ n + y / 2 ^ n.
   Proof.
     intros; subst. rewrite word.unsigned_add.
-    rewrite and_shift_right_ones, shift_right_ones.    
+    rewrite and_shift_right_ones, shift_right_ones by lia.
     pose proof word.unsigned_range x.
     pose proof Z.mod_pos_bound (word.unsigned x) (2^n) ltac:(lia).
     pose proof Z.div_lt_upper_bound
@@ -333,6 +407,7 @@ Section __.
       1 < m ->
       word.unsigned plen = Z.of_nat (length x) ->
       (length x <> 0)%nat ->
+      (32 * Z.of_nat (length x) < 2^32) ->
       (bignum_at dptr_x x * R)%sep dmem ->
       returns
         (fetch:=fetch_ctx [fold_bignum])
@@ -383,7 +458,7 @@ Section __.
       (invariant :=
          fun i regs' wregs' flags' dmem' =>
            map.get regs' (gpreg x2) = Some (word.add dptr_x
-                                              (word.of_Z (32*(Z.of_nat (length x - i)))))
+                                              (word.of_Z ((Z.of_nat (length x - i)*32))))
            /\ map.get regs' (gpreg x22) = Some (addi_spec (word.of_Z 0) 22)
            /\ (exists acc c,
                   map.get wregs' (wdreg w23) = Some acc
@@ -437,6 +512,7 @@ Section __.
       | H : sep (bignum_at _ _) _ ?m |- context[?m] =>
           seprewrite_in (split_bignum_nth (length x - S i)) H; [ lia .. | ]
       end.
+ 
       extract_ex1_and_emp_in_hyps.
       subst.
 
@@ -587,3 +663,4 @@ Section __.
     rewrite (Z.mod_small (_ / 2^128)) by lia.
     lia.
   Qed.
+  Print Assumptions fold_bignum_correct.
