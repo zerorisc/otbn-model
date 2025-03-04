@@ -270,6 +270,7 @@ Section __.
 
   Definition bignum_at (ptr : word32) (v : list word256) : mem -> Prop :=
     bytes_at ptr (le_split (Z.to_nat 32 * length v) (eval v)).
+
   
   Lemma split_bignum_nth n ptr v :
     (n < length v)%nat ->
@@ -333,7 +334,7 @@ Section __.
          (word.sru x (word.of_Z n))) = y mod 2 ^ n + y / 2 ^ n.
   Proof.
     intros; subst. rewrite word.unsigned_add.
-    rewrite and_shift_right_ones, shift_right_ones by lia.
+    rewrite and_shift_right_ones, shift_right_ones.    
     pose proof word.unsigned_range x.
     pose proof Z.mod_pos_bound (word.unsigned x) (2^n) ltac:(lia).
     pose proof Z.div_lt_upper_bound
@@ -407,7 +408,6 @@ Section __.
       1 < m ->
       word.unsigned plen = Z.of_nat (length x) ->
       (length x <> 0)%nat ->
-      (32 * Z.of_nat (length x) < 2^32) ->
       (bignum_at dptr_x x * R)%sep dmem ->
       returns
         (fetch:=fetch_ctx [fold_bignum])
@@ -458,7 +458,7 @@ Section __.
       (invariant :=
          fun i regs' wregs' flags' dmem' =>
            map.get regs' (gpreg x2) = Some (word.add dptr_x
-                                              (word.of_Z ((Z.of_nat (length x - i)*32))))
+                                              (word.of_Z (32*(Z.of_nat (length x - i)))))
            /\ map.get regs' (gpreg x22) = Some (addi_spec (word.of_Z 0) 22)
            /\ (exists acc c,
                   map.get wregs' (wdreg w23) = Some acc
@@ -512,7 +512,6 @@ Section __.
       | H : sep (bignum_at _ _) _ ?m |- context[?m] =>
           seprewrite_in (split_bignum_nth (length x - S i)) H; [ lia .. | ]
       end.
- 
       extract_ex1_and_emp_in_hyps.
       subst.
 
