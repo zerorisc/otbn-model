@@ -463,9 +463,11 @@ Section ErrorMonad.
     if cond then inl tt else inr msg.
 End ErrorMonad.
 Module ErrorMonadNotations.
-  Notation "a <- b ; c" := (bind b (fun a => c)) (at level 100, right associativity).
+  Declare Scope maybe_scope.
+  Delimit Scope maybe_scope with maybe.
+  Notation "a <- b ; c" := (bind b (fun a => c)) (at level 100, right associativity) : maybe_scope.
   Notation Ok := inl (only parsing).
-  Notation "'Err' x" := (inr x%string) (at level 20, only parsing).
+  Notation "'Err' x" := (inr x%string) (at level 20, only parsing) : maybe_scope.
 End ErrorMonadNotations.
 Import ErrorMonadNotations.
 
@@ -775,6 +777,8 @@ Section Semantics.
 
     Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
+
+    Local Notation "x <- f ; e" := (f (fun x => e)) (at level 100, right associativity).
 
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
@@ -1086,7 +1090,7 @@ Section Semantics.
     |}.
 
   (* TODO: randomness is currently modelled as an error, but we could
-     eventually present a list of random numbers or something. *)
+     eventually present a list of random numbers or something. *)  
   Global Instance exec_semantics : semantics_parameters (maybe otbn_state) :=
     {|
       err := fun msg => Err msg;
@@ -1096,7 +1100,7 @@ Section Semantics.
                                       | Some x => f x
                                       | None => Err msg
                                       end;
-    |}.
+    |}%maybe.
 
   (* Prop model for proofs *)
   Definition run1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
@@ -1150,7 +1154,7 @@ Section Semantics.
          if is_busy st
          then exec st fuel
          else Ok st)
-    end.
+    end%maybe.
 End Semantics.
 
 Module Coercions.
@@ -1172,6 +1176,7 @@ Section Build.
      offsets within the global program. This represents code
      post-linking. *)
   Definition program : Type := list (insn (label:=nat)).
+  Local Open Scope maybe_scope.
 
   Definition add_symbol (syms : symbols) (label : string) (offset : nat)
     : maybe symbols :=
@@ -1343,6 +1348,7 @@ Section BuildProofs.
   Context {word32 : word.word 32} {regfile : map.map reg word32}.
   Context {word256 : word.word 256} {wregfile : map.map wreg word256}.
   Context {flagfile : map.map flag bool} {mem : map.map word32 byte}.
+  Local Open Scope maybe_scope.
 
   (* Returns the overall size of the program containing the functions
      and starting at the given offset. *)
@@ -4759,7 +4765,6 @@ Module Test.
 End __.
 End Test.
 
-(* Next: prove fold_bignum, RSA trial div *)
 (* Next: add mulqacc *)
 (* Next: prove sha512 copy *)
 (* Next: try to add more realistic error conditions for e.g. loop errors *)

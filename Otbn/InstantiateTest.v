@@ -87,9 +87,9 @@ Module ExecTest.
   Local Instance word256 : word.word 256 := Naive.word 256.
   (* Check that exec works *)
   Eval vm_compute in
-    (exec1 (fetch:=fetch Test.prog0) start_state).
+    (exec1 (fetch:=fetch Test.prog0) (start_state map.empty)).
   Eval vm_compute in
-    (exec (fetch:=fetch Test.prog0) start_state 100).
+    (exec (fetch:=fetch Test.prog0) (start_state map.empty) 100).
 
   (* scaling factor; create a program with ~n instructions *)
   Definition n := 10000.
@@ -109,7 +109,7 @@ Module ExecTest.
   Definition prog : program := ltac:(link_program [start_fn; add_fn]).
   Time
     Eval vm_compute in
-    (exec (fetch:=fetch prog) start_state (length prog)).
+    (exec (fetch:=fetch prog) (start_state map.empty) (length prog)).
   (* 5s *)
 
 End ExecTest.

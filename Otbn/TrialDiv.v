@@ -271,7 +271,6 @@ Section __.
   Definition bignum_at (ptr : word32) (v : list word256) : mem -> Prop :=
     bytes_at ptr (le_split (Z.to_nat 32 * length v) (eval v)).
 
-  
   Lemma split_bignum_nth n ptr v :
     (n < length v)%nat ->
     (32*Z.of_nat (length v) < 2^32) ->
@@ -697,4 +696,5 @@ Section __.
     rewrite (Z.mod_small (_ / 2^128)) by lia.
     lia.
   Qed.
-  Print Assumptions fold_bignum_correct.
+End __.
+Print Assumptions fold_bignum_correct.
