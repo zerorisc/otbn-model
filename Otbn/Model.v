@@ -778,10 +778,6 @@ Section Semantics.
     Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
 
-    Definition update_all_flags flags fg (v : Z) (P : flagfile -> T) :=
-      write_flag flags (flagC fg) (carry_bit v)
-        (fun flags => update_mlz flags fg (word.of_Z v) P).
-
     Local Notation "x <- f ; e" := (f (fun x => e)) (at level 100, right associativity).
 
     Definition strt1
@@ -826,26 +822,30 @@ Section Semantics.
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vy <- apply_shift vy s ;
-           let result := word.unsigned vx + word.unsigned vy in
-           wregs <- write_wdr wregs d (word.of_Z result) ;
-           flags <- update_all_flags flags fg result ;
+           let result :=  word.add vx vy in
+           wregs <- write_wdr wregs d result ;
+           flags <- write_flag flags (flagC fg) (carry_bit (word.unsigned vx + word.unsigned vy)) ;
+           flags <- update_mlz flags fg result ;
            post regs wregs flags dmem)
       | Bn_addc d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vy <- apply_shift vy s ;
            c <- read_flag flags (flagC fg) ;
-           let result := word.unsigned vx + word.unsigned vy + Z.b2z c in
-           wregs <- write_wdr wregs d (word.of_Z result) ;
-           flags <- update_all_flags flags fg result ;
+           let result := word.add (word.add vx vy) (word.of_Z (Z.b2z c)) in
+           wregs <- write_wdr wregs d result ;
+           flags <- write_flag flags (flagC fg)
+                      (carry_bit (word.unsigned vx + word.unsigned vy + Z.b2z c)) ;
+           flags <- update_mlz flags fg result ;
            post regs wregs flags dmem)
       | Bn_addi d x imm fg =>
           if is_valid_bn_imm imm
           then
             (vx <- read_wdr wregs x ;
-             let result := word.unsigned vx + imm in
-             wregs <- write_wdr wregs d (word.of_Z result) ;
-             flags <- update_all_flags flags fg result ;
+             let result := word.add vx (word.of_Z imm) in
+             wregs <- write_wdr wregs d result ;
+             flags <- write_flag flags (flagC fg) (carry_bit (word.unsigned vx + imm)) ;
+           flags <- update_mlz flags fg result ;
              post regs wregs flags dmem)
           else err ("Invalid immediate for BN.ADDI: " ++ HexString.of_Z imm)
       | Bn_and d x y s fg =>
@@ -2159,16 +2159,6 @@ Section BuildProofs.
            end.
   Qed.
 
-  Lemma update_all_flags_weaken flags fg v P Q :
-    update_all_flags (T:=Prop) flags fg v P ->
-    (forall flags, P flags -> Q flags) ->
-    update_all_flags (T:=Prop) flags fg v Q.
-  Proof.
-    cbv [update_all_flags]; intros.
-    eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros.
-    eapply update_mlz_weaken; eauto.
-  Qed.
-
   Lemma read_wdr_indirect_weaken i wregs P Q :
     read_wdr_indirect (T:=Prop) i wregs P ->
     (forall x, P x -> Q x) ->
@@ -2224,8 +2214,6 @@ Section BuildProofs.
             eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- update_mlz _ _ _ _ =>
             eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
-        | |- update_all_flags _ _ _ _ =>
-            eapply update_all_flags_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_wdr_indirect _ _ _ =>
             eapply read_wdr_indirect_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_wdr_indirect _ _ _ _ =>
@@ -3792,7 +3780,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_wdr update_mlz update_all_flags write_flag]
+               | progress cbv [gpr_has_value write_wdr update_mlz write_flag]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -4405,10 +4393,8 @@ Module Test.
         (fetch:=fetch_ctx [bignum_add_fn])
         "bignum_add"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           (exists sum c,
-               map.get wregs' (wdreg w5) = Some sum
-               /\ map.get flags' (flagC FG0) = Some c
-               /\ word.unsigned a + word.unsigned b = word.unsigned sum + 2^256 * Z.b2z c)
+           map.get wregs' (wdreg w5) = Some (word.add a b)
+           /\ map.get flags' (flagC FG0) = Some (2^256 <=? word.unsigned a + word.unsigned b)
            /\ dmem' = dmem
            /\ clobbers [flagC FG0; flagM FG0; flagZ FG0; flagL FG0] flags flags'
            /\ clobbers [wdreg w5] wregs wregs'
@@ -4423,15 +4409,9 @@ Module Test.
     track_registers_update.
   
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | | ].
-    { do 2 eexists; ssplit.
-      { solve_map. }
-      { solve_map. }
-      { subst_lets.
-        rewrite word.unsigned_of_Z.
-        rewrite carry_bit_add_div by apply word.unsigned_range.
-        etransitivity; [ apply (Z.div_mod _ (2^256)); lia | ].
-        cbv [word.wrap]; lia. } }
+    ssplit; try reflexivity; [ | | | | ].
+    { solve_map. }
+    { solve_map. }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
     { eapply map.only_differ_subset; [ | eassumption ].

@@ -80,7 +80,7 @@ Module SortedListFlags.
     SortedList.map (Build_parameters _) strict_order.
 End SortedListFlags.
 
-Global Instance mem : map.map Naive.word32 Naive.word32 := SortedListWord.map _ _.
+Global Instance mem : map.map Naive.word32 Byte.byte := SortedListWord.map _ _.
 
 Module ExecTest.
   Local Instance word32 : word.word 32 := Naive.word 32.
