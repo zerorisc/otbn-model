@@ -718,18 +718,18 @@ Section Semantics.
       (flags : flagfile)
       (r : csr)
       (v : word32)
-      (P : regfile -> flagfile -> T) : T :=
+      (P : flagfile -> T) : T :=
       match r with
-      | CSR_FG0 => write_flag_group FG0 flags v (fun flags => P regs flags)
-      | CSR_FG1 => write_flag_group FG1 flags v (fun flags => P regs flags)
+      | CSR_FG0 => write_flag_group FG0 flags v (fun flags => P flags)
+      | CSR_FG1 => write_flag_group FG1 flags v (fun flags => P flags)
       | CSR_FLAGS =>
           write_flag_group FG0 flags v
             (fun flags =>
                write_flag_group FG1 flags (word.sru v (word.of_Z 4))
-                 (fun flags => P regs flags))
-      | CSR_RND_PREFETCH => P regs flags (* no effect on this model *)
-      | CSR_RND => P regs flags (* writes ignored *)
-      | CSR_URND => P regs flags (* writes ignored *)
+                 (fun flags => P flags))
+      | CSR_RND_PREFETCH => P flags (* no effect on this model *)
+      | CSR_RND => P flags (* writes ignored *)
+      | CSR_URND => P flags (* writes ignored *)
       end.
 
     Definition store_byte (dmem : mem) (addr : word32) (v : byte) (P : mem -> T) : T :=
@@ -778,6 +778,10 @@ Section Semantics.
     Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
 
+    Definition update_all_flags flags fg (v : Z) (P : flagfile -> T) :=
+      write_flag flags (flagC fg) (carry_bit v)
+        (fun flags => update_mlz flags fg (word.of_Z v) P).
+
     Local Notation "x <- f ; e" := (f (fun x => e)) (at level 100, right associativity).
 
     Definition strt1
@@ -787,162 +791,118 @@ Section Semantics.
       | Addi d x imm =>
           if is_valid_addi_imm imm
           then
-            read_gpr regs x
-              (fun vx =>
-                 write_gpr regs d (addi_spec vx imm)
-                   (fun regs => post regs wregs flags dmem))
+            (vx <- read_gpr regs x ;
+             regs <- write_gpr regs d (addi_spec vx imm) ;
+             post regs wregs flags dmem)
           else err ("Invalid immediate for ADDI: " ++ HexString.of_Z imm)
       | Add d x y =>
-          read_gpr regs x
-            (fun vx =>
-               read_gpr regs y
-                 (fun vy =>
-                    write_gpr regs d (word.add vx vy)
-                      (fun regs => post regs wregs flags dmem)))
+          (vx <- read_gpr regs x ;
+           vy <- read_gpr regs y ;
+           regs <- write_gpr regs d (word.add vx vy) ;
+           post regs wregs flags dmem)
       | Lw d x imm =>
           if is_valid_mem_offset imm
-          then read_gpr regs x
-                 (fun vx =>
-                    load_word dmem (word.add vx (word.of_Z imm))
-                      (fun vm =>
-                         write_gpr regs d vm
-                           (fun regs => post regs wregs flags dmem)))
+          then
+            (vx <- read_gpr regs x ;
+             vm <- load_word dmem (word.add vx (word.of_Z imm)) ;
+             regs <- write_gpr regs d vm ;
+             post regs wregs flags dmem)
           else err ("Invalid memory offset for LW: " ++ HexString.of_Z imm) 
       | Sw x y imm =>
           if is_valid_mem_offset imm
-          then read_gpr regs x
-                 (fun vx =>
-                    (read_gpr regs y
-                       (fun vy =>
-                          store_word dmem (word.add vx (word.of_Z imm)) vy
-                            (fun dmem => post regs wregs flags dmem))))
+          then
+            (vx <- read_gpr regs x ;
+             vy <- read_gpr regs y ;
+             dmem <- store_word dmem (word.add vx (word.of_Z imm)) vy ;
+             post regs wregs flags dmem)
           else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
       | Csrrs d x =>
-          read_gpr regs x
-            (fun vx =>
-               read_csr regs flags d
-                 (fun vd =>
-                    write_csr regs flags d (word.xor vd vx)
-                      (fun regs flags =>
-                         write_gpr regs x vd
-                           (fun regs => post regs wregs flags dmem))))
+          (vx <- read_gpr regs x ;
+           vd <- read_csr regs flags d ;
+           flags <- write_csr regs flags d (word.xor vd vx) ;
+           regs <- write_gpr regs x vd ;
+           post regs wregs flags dmem)
       | Bn_add d x y s fg =>
-          read_wdr wregs x
-            (fun vx =>
-               read_wdr wregs y
-               (fun vy =>
-                  apply_shift vy s
-                    (fun vy =>
-                       let result := word.add vx vy in
-                       write_wdr wregs d result
-                         (fun wregs =>
-                            write_flag flags (flagC fg)
-                              (carry_bit (word.unsigned vx + word.unsigned vy))
-                              (fun flags =>
-                                 update_mlz flags fg result
-                                   (fun flags => post regs wregs flags dmem))))))
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           let result := word.unsigned vx + word.unsigned vy in
+           wregs <- write_wdr wregs d (word.of_Z result) ;
+           flags <- update_all_flags flags fg result ;
+           post regs wregs flags dmem)
       | Bn_addc d x y s fg =>
-          read_wdr wregs x
-            (fun vx =>
-               read_wdr wregs y
-               (fun vy =>
-                  apply_shift vy s
-                    (fun vy =>
-                       read_flag flags (flagC fg)
-                         (fun c =>
-                            let result := word.add (word.add vx vy) (word.of_Z (Z.b2z c)) in
-                            write_wdr wregs d result
-                              (fun wregs =>
-                                 write_flag flags (flagC fg)
-                                   (carry_bit (word.unsigned vx + word.unsigned vy + Z.b2z c))
-                                   (fun flags =>
-                                      update_mlz flags fg result
-                                        (fun flags => post regs wregs flags dmem)))))))
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           c <- read_flag flags (flagC fg) ;
+           let result := word.unsigned vx + word.unsigned vy + Z.b2z c in
+           wregs <- write_wdr wregs d (word.of_Z result) ;
+           flags <- update_all_flags flags fg result ;
+           post regs wregs flags dmem)
       | Bn_addi d x imm fg =>
           if is_valid_bn_imm imm
           then
-            read_wdr wregs x
-              (fun vx =>
-                 let result := word.add vx (word.of_Z imm) in
-                 write_wdr wregs d result
-                   (fun wregs =>
-                      write_flag flags (flagC fg)
-                        (carry_bit (word.unsigned vx + imm))
-                        (fun flags =>
-                           update_mlz flags fg result
-                             (fun flags => post regs wregs flags dmem))))
+            (vx <- read_wdr wregs x ;
+             let result := word.unsigned vx + imm in
+             wregs <- write_wdr wregs d (word.of_Z result) ;
+             flags <- update_all_flags flags fg result ;
+             post regs wregs flags dmem)
           else err ("Invalid immediate for BN.ADDI: " ++ HexString.of_Z imm)
       | Bn_and d x y s fg =>
-          read_wdr wregs x
-            (fun vx =>
-               read_wdr wregs y
-               (fun vy =>
-                  apply_shift vy s
-                    (fun vy =>
-                       let result := word.and vx vy in
-                       write_wdr wregs d result
-                         (fun wregs =>
-                            update_mlz flags fg result
-                              (fun flags => post regs wregs flags dmem)))))
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           let result := word.and vx vy in
+           wregs <- write_wdr wregs d result ;
+           flags <- update_mlz flags fg result ;
+           post regs wregs flags dmem)
       | Bn_xor d x y s fg =>
-          read_wdr wregs x
-            (fun vx =>
-               read_wdr wregs y
-               (fun vy =>
-                  apply_shift vy s
-                    (fun vy =>
-                       let result := word.xor vx vy in
-                       write_wdr wregs d result
-                         (fun wregs =>
-                            update_mlz flags fg result
-                              (fun flags => post regs wregs flags dmem)))))
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           let result := word.xor vx vy in
+           wregs <- write_wdr wregs d result ;
+           flags <- update_mlz flags fg result ;
+           post regs wregs flags dmem)
       | Bn_lid d dinc x xinc imm =>
           if is_valid_wide_mem_offset imm
           then
-            read_gpr regs x
-              (fun vx =>
-                 let addr := (word.add vx (word.of_Z imm)) in
-                 load_word dmem addr
-                   (fun vm =>
-                      read_gpr regs d
-                        (fun vd => 
-                           write_wdr_indirect vd wregs vm
-                             (fun wregs =>
-                                if dinc
-                                then if xinc
-                                     then err ("Both increment bits set for BN.LID.")
-                                     else
-                                       write_gpr regs d (word.add vd (word.of_Z 1))
-                                         (fun regs => post regs wregs flags dmem)
-                                else if xinc
-                                     then 
-                                       write_gpr regs x (word.add vx (word.of_Z 32))
-                                         (fun regs => post regs wregs flags dmem)
-                                     else  post regs wregs flags dmem))))
+            (vx <- read_gpr regs x ;
+             let addr := (word.add vx (word.of_Z imm)) in
+             vm <- load_word dmem addr ;
+             id <- read_gpr regs d ;
+             wregs <- write_wdr_indirect id wregs vm ;
+             if dinc
+             then if xinc
+                  then err ("Both increment bits set for BN.LID.")
+                  else
+                    (regs <- write_gpr regs d (word.add id (word.of_Z 1)) ;
+                     post regs wregs flags dmem)
+             else if xinc
+                  then
+                    (regs <- write_gpr regs x (word.add vx (word.of_Z 32)) ;
+                     post regs wregs flags dmem)
+                  else post regs wregs flags dmem)
           else err ("Invalid memory offset for BN.LID: " ++ HexString.of_Z imm)
       | Bn_sid x xinc y yinc imm =>
           if is_valid_wide_mem_offset imm
           then
-            read_gpr regs x
-              (fun ix =>
-                 read_wdr_indirect ix wregs
-                 (fun vx =>
-                    read_gpr regs y
-                      (fun vy =>
-                         let addr := (word.add vy (word.of_Z imm)) in
-                         store_word dmem addr vx
-                           (fun dmem =>
-                              if xinc
-                              then if yinc
-                                   then err ("Both increment bits set for BN.SID.")
-                                   else
-                                     write_gpr regs x (word.add ix (word.of_Z 1))
-                                       (fun regs => post regs wregs flags dmem)
-                              else if yinc
-                                   then 
-                                     write_gpr regs y (word.add vy (word.of_Z 32))
-                                       (fun regs => post regs wregs flags dmem)
-                                   else  post regs wregs flags dmem))))
+            (ix <- read_gpr regs x ;
+             vx <- read_wdr_indirect ix wregs ;
+             vy <- read_gpr regs y ;
+             let addr := (word.add vy (word.of_Z imm)) in
+             dmem <- store_word dmem addr vx ;
+             if xinc
+             then if yinc
+                  then err ("Both increment bits set for BN.SID.")
+                  else
+                    (regs <- write_gpr regs x (word.add ix (word.of_Z 1)) ;
+                     post regs wregs flags dmem)
+             else if yinc
+                  then 
+                    (regs <- write_gpr regs y (word.add vy (word.of_Z 32)) ;
+                     post regs wregs flags dmem)
+                  else post regs wregs flags dmem)
           else err ("Invalid memory offset for BN.SID: " ++ HexString.of_Z imm)
       end.
 
@@ -2164,7 +2124,7 @@ Section BuildProofs.
 
   Lemma write_csr_weaken regs flags r v P Q :
     write_csr (T:=Prop) regs flags r v P ->
-    (forall regs flags, P regs flags -> Q regs flags) ->
+    (forall flags, P flags -> Q flags) ->
     write_csr (T:=Prop) regs flags r v Q.
   Proof.
     cbv [write_csr write_flag_group extract_flag]; intros; destruct_one_match; eauto.
@@ -2197,6 +2157,16 @@ Section BuildProofs.
                eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
            | _ => solve [eauto]
            end.
+  Qed.
+
+  Lemma update_all_flags_weaken flags fg v P Q :
+    update_all_flags (T:=Prop) flags fg v P ->
+    (forall flags, P flags -> Q flags) ->
+    update_all_flags (T:=Prop) flags fg v Q.
+  Proof.
+    cbv [update_all_flags]; intros.
+    eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros.
+    eapply update_mlz_weaken; eauto.
   Qed.
 
   Lemma read_wdr_indirect_weaken i wregs P Q :
@@ -2254,6 +2224,8 @@ Section BuildProofs.
             eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- update_mlz _ _ _ _ =>
             eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
+        | |- update_all_flags _ _ _ _ =>
+            eapply update_all_flags_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_wdr_indirect _ _ _ =>
             eapply read_wdr_indirect_weaken; [ eassumption | ]; cbv beta; intros
         | |- write_wdr_indirect _ _ _ _ =>
@@ -3684,6 +3656,31 @@ Section Helpers.
     rewrite Z.abs_opp, Z.abs_eq by lia.
     repeat destruct_one_match; try lia; eauto.
   Qed.
+  
+  Lemma carry_bit_add_div x y :
+    0 <= x < 2^256 ->
+    0 <= y < 2^256 ->
+    Z.b2z (carry_bit (x + y)) = (x + y) / 2^256.
+  Proof.
+    intros. cbv [carry_bit].
+    pose proof Z.div_small (x + y) (2^256).
+    pose proof Z.div_lt_upper_bound (x + y) (2^256) 2 ltac:(lia) ltac:(lia).
+    pose proof Z.div_le_lower_bound (x + y) (2^256) 1 ltac:(lia).
+    cbv [Z.b2z] in *; repeat destruct_one_match; lia.
+  Qed.
+  
+  Lemma carry_bit_addc_div x y c :
+    0 <= x < 2^256 ->
+    0 <= y < 2^256 ->
+    Z.b2z (carry_bit (x + y + Z.b2z c)) = (x + y + Z.b2z c) / 2^256.
+  Proof.
+    intros. cbv [carry_bit].
+    pose proof Z.div_small (x + y + Z.b2z c) (2^256).
+    assert (0 <= Z.b2z c < 2) by (destr c; cbn; lia).
+    pose proof Z.div_lt_upper_bound (x + y + Z.b2z c) (2^256) 2 ltac:(lia) ltac:(lia).
+    pose proof Z.div_le_lower_bound (x + y + Z.b2z c) (2^256) 1 ltac:(lia).
+    cbv [Z.b2z] in *; repeat destruct_one_match; lia.    
+  Qed.
 
   Definition start_state (dmem : mem) : otbn_state :=
     otbn_busy (0%nat, 0%nat) map.empty map.empty map.empty dmem [] [].
@@ -3795,7 +3792,7 @@ Ltac simplify_side_condition_step :=
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_wdr update_mlz write_flag]
+               | progress cbv [gpr_has_value write_wdr update_mlz update_all_flags write_flag]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
@@ -4408,8 +4405,10 @@ Module Test.
         (fetch:=fetch_ctx [bignum_add_fn])
         "bignum_add"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           map.get wregs' (wdreg w5) = Some (word.add a b)
-           /\ map.get flags' (flagC FG0) = Some (2^256 <=? (word.unsigned a + word.unsigned b))
+           (exists sum c,
+               map.get wregs' (wdreg w5) = Some sum
+               /\ map.get flags' (flagC FG0) = Some c
+               /\ word.unsigned a + word.unsigned b = word.unsigned sum + 2^256 * Z.b2z c)
            /\ dmem' = dmem
            /\ clobbers [flagC FG0; flagM FG0; flagZ FG0; flagL FG0] flags flags'
            /\ clobbers [wdreg w5] wregs wregs'
@@ -4418,15 +4417,21 @@ Module Test.
     cbv [add_fn returns]. intros; subst.
     track_registers_init.
     
-    eapply eventually_step.
-    { simplify_side_condition.
-      apply eq_refl. }
+    eapply eventually_step_cps.
+    simplify_side_condition.
     intros; subst.
     track_registers_update.
+  
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | | | | ].
-    { solve_map. }
-    { solve_map. }
+    ssplit; try reflexivity; [ | | | ].
+    { do 2 eexists; ssplit.
+      { solve_map. }
+      { solve_map. }
+      { subst_lets.
+        rewrite word.unsigned_of_Z.
+        rewrite carry_bit_add_div by apply word.unsigned_range.
+        etransitivity; [ apply (Z.div_mod _ (2^256)); lia | ].
+        cbv [word.wrap]; lia. } }
     { eapply map.only_differ_subset; [ | eassumption ].
       cbv. tauto. }
     { eapply map.only_differ_subset; [ | eassumption ].
@@ -4535,10 +4540,13 @@ Module Test.
 
       (* post-jump; continue *)
       cbv beta. intros; subst.
-      repeat lazymatch goal with H : _ /\ _ |- _ => destruct H end.
+      repeat lazymatch goal with
+             | H : exists _, _ |- _ => destruct H
+             | H : _ /\ _ |- _ => destruct H
+             end.
       track_registers_combine.
 
-      repeat straightline_step.
+      repeat straightline_step.      
 
       (* end of loop; use loop-end helper lemma *)
       eapply eventually_loop_end; [ reflexivity .. | ].
