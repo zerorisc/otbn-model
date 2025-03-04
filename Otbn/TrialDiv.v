@@ -510,7 +510,7 @@ Section __.
     { lia. }
     { lia. }
     { (* prove invariant holds at start *)
-      ssplit; simplify_side_condition; zsimplify; try reflexivity.
+      ssplit; simplify_side_condition; zsimplify; try reflexivity; [ | | try solve_clobbers .. ].
       all:try replace (Z.to_nat (word.unsigned plen)) with (length x) by lia.
       all:rewrite ?Nat.sub_diag.
       all:try solve [apply map.only_differ_same].

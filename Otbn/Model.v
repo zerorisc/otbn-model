@@ -3984,6 +3984,9 @@ Ltac solve_clobbers :=
   | H : clobbers ?l ?x ?y |- clobbers ?l ?x ?y => exact H
   | H : clobbers ?l1 ?x ?y |- clobbers ?l2 ?x ?y =>
       apply (clobbers_incl l1 l2); cbv [incl In]; tauto
+  | |- clobbers ?l ?x ?y =>
+      fail "solve_clobbers: no matching clobbers clause found for goal: clobbers" l x y
+  | _ => fail "solve_clobbers: expected a goal of the form: clobbers _ _ _"
   end.
 
 Module Test.
