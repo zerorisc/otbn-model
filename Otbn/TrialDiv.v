@@ -303,6 +303,36 @@ Section __.
     cancel.
   Qed.
 
+  Lemma split_bignum_expose_nth n ptr v :
+    (n < length v)%nat ->
+    (32*Z.of_nat (length v) < 2^32) ->
+     Lift1Prop.iff1 (bignum_at ptr v)
+      (Lift1Prop.ex1
+         (fun v0 =>
+            Lift1Prop.ex1
+              (fun vn =>
+                 Lift1Prop.ex1
+                   (fun v1 =>
+                      (emp (length v0 = n)
+                       * emp (v = v0 ++ [vn] ++ v1)
+                       * bignum_at ptr v0
+                       * word_at (word.add ptr (word.of_Z (Z.of_nat n*32))) vn
+                       * bignum_at (word.add ptr (word.of_Z (Z.of_nat (S n)*32))) v1)%sep)))).
+  Proof.
+    intros. rewrite (split_bignum_nth n) by lia.
+    intro; split; intros.
+    { exists (List.firstn n v), (nth n v (word.of_Z 0)), (List.skipn (S n) v).
+      extract_ex1_and_emp_in_goal; ssplit; [ | | ].
+      { ecancel_assumption. }
+      { rewrite firstn_length; lia. }
+      { symmetry; apply List.firstn_nth_skipn; lia. } }
+    { extract_ex1_and_emp_in_hyps. subst.
+      rewrite app_assoc, List.skipn_app_r by (rewrite app_length; cbn [length]; lia).
+      rewrite <-app_assoc. cbn [List.app]. rewrite List.firstn_app_l by lia.
+      rewrite app_nth2, Nat.sub_diag by lia. cbn [nth].
+      ecancel_assumption. }
+  Qed.
+
   (* helper lemma for shift expressions *)
   Lemma and_shift_right_ones (x : word256) n :
     0 <= n < 256 ->
@@ -334,7 +364,7 @@ Section __.
          (word.sru x (word.of_Z n))) = y mod 2 ^ n + y / 2 ^ n.
   Proof.
     intros; subst. rewrite word.unsigned_add.
-    rewrite and_shift_right_ones, shift_right_ones.    
+    rewrite and_shift_right_ones, shift_right_ones by lia.
     pose proof word.unsigned_range x.
     pose proof Z.mod_pos_bound (word.unsigned x) (2^n) ltac:(lia).
     pose proof Z.div_lt_upper_bound
@@ -408,6 +438,7 @@ Section __.
       1 < m ->
       word.unsigned plen = Z.of_nat (length x) ->
       (length x <> 0)%nat ->
+      (32 * Z.of_nat (length x) < 2^32) ->
       (bignum_at dptr_x x * R)%sep dmem ->
       returns
         (fetch:=fetch_ctx [fold_bignum])
@@ -458,7 +489,7 @@ Section __.
       (invariant :=
          fun i regs' wregs' flags' dmem' =>
            map.get regs' (gpreg x2) = Some (word.add dptr_x
-                                              (word.of_Z (32*(Z.of_nat (length x - i)))))
+                                              (word.of_Z (Z.of_nat (length x - i)*32)))
            /\ map.get regs' (gpreg x22) = Some (addi_spec (word.of_Z 0) 22)
            /\ (exists acc c,
                   map.get wregs' (wdreg w23) = Some acc
@@ -510,7 +541,7 @@ Section __.
       (* rewrite the seplogic statement to expose the word we're going to load *)
       lazymatch goal with
       | H : sep (bignum_at _ _) _ ?m |- context[?m] =>
-          seprewrite_in (split_bignum_nth (length x - S i)) H; [ lia .. | ]
+          seprewrite_in (split_bignum_expose_nth (length x - S i)) H; [ try lia .. | ]
       end.
       extract_ex1_and_emp_in_hyps.
       subst.
@@ -633,7 +664,7 @@ Section __.
     (* first fold is different from the others because it has a carry *)
     subst_lets.
     rewrite !word.unsigned_add.
-    rewrite and_shift_right_ones, shift_right_ones.
+    rewrite and_shift_right_ones, shift_right_ones by lia.
     lazymatch goal with |- context [Z.b2z ?c] =>
                           assert (0 <= Z.b2z c < 2) by (destruct c; cbn; lia) end.
     rewrite word.unsigned_of_Z_nowrap by lia.
