@@ -21,19 +21,12 @@ Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.
 
-(*** The world's most basic OTBN test program: adds two 32-bit registers. ***)
+(*** Very simple program that adds two 256-bit registers. ***)
 
 (* Code reference:
 
-     start:
-       addi x2, x0, 2
-       addi x3, x0, 3
-       jal  x1, add
-       sw   x5, 0(x0)
-       ecall
-
-     add:
-       add  x5, x2, x3
+     wide_add:
+       bn.add w5, w2, w3
        ret
 *)
 
@@ -46,47 +39,33 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
-
-  Definition add_fn : otbn_function :=
-    ("add"%string,
+ 
+  Definition wide_add_fn : otbn_function :=
+    ("wide_add"%string,
       map.empty,
-      [(Add x5 x2 x3 : insn);
+      [(Bn_add w5 w2 w3 0 FG0: insn);
        (Ret : insn)]).
-  Definition start_fn : otbn_function :=
-    ("start",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Jal x1 "add" : insn);
-        (Sw x0 x5 0 : insn) ;
-        (Ecall : insn)])%string.
 
-  Lemma add_correct :
+  
+  Lemma wide_add_correct :
     forall regs wregs flags dmem cstack lstack a b,
-      map.get regs (gpreg x2) = Some a ->
-      map.get regs (gpreg x3) = Some b ->
+      map.get wregs (wdreg w2) = Some a ->
+      map.get wregs (wdreg w3) = Some b ->
       returns
-        (fetch:=fetch_ctx [add_fn])
-        "add"%string regs wregs flags dmem cstack lstack
+        (fetch:=fetch_ctx [wide_add_fn])
+        "wide_add"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           map.get regs' (gpreg x5) = Some (word.add a b)
+           map.get wregs' (wdreg w5) = Some (word.add a b)
+           /\ map.get flags' (flagC FG0) = Some (2^256 <=? word.unsigned a + word.unsigned b)
            /\ dmem' = dmem
-           /\ clobbers [] flags flags'
-           /\ clobbers [] wregs wregs'
-           /\ clobbers [gpreg x5] regs regs').
+           /\ clobbers [flagC FG0; flagM FG0; flagZ FG0; flagL FG0] flags flags'
+           /\ clobbers [wdreg w5] wregs wregs'
+           /\ clobbers [] regs regs').
   Proof.
-    cbv [add_fn returns]. intros; subst.
-    repeat straightline_step.
+    cbv [wide_add_fn returns]. intros; subst.
+    straightline_step.
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ mapsimpl | solve_clobbers .. ].
+    ssplit; try reflexivity; [ mapsimpl | mapsimpl | solve_clobbers .. ].
   Qed.
-
-  (* Check that the linker works. *)
-  Definition add_prog : program := ltac:(link_program [start_fn; add_fn]).
-
-  (* Uncomment to see the linked program! *)
-  (*
-  Print add_prog.
-  *)
 
 End __.

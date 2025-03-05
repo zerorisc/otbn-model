@@ -5,6 +5,7 @@ Require Import coqutil.Byte.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.Properties.
 Require Import coqutil.Map.Separation.
+Require Import coqutil.Map.SeparationLogic.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
@@ -21,19 +22,15 @@ Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.
 
-(*** The world's most basic OTBN test program: adds two 32-bit registers. ***)
+(*** A simple function that adds two 32-bit values from memory. ***)
 
 (* Code reference:
 
-     start:
-       addi x2, x0, 2
-       addi x3, x0, 3
-       jal  x1, add
-       sw   x5, 0(x0)
-       ecall
-
-     add:
+     add_mem:
+       lw   x2, 0(x12)
+       lw   x3, 0(x13)
        add  x5, x2, x3
+       sw   x5, 0(x12)
        ret
 *)
 
@@ -47,46 +44,43 @@ Section __.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
 
-  Definition add_fn : otbn_function :=
-    ("add"%string,
+  Definition add_mem_fn : otbn_function :=
+    ("add_mem",
       map.empty,
-      [(Add x5 x2 x3 : insn);
-       (Ret : insn)]).
-  Definition start_fn : otbn_function :=
-    ("start",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Jal x1 "add" : insn);
-        (Sw x0 x5 0 : insn) ;
-        (Ecall : insn)])%string.
+      [ (Lw x2 x12 0 : insn);
+        (Lw x3 x13 0 : insn);
+        (Add x5 x2 x3 : insn);
+        (Sw x12 x5 0 : insn) ;
+        (Ret : insn)])%string.
 
-  Lemma add_correct :
-    forall regs wregs flags dmem cstack lstack a b,
-      map.get regs (gpreg x2) = Some a ->
-      map.get regs (gpreg x3) = Some b ->
+  
+  Lemma add_mem_correct :
+    forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
+      is_word_aligned 4 pa = true ->
+      is_word_aligned 4 pb = true ->
+      word.unsigned pa + 4 < DMEM_BYTES ->
+      word.unsigned pb + 4 < DMEM_BYTES ->
+      map.get regs (gpreg x12) = Some pa ->
+      map.get regs (gpreg x13) = Some pb ->
+      (* note: the separation-logic setup does not require the operands to be disjoint *)
+      (word32_at pa a * Ra)%sep dmem ->
+      (word32_at pb b * Rb)%sep dmem ->
       returns
-        (fetch:=fetch_ctx [add_fn])
-        "add"%string regs wregs flags dmem cstack lstack
+        (fetch:=fetch_ctx [add_mem_fn])
+        "add_mem"%string regs wregs flags dmem cstack lstack
         (fun regs' wregs' flags' dmem' =>
-           map.get regs' (gpreg x5) = Some (word.add a b)
-           /\ dmem' = dmem
+           (word32_at pa (word.add a b) * Ra)%sep dmem'
            /\ clobbers [] flags flags'
            /\ clobbers [] wregs wregs'
-           /\ clobbers [gpreg x5] regs regs').
+           /\ clobbers [gpreg x2; gpreg x3; gpreg x5] regs regs').
   Proof.
-    cbv [add_fn returns]. intros; subst.
+    cbv [add_mem_fn returns]. intros; subst.
+
     repeat straightline_step.
+
     eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ mapsimpl | solve_clobbers .. ].
+    ssplit; try reflexivity; [ | solve_clobbers .. ].
+    ecancel_assumption.
   Qed.
-
-  (* Check that the linker works. *)
-  Definition add_prog : program := ltac:(link_program [start_fn; add_fn]).
-
-  (* Uncomment to see the linked program! *)
-  (*
-  Print add_prog.
-  *)
 
 End __.

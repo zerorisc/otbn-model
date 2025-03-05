@@ -1029,4 +1029,12 @@ Section __.
     cbv [Z.b2z] in *; repeat destruct_one_match; lia.    
   Qed.
 
+  Lemma word_xor_same {width : Z} {word : word width} {word_ok : word.ok word} :
+    forall x : word, word.xor x x = word.of_Z 0.
+  Proof.
+    intros. apply word.unsigned_inj.
+    rewrite word.unsigned_xor, word.unsigned_of_Z_0.
+    rewrite Z.lxor_nilpotent. pose proof word.modulus_pos.
+    apply Z.mod_0_l. lia.
+  Qed.
 End __.
