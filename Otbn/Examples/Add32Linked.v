@@ -15,8 +15,8 @@ Require Import coqutil.Z.PushPullMod.
 Require Import Otbn.Examples.Add32.
 Require Import Otbn.Model.Clobbers.
 Require Import Otbn.Model.ISA.
-Require Import Otbn.Model.Linker.
-Require Import Otbn.Model.LinkerProperties.
+Require Import Otbn.Linker.Linker.
+Require Import Otbn.Linker.LinkerProperties.
 Require Import Otbn.Model.Semantics.
 Require Import Otbn.Model.SemanticsProperties.
 Require Import Otbn.Model.StraightlineStep.
