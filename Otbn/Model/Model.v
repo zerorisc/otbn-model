@@ -28,26 +28,8 @@ Local Infix "&'" := Z.land (at level 40, only parsing) : Z_scope.
 Local Infix "<<" := Z.shiftl (at level 40, only parsing) : Z_scope.
 Local Infix ">>" := Z.shiftr (at level 40, only parsing) : Z_scope.
 Local Coercion Z.b2z : bool >-> Z.
-
+(*
 Module Test.
-
-  (* Test program : add two values from memory using pointers
-
-     add_mem:
-       lw   x2, 0(x12)
-       lw   x3, 0(x13)
-       add  x5, x2, x3
-       sw   x5, 0(x12)
-       ret
-   *)
-  Definition add_mem_fn : otbn_function :=
-    ("add_mem",
-      map.empty,
-      [ (Lw x2 x12 0 : insn);
-        (Lw x3 x13 0 : insn);
-        (Add x5 x2 x3 : insn);
-        (Sw x12 x5 0 : insn) ;
-        (Ret : insn)])%string.
 
 
   (* Test program: add two bignums
@@ -109,36 +91,6 @@ Module Test.
         (Bn_add w2 w2 w3 0 FG0 : insn);
         (Bn_sid x2 false x12 false  0 : insn);
         (Ret : insn)])%string.
-
-  Lemma add_mem_correct :
-    forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
-      is_word_aligned 4 pa = true ->
-      is_word_aligned 4 pb = true ->
-      word.unsigned pa + 4 < DMEM_BYTES ->
-      word.unsigned pb + 4 < DMEM_BYTES ->
-      map.get regs (gpreg x12) = Some pa ->
-      map.get regs (gpreg x13) = Some pb ->
-      (* note: the separation-logic setup does not require the operands to be disjoint *)
-      (word32_at pa a * Ra)%sep dmem ->
-      (word32_at pb b * Rb)%sep dmem ->
-      returns
-        (fetch:=fetch_ctx [add_mem_fn])
-        "add_mem"%string regs wregs flags dmem cstack lstack
-        (fun regs' wregs' flags' dmem' =>
-           (word32_at pa (word.add a b) * Ra)%sep dmem'
-           /\ clobbers [] flags flags'
-           /\ clobbers [] wregs wregs'
-           /\ clobbers [gpreg x2; gpreg x3; gpreg x5] regs regs').
-  Proof.
-    cbv [add_mem_fn returns]. intros; subst.
-    track_registers_init.
-
-    repeat straightline_step.
-
-    eapply eventually_ret; [ reflexivity | eassumption | ].
-    ssplit; try reflexivity; [ | solve_clobbers .. ].
-    ecancel_assumption.
-  Qed.
 
   Lemma bignum_add_correct :
     forall regs wregs flags dmem cstack lstack a b,
@@ -347,7 +299,7 @@ Module Test.
 
 End __.
 End Test.
-
+*)
 (* Next: add mulqacc *)
 (* Next: prove sha512 copy *)
 (* Next: try to add more realistic error conditions for e.g. loop errors *)

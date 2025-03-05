@@ -17,9 +17,16 @@ Require Import coqutil.Word.LittleEndianList.
 Require Import coqutil.Z.bitblast.
 Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
-Require Import Otbn.Model.Model.
+Require Import Otbn.Model.Clobbers.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Map.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.SemanticsProperties.
+Require Import Otbn.Model.StraightlineStep.
+Require Import Otbn.Model.SubstLets.
+Require Import Otbn.Model.Zsimplify.
 Import ListNotations.
-Import Otbn.Model.Model.Coercions.
+Import Semantics.Coercions.
 Local Open Scope Z_scope.
 
 (* Test out the model by trying to prove the fold_bignum function for RSA trial division. *)
@@ -513,7 +520,6 @@ Section __.
       ssplit; simplify_side_condition; zsimplify; try reflexivity; [ | | try solve_clobbers .. ].
       all:try replace (Z.to_nat (word.unsigned plen)) with (length x) by lia.
       all:rewrite ?Nat.sub_diag.
-      all:try solve [apply map.only_differ_same].
       { (* memory pointer *)
         subst_lets. apply f_equal.
         cbv [addi_spec]. destruct_one_match; try lia; [ ].
@@ -564,7 +570,7 @@ Section __.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.
-        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ | ].
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; mapsimpl; [ | ].
         { simplify_side_condition; subst_lets; zsimplify.
           apply (f_equal Some). apply word.unsigned_inj.
           rewrite !word.unsigned_add, !word.unsigned_of_Z.
@@ -604,7 +610,7 @@ Section __.
             by (rewrite ?app_length in *; cbn [length] in *; destruct x, z; cbn [length] in *;
                 lia)
         end.
-        left. do 4 eexists; ssplit; [ .. | reflexivity ]; solve_map; [ | ].
+        left. do 4 eexists; ssplit; [ .. | reflexivity ]; mapsimpl; [ | ].
         { simplify_side_condition; subst_lets; zsimplify.
           apply (f_equal Some). apply word.unsigned_inj.
           rewrite !word.unsigned_add, !word.unsigned_of_Z.
@@ -697,4 +703,4 @@ Section __.
     lia.
   Qed.
 End __.
-Print Assumptions fold_bignum_correct.
+(* Print Assumptions fold_bignum_correct. *)

@@ -253,6 +253,7 @@ Ltac init_register_tracking_if_missing :=
 
 Ltac solve_clobbers :=
   lazymatch goal with
+  | |- clobbers _ ?x ?x => solve [eapply map.only_differ_same]
   | H : clobbers ?l ?x ?y |- clobbers ?l ?x ?y => exact H
   | H : clobbers ?l1 ?x ?y |- clobbers ?l2 ?x ?y =>
       apply (clobbers_incl l1 l2); cbv [incl In]; tauto
