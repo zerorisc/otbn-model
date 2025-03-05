@@ -83,7 +83,8 @@ Module map.
     Proof.
       intros. pose proof word.unsigned_range (word.sub i a).
       rewrite map.get_of_list_word_at, nth_error_None.
-      rewrite Nat2Z.inj_le, ?Znat.Z2Nat.id; intuition.
+      rewrite Nat2Z.inj_le, ?Znat.Z2Nat.id by lia.
+      lia.
     Qed.
 
     Lemma of_list_word_at_get_pred (addr : word) (vs : list V) :
