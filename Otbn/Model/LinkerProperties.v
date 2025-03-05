@@ -9,11 +9,11 @@ Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
-Require Import Otbn.ISA.
-Require Import Otbn.Linker.
-Require Import Otbn.Maybe.
-Require Import Otbn.Semantics.
-Require Import Otbn.SemanticsProperties.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Linker.
+Require Import Otbn.Model.Maybe.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.SemanticsProperties.
 Import ListNotations.
 Import MaybeNotations.
 Local Open Scope Z_scope.

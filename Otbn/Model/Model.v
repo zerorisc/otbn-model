@@ -31,35 +31,6 @@ Local Coercion Z.b2z : bool >-> Z.
 (*
 Module Test.
 
-  (* Test program : build multiplication out of addition
-
-     mul:
-       addi   x2, x0, x0
-       beq    x4, x0, _mul_end
-       loop   x4, 2
-         jal    x1, add
-         addi   x2, x5, 0
-       _mul_end:
-       ret
-
-     add:
-       add  x5, x2, x3
-       ret
-   *)
-  Definition mul_fn : otbn_function :=
-    Eval cbn [List.app length] in (
-        let syms := map.empty in
-        let body : list insn :=
-          [ (Addi x2 x0 0 : insn);
-            (Beq x4 x0 "_mul_end" : insn);
-            (Loop x4 : insn);
-            (Jal x1 "add" : insn);
-            (Addi x2 x5 0 : insn);
-            (LoopEnd : insn)] in
-        let syms := map.put syms "_mul_end" (length body) in
-        let body := (body ++  [(Ret : insn)])%list in
-        ("mul", syms, body))%string.
-
   (* Test program : add two values from memory using pointers
 
      add_mem:

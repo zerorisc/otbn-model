@@ -15,10 +15,10 @@ Require Import coqutil.Word.LittleEndianList.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
-Require Import Otbn.ISA.
-Require Import Otbn.Map.
-Require Import Otbn.Semantics.
-Require Import Otbn.Zsimplify.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Map.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.Zsimplify.
 Import ListNotations.
 Local Open Scope Z_scope.
 

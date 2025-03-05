@@ -6,10 +6,14 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Naive.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.SortedListWord.
-Require Import Otbn.Model.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.ToString.
+Require Import Otbn.Semantics.
 Import ListNotations.
-Import Otbn.Model.Coercions.
+Import Semantics.Coercions.
 Local Open Scope Z_scope.
+
+(*** Fully instantiate an executable, extractable OTBN model. ***)
 
 Module SortedListRegs.
   Definition ltb (r1 r2 : reg) := String.ltb (reg_to_string r1) (reg_to_string r2).

@@ -8,11 +8,11 @@ Require Import coqutil.Map.Separation.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
-Require Import Otbn.ISA.
-Require Import Otbn.Linker.
-Require Import Otbn.Semantics.
-Require Import Otbn.SemanticsProperties.
-Require Import Otbn.StraightlineStep.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Linker.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.SemanticsProperties.
+Require Import Otbn.Model.StraightlineStep.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.

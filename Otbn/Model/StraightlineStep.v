@@ -10,11 +10,11 @@ Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
-Require Import Otbn.Clobbers.
-Require Import Otbn.ISA.
-Require Import Otbn.Map.
-Require Import Otbn.Semantics.
-Require Import Otbn.SemanticsProperties.
+Require Import Otbn.Model.Clobbers.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Map.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.SemanticsProperties.
 Local Open Scope Z_scope.
 
 (*** Helpful tactics for proving programs correct. ***)

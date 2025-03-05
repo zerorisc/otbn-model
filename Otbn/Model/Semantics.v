@@ -8,10 +8,10 @@ Require Import coqutil.Map.SortedListString.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.LittleEndianList.
-Require Import Otbn.ISA.
-Require Import Otbn.Labels.
-Require Import Otbn.Maybe.
-Require Import Otbn.ToString.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Labels.
+Require Import Otbn.Model.Maybe.
+Require Import Otbn.Model.ToString.
 Require Coq.Strings.HexString.
 Import ListNotations.
 Import MaybeNotations.

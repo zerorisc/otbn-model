@@ -2,10 +2,10 @@ Require Import Coq.Lists.List.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.Properties.
 Require Import coqutil.Tactics.Tactics.
-Require Import Otbn.ISA.
-Require Import Otbn.Map.
-Require Import Otbn.Semantics.
-Require Import Otbn.RegisterEquality.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Map.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.RegisterEquality.
 Import ListNotations.
 
 (*** Lemmas and tactics that help track which registers/flags are overwritten. ***)

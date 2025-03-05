@@ -12,14 +12,14 @@ Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
-Require Import Otbn.Clobbers.
-Require Import Otbn.ISA.
-Require Import Otbn.Linker.
-Require Import Otbn.Map.
-Require Import Otbn.Semantics.
-Require Import Otbn.SemanticsProperties.
-Require Import Otbn.StraightlineStep.
-Require Import Otbn.SubstLets.
+Require Import Otbn.Model.Clobbers.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Linker.
+Require Import Otbn.Model.Map.
+Require Import Otbn.Model.Semantics.
+Require Import Otbn.Model.SemanticsProperties.
+Require Import Otbn.Model.StraightlineStep.
+Require Import Otbn.Model.SubstLets.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.
@@ -64,12 +64,7 @@ Section __.
         (Sw x0 x5 0 : insn) ;
         (Ecall : insn)])%string.
 
-  (* Uncomment below to check that everything links. *)
-  (*
-  Compute (link [start_fn; add_fn]).
-   *)
-
-    Lemma add_correct :
+  Lemma add_correct :
     forall regs wregs flags dmem cstack lstack a b,
       map.get regs (gpreg x2) = Some a ->
       map.get regs (gpreg x3) = Some b ->

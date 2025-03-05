@@ -1,5 +1,5 @@
 Require Import coqutil.Tactics.Tactics.
-Require Import Otbn.ISA.
+Require Import Otbn.Model.ISA.
 
 (* Boilerplate definitions for comparing registers. *)
 

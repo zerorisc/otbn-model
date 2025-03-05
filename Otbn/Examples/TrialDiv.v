@@ -17,9 +17,9 @@ Require Import coqutil.Word.LittleEndianList.
 Require Import coqutil.Z.bitblast.
 Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
-Require Import Otbn.Model.
+Require Import Otbn.Model.Model.
 Import ListNotations.
-Import Otbn.Model.Coercions.
+Import Otbn.Model.Model.Coercions.
 Local Open Scope Z_scope.
 
 (* Test out the model by trying to prove the fold_bignum function for RSA trial division. *)

@@ -2,10 +2,10 @@ Require Import Coq.Strings.String.
 Require Import Coq.Lists.List.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.SortedListString.
-Require Import Otbn.ISA.
-Require Import Otbn.Maybe.
-Require Import Otbn.Labels.
-Require Import Otbn.Semantics.
+Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Maybe.
+Require Import Otbn.Model.Labels.
+Require Import Otbn.Model.Semantics.
 Import ListNotations.
 Import MaybeNotations.
 Local Open Scope maybe_scope.
