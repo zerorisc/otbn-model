@@ -18,8 +18,6 @@ Import ListNotations.
 Import MaybeNotations.
 Local Open Scope Z_scope.
 
-Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
-
 Section __.
   Context {word32 : word.word 32} {regfile : map.map reg word32}.
   Context {word256 : word.word 256} {wregfile : map.map wreg word256}.

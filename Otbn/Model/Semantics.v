@@ -669,6 +669,7 @@ End Coercions.
 (* Functions consist of a name, internal labels (map of string ->
    offset within the function), and a list of instructions. *)
 Definition symbols : map.map string nat := SortedListString.map _.
+Instance symbols_ok : map.ok symbols := (SortedListString.ok nat).
 Definition otbn_function : Type := string * symbols * list (insn (label:=string)).
 
 (* Convenience shorthands for defining function specs. *)

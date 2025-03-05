@@ -131,6 +131,8 @@ Ltac mapsimpl_step t :=
   lazymatch goal with
   | |- ?x = ?x => reflexivity
   | H : ?P |- ?P => exact H
+  | |- context [ map.get map.empty _ ] =>
+      rewrite map.get_empty
   | |- context [ map.get (map.put _ ?k _) ?k ] =>
       rewrite map.get_put_same
   | |- context [ map.get (map.put ?m ?k1 ?v) ?k2 ] =>
@@ -144,4 +146,3 @@ Ltac mapsimpl_step t :=
          end
   end.
 Ltac mapsimpl := repeat (mapsimpl_step ltac:(congruence)).
-

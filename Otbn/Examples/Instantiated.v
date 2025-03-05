@@ -6,9 +6,12 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Naive.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.SortedListWord.
+Require Import Otbn.Examples.Add32.
+Require Import Otbn.Examples.RepeatAdd.
 Require Import Otbn.Model.ISA.
+Require Import Otbn.Model.Linker.
 Require Import Otbn.Model.ToString.
-Require Import Otbn.Semantics.
+Require Import Otbn.Model.Semantics.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.
@@ -86,34 +89,33 @@ End SortedListFlags.
 
 Global Instance mem : map.map Naive.word32 Byte.byte := SortedListWord.map _ _.
 
-Module ExecTest.
-  Local Instance word32 : word.word 32 := Naive.word 32.
-  Local Instance word256 : word.word 256 := Naive.word 256.
-  (* Check that exec works *)
-  Eval vm_compute in
-    (exec1 (fetch:=fetch Test.prog0) (start_state map.empty)).
-  Eval vm_compute in
-    (exec (fetch:=fetch Test.prog0) (start_state map.empty) 100).
+Local Instance word32 : word.word 32 := Naive.word 32.
+Local Instance word256 : word.word 256 := Naive.word 256.
 
-  (* scaling factor; create a program with ~n instructions *)
-  Definition n := 10000.
-  Definition add_fn : otbn_function := Eval vm_compute in (Test.repeat_add 10000).
-  Definition start_fn : otbn_function :=
-    ("start",
-      map.empty,
-      [ (Addi x3 x0 23 : insn);
-        (Jal x1 (fst (fst add_fn)) : insn);
-        (Sw x0 x2 0 : insn);
-        (* Uncomment this line to see an error
-        (Addi x2 x5 0 : insn);
-        *)
-        (Ecall : insn)])%string.
+(* Check that executing the instantiated model works *)
+Eval vm_compute in
+    (exec1 (fetch:=fetch add_prog) (start_state map.empty)).
+Eval vm_compute in
+  (exec (fetch:=fetch add_prog) (start_state map.empty) 100).
 
-  (* Check that exec completes in a reasonable amount of time *)
-  Definition prog : program := ltac:(link_program [start_fn; add_fn]).
+(* Test scaling: create a program with ~n instructions *)
+Definition n := 10000.
+Definition add_fn : otbn_function := Eval vm_compute in (repeat_add 10000).
+Definition start_fn : otbn_function :=
+  ("start",
+    map.empty,
+    [ (Addi x3 x0 23 : insn);
+      (Jal x1 (fst (fst add_fn)) : insn);
+      (Sw x0 x2 0 : insn);
+      (* Uncomment this line to see an error
+         (Addi x2 x5 0 : insn);
+       *)
+      (Ecall : insn)])%string.
+
+(* Check that exec completes in a reasonable amount of time *)
+Definition prog : program := ltac:(link_program [start_fn; add_fn]).
+Timeout 10
   Time
-    Eval vm_compute in
-    (exec (fetch:=fetch prog) (start_state map.empty) (length prog)).
-  (* 5s *)
-
-End ExecTest.
+  Eval vm_compute in
+  (exec (fetch:=fetch prog) (start_state map.empty) (length prog)).
+(* ~5s *)

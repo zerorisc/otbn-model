@@ -1,12 +1,10 @@
 Require Import Coq.Strings.String.
 Require Import Coq.Lists.List.
-Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Byte.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.Properties.
 Require Import coqutil.Map.Separation.
-Require Import coqutil.Map.SeparationLogic.
 Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
@@ -19,7 +17,6 @@ Require Import Otbn.Model.Map.
 Require Import Otbn.Model.Semantics.
 Require Import Otbn.Model.SemanticsProperties.
 Require Import Otbn.Model.StraightlineStep.
-Require Import Otbn.Model.SubstLets.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.
@@ -85,54 +82,12 @@ Section __.
     mapsimpl.
   Qed.
 
-  (*** Test proving the *linked* version of the program. ***)
-
-  (* NOTE: this is not a normal use-case! I just wanted to see if it would work. *)
-
+  (* Check that the linker works. *)
   Definition add_prog : program := ltac:(link_program [start_fn; add_fn]).
 
-  Lemma add_prog_correct v dmem R :
-    (word32_at (word.of_Z 0) v * R)%sep dmem ->
-    eventually
-      (run1 (fetch:=fetch add_prog))
-      (fun st =>
-         match st with
-         | otbn_done _ dmem =>
-             (word32_at (word.of_Z 0) (word.of_Z 5) * R)%sep dmem
-         | _ => False
-         end)
-      (start_state dmem).
-  Proof.
-    cbv [add_prog start_state]; intros.
-    assert (word.unsigned (word:=word32) (word.of_Z 0) + 4 < DMEM_BYTES)
-      by (cbv [DMEM_BYTES]; rewrite word.unsigned_of_Z_0; lia).
-
-    repeat straightline_step.
-
-    (* TODO: The `eventually_jump` lemma can't handle different fetch functions here. *)
-    eapply eventually_step_cps.
-    simplify_side_condition.
- 
-    repeat straightline_step.
-
-    (* TODO: since we handled `jal` manually, we have to handle `ret` manually too. *)
-    eapply eventually_step_cps.
-    simplify_side_condition.
-
-    repeat straightline_step.
-
-    eapply eventually_ecall; [ reflexivity | ].
-
-    use_sep_assumption.
-    lazymatch goal with
-      |- Lift1Prop.iff1 (word_at ?ptr ?v1 * _)%sep (word_at ?ptr ?v2 * _)%sep =>
-        replace v2 with v1; [ ecancel | ]
-    end.
-    subst_lets.
-    cbv [addi_spec]. repeat destruct_one_match; try lia; [ ].
-    apply word.unsigned_inj.
-    rewrite !word.unsigned_add, !word.unsigned_of_Z_nowrap by lia.
-    cbv [word.wrap]. Z.push_pull_mod. reflexivity.
-  Qed.
+  (* Uncomment to see the linked program! *)
+  (*
+  Print add_prog.
+  *)
 
 End __.
