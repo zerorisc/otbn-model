@@ -9,7 +9,7 @@ Require Import coqutil.Semantics.OmniSmallstepCombinators.
 Require Import coqutil.Tactics.Tactics.
 Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
-Require Import Otbn.Model.ISA.
+Require Import Otbn.ISA.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Util.Maybe.
 Require Import Otbn.Semantics.Semantics.

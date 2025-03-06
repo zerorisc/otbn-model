@@ -1,8 +1,8 @@
 Require Import Coq.Strings.String.
 Require Import Coq.ZArith.ZArith.
 Require Import coqutil.Word.Interface.
-Require Import Otbn.Model.ISA.
-Require Import Otbn.Model.Labels.
+Require Import Otbn.ISA.ISA.
+Require Import Otbn.ISA.Labels.
 Require Coq.Strings.HexString.
 Local Open Scope Z_scope.
 

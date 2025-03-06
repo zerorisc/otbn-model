@@ -18,8 +18,8 @@ Require Import coqutil.Z.bitblast.
 Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
 Require Import Otbn.Semantics.Clobbers.
-Require Import Otbn.Model.ISA.
-Require Import Otbn.Util.Map.
+Require Import Otbn.ISA.ISA.
+Require Import Otbn.Util.Tactics.Mapsimpl.
 Require Import Otbn.Semantics.Semantics.
 Require Import Otbn.Semantics.Properties.
 Require Import Otbn.Semantics.Tactics.StraightlineStep.

@@ -126,24 +126,3 @@ Section Separation.
              end. }
   Qed.
 End Separation.
-
-(* Tactic that attempts to simplify and solve goals with `map.get` *)
-Ltac mapsimpl_step t :=
-  lazymatch goal with
-  | |- ?x = ?x => reflexivity
-  | H : ?P |- ?P => exact H
-  | |- context [ map.get map.empty _ ] =>
-      rewrite map.get_empty
-  | |- context [ map.get (map.put _ ?k _) ?k ] =>
-      rewrite map.get_put_same
-  | |- context [ map.get (map.put ?m ?k1 ?v) ?k2 ] =>
-      first [ rewrite (map.get_put_diff m k2 v k1) by t
-            | replace k1 with k2 by t; rewrite map.get_put_same ]
-  | H : map.get ?m ?k = _ |- context [map.get ?m ?k] =>
-      rewrite H
-  | _ => match goal with
-         | m := _ : map.rep |- _ =>
-                  lazymatch goal with |- context [m] => subst m end
-         end
-  end.
-Ltac mapsimpl := repeat (mapsimpl_step ltac:(congruence)).

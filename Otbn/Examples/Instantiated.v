@@ -8,9 +8,9 @@ Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.SortedListWord.
 Require Import Otbn.Examples.Add32.
 Require Import Otbn.Examples.RepeatAdd.
-Require Import Otbn.Model.ISA.
+Require Import Otbn.ISA.ISA.
 Require Import Otbn.Linker.Linker.
-Require Import Otbn.Model.ToString.
+Require Import Otbn.ISA.ToString.
 Require Import Otbn.Semantics.Semantics.
 Import ListNotations.
 Import Semantics.Coercions.

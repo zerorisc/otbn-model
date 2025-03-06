@@ -14,7 +14,7 @@ Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
 Require Import Otbn.Examples.WideAdd.
 Require Import Otbn.Semantics.Clobbers.
-Require Import Otbn.Model.ISA.
+Require Import Otbn.ISA.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Util.Map.
 Require Import Otbn.Semantics.Semantics.
