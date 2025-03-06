@@ -11,7 +11,7 @@ Require Import Otbn.Examples.RepeatAdd.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Model.ToString.
-Require Import Otbn.Model.Semantics.
+Require Import Otbn.Semantics.Semantics.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.

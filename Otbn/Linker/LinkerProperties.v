@@ -12,8 +12,8 @@ Require Import coqutil.Word.Properties.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Util.Maybe.
-Require Import Otbn.Model.Semantics.
-Require Import Otbn.Model.SemanticsProperties.
+Require Import Otbn.Semantics.Semantics.
+Require Import Otbn.Semantics.SemanticsProperties.
 Import ListNotations.
 Import MaybeNotations.
 Local Open Scope Z_scope.

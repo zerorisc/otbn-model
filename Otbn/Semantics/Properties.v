@@ -17,7 +17,7 @@ Require Import coqutil.Z.PushPullMod.
 Require Import coqutil.Z.ZLib.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Util.Map.
-Require Import Otbn.Model.Semantics.
+Require Import Otbn.Semantics.Semantics.
 Require Import Otbn.Util.Tactics.Zsimplify.
 Import ListNotations.
 Local Open Scope Z_scope.

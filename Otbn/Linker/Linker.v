@@ -5,7 +5,7 @@ Require Import coqutil.Map.SortedListString.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Util.Maybe.
 Require Import Otbn.Model.Labels.
-Require Import Otbn.Model.Semantics.
+Require Import Otbn.Semantics.Semantics.
 Import ListNotations.
 Import MaybeNotations.
 Local Open Scope maybe_scope.

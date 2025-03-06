@@ -13,13 +13,13 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
 Require Import coqutil.Z.PushPullMod.
 Require Import Otbn.Examples.Add32.
-Require Import Otbn.Model.Clobbers.
+Require Import Otbn.Semantics.Clobbers.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Linker.LinkerProperties.
-Require Import Otbn.Model.Semantics.
-Require Import Otbn.Model.SemanticsProperties.
-Require Import Otbn.Model.StraightlineStep.
+Require Import Otbn.Semantics.Semantics.
+Require Import Otbn.Semantics.SemanticsProperties.
+Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Require Import Otbn.Util.Tactics.SubstLets.
 Import ListNotations.
 Import Semantics.Coercions.
