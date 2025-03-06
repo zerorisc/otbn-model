@@ -15,11 +15,11 @@ Require Import coqutil.Z.PushPullMod.
 Require Import Otbn.Model.Clobbers.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
-Require Import Otbn.Model.Map.
+Require Import Otbn.Util.Map.
 Require Import Otbn.Model.Semantics.
 Require Import Otbn.Model.SemanticsProperties.
 Require Import Otbn.Model.StraightlineStep.
-Require Import Otbn.Model.SubstLets.
+Require Import Otbn.Util.Tactics.SubstLets.
 Import ListNotations.
 Import Semantics.Coercions.
 Local Open Scope Z_scope.

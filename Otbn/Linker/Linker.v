@@ -3,7 +3,7 @@ Require Import Coq.Lists.List.
 Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.SortedListString.
 Require Import Otbn.Model.ISA.
-Require Import Otbn.Model.Maybe.
+Require Import Otbn.Util.Maybe.
 Require Import Otbn.Model.Labels.
 Require Import Otbn.Model.Semantics.
 Import ListNotations.

@@ -11,7 +11,7 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.Properties.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
-Require Import Otbn.Model.Maybe.
+Require Import Otbn.Util.Maybe.
 Require Import Otbn.Model.Semantics.
 Require Import Otbn.Model.SemanticsProperties.
 Import ListNotations.

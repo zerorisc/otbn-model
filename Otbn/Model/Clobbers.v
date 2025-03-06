@@ -3,7 +3,7 @@ Require Import coqutil.Map.Interface.
 Require Import coqutil.Map.Properties.
 Require Import coqutil.Tactics.Tactics.
 Require Import Otbn.Model.ISA.
-Require Import Otbn.Model.Map.
+Require Import Otbn.Util.Map.
 Require Import Otbn.Model.Semantics.
 Require Import Otbn.Model.RegisterEquality.
 Import ListNotations.

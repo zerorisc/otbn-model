@@ -10,7 +10,7 @@ Require Import coqutil.Word.Interface.
 Require Import coqutil.Word.LittleEndianList.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Model.Labels.
-Require Import Otbn.Model.Maybe.
+Require Import Otbn.Util.Maybe.
 Require Import Otbn.Model.ToString.
 Require Coq.Strings.HexString.
 Import ListNotations.
