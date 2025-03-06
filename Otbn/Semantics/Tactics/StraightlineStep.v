@@ -14,7 +14,7 @@ Require Import Otbn.Semantics.Clobbers.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Util.Map.
 Require Import Otbn.Semantics.Semantics.
-Require Import Otbn.Semantics.SemanticsProperties.
+Require Import Otbn.Semantics.Properties.
 Local Open Scope Z_scope.
 
 (*** Helpful tactics for proving programs correct. ***)

@@ -16,9 +16,9 @@ Require Import Otbn.Examples.Add32.
 Require Import Otbn.Semantics.Clobbers.
 Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
-Require Import Otbn.Linker.LinkerProperties.
+Require Import Otbn.Linker.Properties.
 Require Import Otbn.Semantics.Semantics.
-Require Import Otbn.Semantics.SemanticsProperties.
+Require Import Otbn.Semantics.Properties.
 Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Require Import Otbn.Util.Tactics.SubstLets.
 Import ListNotations.

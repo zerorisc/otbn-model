@@ -16,7 +16,7 @@ Require Import Otbn.Model.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Util.Map.
 Require Import Otbn.Semantics.Semantics.
-Require Import Otbn.Semantics.SemanticsProperties.
+Require Import Otbn.Semantics.Properties.
 Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Import ListNotations.
 Import Semantics.Coercions.
