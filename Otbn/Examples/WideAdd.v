@@ -18,7 +18,7 @@ Require Import Otbn.Semantics.Semantics.
 Require Import Otbn.Semantics.Properties.
 Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Import ListNotations.
-Import Semantics.Coercions.
+Import ISA.Coercions.
 Local Open Scope Z_scope.
 
 (*** Very simple program that adds two 256-bit registers. ***)

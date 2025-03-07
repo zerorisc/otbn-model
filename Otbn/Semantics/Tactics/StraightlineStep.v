@@ -66,18 +66,26 @@ Ltac simplify_side_condition_step :=
   | |- context [?x =? ?x] => rewrite (Z.eqb_refl x)
   | |- context [?x <? ?x] => rewrite (Z.ltb_irrefl x)
   | |- context [(0 <? S ?x)%nat] => destr (0 <? S x)%nat; [ | lia ]
-  | |- context [if is_valid_addi_imm ?v then _ else _] =>
-        replace (is_valid_addi_imm v) with true by (cbv [is_valid_addi_imm]; lia)
-  | |- context [if is_valid_bn_imm ?v then _ else _] =>
-        replace (is_valid_bn_imm v) with true by (cbv [is_valid_bn_imm]; lia)
+  | |- context [if is_valid_lui_imm ?v then _ else _] =>
+        replace (is_valid_lui_imm v) with true by (cbv [is_valid_lui_imm]; lia)
+  | |- context [if is_valid_shamt ?v then _ else _] =>
+        replace (is_valid_shamt v) with true by (cbv [is_valid_shamt]; lia)
+  | |- context [if is_valid_arith32_imm ?v then _ else _] =>
+        replace (is_valid_arith32_imm v) with true by (cbv [is_valid_arith32_imm]; lia)
+  | |- context [if is_valid_arith256_imm ?v then _ else _] =>
+        replace (is_valid_arith256_imm v) with true by (cbv [is_valid_arith256_imm]; lia)
+  | |- context [if is_valid_rshi_imm ?v then _ else _] =>
+        replace (is_valid_arith256_imm v) with true by (cbv [is_valid_rshi_imm]; lia)
   | |- context [if is_valid_mem_offset ?v then _ else _] =>
         replace (is_valid_mem_offset v) with true by (cbv [is_valid_mem_offset]; cbn; lia)
   | |- context [if is_valid_wide_mem_offset ?v then _ else _] =>
         replace (is_valid_wide_mem_offset v) with true by (cbv [is_valid_wide_mem_offset]; cbn; lia)
   | |- context [if is_word_aligned ?width ?a then _ else _] =>
         replace (is_word_aligned width a) with true by (symmetry; solve_is_word_aligned ltac:(lia))
-  | |- context [if is_valid_shift_imm ?s then _ else _] =>
-        replace (is_valid_shift_imm s) with true by (vm_compute; lia)
+  | |- context [if is_valid_arith256_shift_imm ?s then _ else _] =>
+        replace (is_valid_arith256_shift_imm s) with true by (vm_compute; lia)
+  | |- context [if is_valid_mulqacc_shift ?s then _ else _] =>
+        replace (is_valid_mulqacc_shift s) with true by (vm_compute; lia)
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
   | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity

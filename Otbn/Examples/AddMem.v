@@ -19,7 +19,7 @@ Require Import Otbn.Semantics.Semantics.
 Require Import Otbn.Semantics.Properties.
 Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Import ListNotations.
-Import Semantics.Coercions.
+Import ISA.Coercions.
 Local Open Scope Z_scope.
 
 (*** A simple function that adds two 32-bit values from memory. ***)

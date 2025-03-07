@@ -103,6 +103,7 @@ Definition cinsn_equiv (syms : symbols)
   match i1, i2 with
   | Ret, Ret => True
   | Ecall, Ecall => True
+  | Unimp, Unimp => True
   | Jal r1 dst1, Jal r2 dst2 =>
       r1 = r2 /\ map.get syms dst1 = Some dst2
   | Bne a1 b1 dst1, Bne a2 b2 dst2 =>

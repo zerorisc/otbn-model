@@ -23,7 +23,7 @@ Require Import Otbn.Semantics.Tactics.StraightlineStep.
 Require Import Otbn.Util.Tactics.SubstLets.
 Require Import Otbn.Util.Tactics.Zsimplify.
 Import ListNotations.
-Import Semantics.Coercions.
+Import ISA.Coercions.
 Local Open Scope Z_scope.
 
 (*** Build 32-bit multiplication out of 32-bit addition. ***)

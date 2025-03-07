@@ -13,6 +13,7 @@ Require Import Otbn.ISA.ISA.
 Require Import Otbn.Linker.Linker.
 Require Import Otbn.Util.Maybe.
 Require Import Otbn.Semantics.Semantics.
+Require Import Otbn.Semantics.Weakening.
 Require Import Otbn.Semantics.Properties.
 Import ListNotations.
 Import MaybeNotations.

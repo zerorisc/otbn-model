@@ -15,7 +15,7 @@ Require Import Otbn.ISA.ToString.
 Require Import Otbn.Semantics.Semantics.
 Require Coq.Strings.HexString.
 Import ListNotations.
-Import Semantics.Coercions.
+Import ISA.Coercions.
 Local Open Scope Z_scope.
 
 (*** Fully instantiate an executable, extractable OTBN model. ***)
