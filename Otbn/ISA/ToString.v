@@ -133,25 +133,22 @@ Section __.
     end.
 
   Definition limb_to_string (l : limb) : string :=
-    match l with
-    | limb0 => ".0"
-    | limb1 => ".1"
-    | limb2 => ".2"
-    | limb3 => ".3"
-    end.
+    wdr_to_string (fst l) ++ "." ++ String.of_nat (Z.to_nat (snd l)).
 
   Definition shift_to_string (shift : Z) : string :=
     if shift =? 0
     then ""
     else (if shift >? 0 then " <<" else " >>") ++ HexString.of_Z (Z.abs shift).
 
-  Definition inc_to_string (inc : bool) : string :=
-    if inc then "++" else "".
+  Definition inc_to_string (inc : gpr_inc) : string :=
+    match inc with
+    | gpr_inc_false r => gpr_to_string r
+    | gpr_inc_true r => gpr_to_string r ++ "++"
+    end.
 
   Definition imm_to_dec (imm : Z) :=
     (if (0 <? imm)%Z then "-" else "" ++ String.of_nat (Z.to_nat (Z.abs imm)))%string.
 
-  Print sinsn.
   Definition sinsn_to_string (i : sinsn) : string :=
     match i with
     | Addi rd rs imm =>
@@ -226,18 +223,31 @@ Section __.
         "bn.addm " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2
     | Bn_subm wrd wrs1 wrs2 =>
         "bn.subm " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2
-    | Bn_mulqacc z wrs1 wrs1_qwsel wrs2 wrs2_qwsel imm  =>
-        "bn.mulqacc" ++ if z then ".z" else "" ++ " " ++ wrs1 ++ limb_to_string wrs1_qwsel ++ ", " ++ wrs2 ++ limb_to_string wrs2_qwsel ++ "<<" ++ imm_to_dec imm
-    | Bn_lid grd grd_inc grs1 grs1_inc imm =>
-        "bn.lid " ++ grd ++ inc_to_string grd_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ grs1 ++ inc_to_string grs1_inc
-    | Bn_sid grs2 grs2_inc grs1 grs1_inc imm =>
-        "bn.sid " ++ grs2 ++ inc_to_string grs2_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ grs1 ++ inc_to_string grs1_inc
+    | Bn_mulqacc z wrs1 wrs2 imm  =>
+        "bn.mulqacc" ++ if z then ".z" else "" ++ " " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
+    | Bn_mulqacc_wo z wrd wrs1 wrs2 imm  =>
+        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
+    | Bn_mulqacc_so z wrd U wrs1 wrs2 imm  =>
+        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ if U then ".U" else ".L" ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
+    | Bn_lid grd_inc grs1_inc imm =>
+        "bn.lid " ++ inc_to_string grd_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ inc_to_string grs1_inc
+    | Bn_sid grs2_inc grs1_inc imm =>
+        "bn.sid " ++ inc_to_string grs2_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ inc_to_string grs1_inc
+    | Bn_mov wrd wrs1 =>
+        "bn.mov " ++ wdr_to_string wrd ++ ", " ++ wdr_to_string wrs1
+    | Bn_movr grd_inc grs1_inc =>
+        "bn.movr " ++ inc_to_string grd_inc ++ ", " ++ inc_to_string grs1_inc
+    | Bn_wsrr wrd wrs1 =>
+        "bn.wsrr " ++ wdr_to_string wrd ++ ", " ++ wsr_to_string wrs1
+    | Bn_wsrw wsd wrs1 =>
+        "bn.wsrw " ++ wsr_to_string wsd ++ ", " ++ wdr_to_string wrs1
     end.
 
   Definition cinsn_to_string (i : cinsn (label:=label)) : string :=
     match i with
     | Ret => "ret"
     | Ecall => "ecall"
+    | Unimp => "unimp"
     | Jal r dst => "jal " ++ r ++ ", " ++ label_to_string dst
     | Bne r1 r2 dst => "bne " ++ r1 ++ ", " ++ r2 ++ ", " ++ label_to_string dst
     | Beq r1 r2 dst => "beq " ++ r1 ++ ", " ++ r2 ++ ", " ++ label_to_string dst

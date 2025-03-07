@@ -251,10 +251,10 @@ Module Notations.
   Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm : insn) (at level 40) : otbn_scope.
   Notation "'bn.mulqacc.wo' d , a , b , imm" := (Bn_mulqacc_wo false d a b imm : insn) (at level 40) : otbn_scope.
   Notation "'bn.mulqacc.wo.z' d , a , b , imm" := (Bn_mulqacc_wo true d a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.L' , a , b , imm" := (Bn_mulqacc_so false d true a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.U' , a , b , imm" := (Bn_mulqacc_so false d false a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm" := (Bn_mulqacc_so true d true a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm" := (Bn_mulqacc_so true d false a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.L' , a , b , imm" := (Bn_mulqacc_so false d false a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.U' , a , b , imm" := (Bn_mulqacc_so false d true a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm" := (Bn_mulqacc_so true d false a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm" := (Bn_mulqacc_so true d true a b imm : insn) (at level 40) : otbn_scope.
 
   (* Load-store offset notations require special handling to parse the
      parentheses as actual symbols. Only the most common offsets get
