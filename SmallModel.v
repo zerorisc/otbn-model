@@ -2569,7 +2569,7 @@ Section Helpers.
     cbn [fetch_ctx fold_left]. destruct_one_match; split; congruence.
   Qed.
 
-  Lemma fetch_ctx_weaken_cons_eq fns fn dst i :
+  Lemma fetch_ctx_cons_eq fns fn dst i :
       fetch_ctx [fn] dst = Some i ->
       fetch_ctx (fn :: fns) dst = Some i.
   Proof.
@@ -2579,7 +2579,7 @@ Section Helpers.
 
   (* TODO: rework this lemma so it's easier -- not just fetch_fn =
      None, but fn is disjoint from the symbol table *)
-  Lemma fetch_ctx_weaken_cons_ne fns fn dst :
+  Lemma fetch_ctx_cons_ne fns fn dst :
     fetch_fn fn dst = None ->
     fetch_ctx (fn :: fns) dst = fetch_ctx fns dst.
   Proof.
@@ -3321,7 +3321,7 @@ Module Test.
       { lia. }
       { apply add_correct; eauto. }
       { intros.
-        rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+        rewrite fetch_ctx_cons_ne; [ eassumption | ].
         eapply fetch_fn_disjoint; eauto; [ ].
         eapply fetch_ctx_singleton_iff; eauto. }
 
@@ -3382,7 +3382,7 @@ Module Test.
     { cbn [length]; lia. }
     { eapply add_correct; eauto. }
     { intros.
-      rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+      rewrite fetch_ctx_cons_ne; [ eassumption | ].
       eapply fetch_fn_disjoint; eauto; [ | ].
       { eapply fetch_ctx_singleton_iff; eauto. }
       { cbv; intuition congruence. } }

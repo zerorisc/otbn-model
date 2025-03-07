@@ -52,6 +52,7 @@ Definition link_cinsn
   match i with
   | Ret => Ok Ret
   | Ecall => Ok Ecall
+  | Unimp => Ok Unimp
   | Jal r dst =>
       (dst <- map_err (map.get syms dst) ("Label " ++ dst ++ " not found (jal)");
        Ok (Jal r dst))

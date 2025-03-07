@@ -825,6 +825,7 @@ Section Semantics.
     match i with
     | Ret =>  call_stack_pop st post
     | Ecall => program_exit st post
+    | Unimp => post (otbn_error (get_pc st) ["ILLEGAL_INSN"%string])
     | Jal r dst =>
         match r with
         | x0 => set_pc st (dst, 0%nat) post
@@ -853,12 +854,12 @@ Section Semantics.
     | LoopEnd => loop_end st post
     end.
   End WithSemanticsParams.
-  
-  Global Instance proof_semantics {word32 : word.word 32} : semantics_parameters Prop :=
+
+  Global Instance proof_semantics : semantics_parameters Prop :=
     {|
       err := fun _ => False;
-      random := fun P => forall v, P v;
-      urandom := fun P => forall v, P v;
+      random := fun width word (P : _ -> Prop) => forall v, P v;
+      urandom := fun width word (P : _ -> Prop) => forall v, P v;
       option_bind := fun _ x _ f => exists v, x = Some v /\ f v;
     |}.
 
@@ -867,8 +868,8 @@ Section Semantics.
   Global Instance exec_semantics : semantics_parameters (maybe otbn_state) :=
     {|
       err := fun msg => Err msg;
-      random := fun _ => Err "Randomness not currently supported in executable model";
-      urandom := fun _ => Err "Randomness not currently supported in executable model";
+      random := fun _ _ _ => Err "Randomness not currently supported in executable model";
+      urandom := fun _ _ _ => Err "Randomness not currently supported in executable model";
       option_bind := fun _ x msg f => match x with
                                       | Some x => f x
                                       | None => Err msg

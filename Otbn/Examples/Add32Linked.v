@@ -94,7 +94,7 @@ Section __.
     eapply eventually_jump;
       [ reflexivity | cbn [length]; lia | eapply add_correct; solve [eauto] | | ].
     { intros.
-      rewrite fetch_ctx_weaken_cons_ne; [ eassumption | ].
+      rewrite fetch_ctx_cons_ne; [ eassumption | ].
       eapply fetch_fn_disjoint; eauto; [ eapply fetch_ctx_singleton_iff; eauto | ].
       cbv; intuition congruence. }
 
