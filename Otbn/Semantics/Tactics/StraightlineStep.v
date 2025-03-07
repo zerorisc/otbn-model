@@ -166,7 +166,7 @@ Ltac print_next_insn :=
 Ltac find_loop_end' fetch pc :=
   let i := eval vm_compute in (fetch pc) in
     match i with
-    | Some (Control LoopEnd) => pc
+    | Some (Control (LoopEnd _)) => pc
     | Some (Control (Loop _)) =>
         let end_pc := find_loop_end' fetch (advance_pc pc) in
         find_loop_end' fetch (advance_pc end_pc)

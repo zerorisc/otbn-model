@@ -27,18 +27,20 @@ Local Open Scope Z_scope.
 
 (*** Build 32x256-bit multiplication out of loops and wide addition. ***)
 
-(* Code reference:
-
-     wide_mul:
-       bn.xor w2, w2, w2
-       beq    x4, x0, _wide_mul_end
-       loop   x4, 2
-         jal      x1, wide_add
-         bn.addi  w2, w5, 0
-       _wide_mul_end:
-       ret
-
-*)
+Section Defs.
+  Import ISA.Notations.
+  
+  Definition wide_mul_fn : otbn_function :=
+    ltac:(make_function
+         "wide_mul"%string
+         ([ "" -: bn.xor w2, w2, w2, FG0
+            ; ""-: beq x4, x0, "_wide_mul_end"
+            ; "" -: loop x4
+            ; "" -: jal x1, "wide_add"
+            ; "" -: loopend (bn.addi w2, w5, 0, FG0)
+            ; "_wide_mul_end" -: ret
+           ]%otbn)%string).
+End Defs.
 
 Section __.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
@@ -50,19 +52,6 @@ Section __.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
 
-  Definition wide_mul_fn : otbn_function :=
-    Eval cbn [List.app length] in (
-        let syms := map.empty in
-        let body : list insn :=
-          [ (Bn_xor w2 w2 w2 0 FG0 : insn);
-            (Beq x4 x0 "_wide_mul_end" : insn);
-            (Loop x4 : insn);
-            (Jal x1 "wide_add" : insn);
-            (Bn_addi w2 w5 0 FG0 : insn);
-            (LoopEnd : insn)] in
-        let syms := map.put syms "_wide_mul_end" (length body) in
-        let body := (body ++  [(Ret : insn)])%list in
-        ("wide_mul", syms, body))%string.
 
   Lemma wide_mul_correct :
     forall regs wregs flags dmem cstack lstack (a v : word256) (b: word32),
@@ -158,6 +147,7 @@ Section __.
 
       (* end of loop; use loop-end helper lemma *)
       eapply eventually_loop_end; [ reflexivity .. | ].
+      simplify_side_condition; track_registers_update.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.

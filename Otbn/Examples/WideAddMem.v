@@ -34,13 +34,13 @@ Section Defs.
   Definition wide_add_mem_fn : otbn_function :=
     ("wide_add_mem"%string,
       map.empty,
-      [ addi     x2, x0, 2
-        ; addi     x3, x0, 3
-        ; bn.lid   x2, 0(x12)
-        ; bn.lid   x3, 0(x13)
-        ; bn.add   w2, w2, w3, FG0
-        ; bn.sid   x2, 0(x12)
-        ; ret]%otbn).
+      [[ addi     x2, x0, 2
+         ; addi     x3, x0, 3
+         ; bn.lid   x2, 0(x12)
+         ; bn.lid   x3, 0(x13)
+         ; bn.add   w2, w2, w3, FG0
+         ; bn.sid   x2, 0(x12)
+         ; ret ]]%otbn).
 End Defs.
 
 Section Proofs.

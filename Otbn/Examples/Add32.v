@@ -29,16 +29,17 @@ Section Defs.
   Definition add_fn : otbn_function :=
     ("add"%string,
       map.empty,
-      [add x5, x2, x3
-       ; ret]%otbn).
+      [[ add x5, x2, x3
+         ; ret ]]%otbn).
+
   Definition start_fn : otbn_function :=
     ("start"%string,
       map.empty,
-      [ addi x2, x0, 2
-        ; addi x3, x0, 3
-        ; jal x1, "add"%string
-        ; sw x5, 0(x0)
-        ; ecall ]%otbn).
+      [[ addi x2, x0, 2
+         ; addi x3, x0, 3
+         ; jal x1, "add"%string
+         ; sw x5, 0(x0)
+         ; ecall ]]%otbn).
 End Defs.
 
 Section Proofs.

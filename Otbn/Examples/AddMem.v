@@ -30,11 +30,11 @@ Section Defs.
   Definition add_mem_fn : otbn_function :=
     ("add_mem"%string,
       map.empty,
-      [ lw   x2, 0(x12)
-        ; lw   x3, 0(x13)
-        ; add  x5, x2, x3
-        ; sw   x5, 0(x12)
-        ; ret]%otbn).
+      [[ lw   x2, 0(x12)
+         ; lw   x3, 0(x13)
+         ; add  x5, x2, x3
+         ; sw   x5, 0(x12)
+         ; ret ]]%otbn).
 End Defs.
 
 Section Proofs.

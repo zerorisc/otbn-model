@@ -70,20 +70,19 @@ Section Defs.
   Definition fold_bignum : otbn_function :=
     ("fold_bignum"%string,
       map.empty,
-      [ addi x22, x0, 22
-        ; addi x2, x16, 0
-        ; bn.addi w23, w31, 0, FG0
-        ; loop x30
-        ; bn.lid x22, 0(x2++)
-        ; bn.addc w23, w23, w22, FG0
-        ; loopend
-        ; bn.and w22, w23, w24 >> 128, FG0
-        ; bn.addc w23, w22, w23 >> 128, FG0
-        ; bn.and w22, w23, w24 >> 192, FG0
-        ; bn.add w23, w22, w23 >> 64, FG0
-        ; bn.and w22, w23, w24 >> 224, FG0
-        ; bn.add w23, w22, w23 >> 32, FG0
-        ; ret]%otbn).
+      [[ addi x22, x0, 22
+         ; addi x2, x16, 0
+         ; bn.addi w23, w31, 0, FG0
+         ; loop x30
+         ; bn.lid x22, 0(x2++)
+         ; loopend (bn.addc w23, w23, w22, FG0)
+         ; bn.and w22, w23, w24 >> 128, FG0
+         ; bn.addc w23, w22, w23 >> 128, FG0
+         ; bn.and w22, w23, w24 >> 192, FG0
+         ; bn.add w23, w22, w23 >> 64, FG0
+         ; bn.and w22, w23, w24 >> 224, FG0
+         ; bn.add w23, w22, w23 >> 32, FG0
+         ; ret ]]%otbn).
 End Defs.
 
 (* generic bignums *)
@@ -495,10 +494,10 @@ Section __.
       subst.
 
       straightline_step.
-      straightline_step.
       
       (* end of loop; use loop-end helper lemma *)
       eapply eventually_loop_end; [ reflexivity .. | ].
+      simplify_side_condition. track_registers_update.
       (* prove that the remaining length of the bignum matches the remaining iterations *)
       lazymatch goal with
       | H : (?i < Z.to_nat (word.unsigned plen))%nat |- context[?x ++ [?y] ++ ?z] =>

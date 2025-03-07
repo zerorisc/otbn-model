@@ -628,6 +628,8 @@ Section __.
             eapply write_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- update_mlz _ _ _ _ =>
             eapply update_mlz_weaken; [ eassumption | ]; cbv beta; intros
+        | |- strt1 _ _ _ _ _ _ =>
+            eapply strt1_weaken; [ eassumption | ]; cbv beta; intros
         | |- exists _, _ =>
             eexists; ssplit; first [ eassumption
                                    | reflexivity

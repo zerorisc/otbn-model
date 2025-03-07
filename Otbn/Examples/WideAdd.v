@@ -29,9 +29,8 @@ Section Defs.
   Definition wide_add_fn : otbn_function :=
     ("wide_add"%string,
       map.empty,
-      [
-        bn.add w5, w2, w3, FG0
-        ; ret]%otbn).
+      [[ bn.add w5, w2, w3, FG0
+         ; ret ]]%otbn).
 End Defs.
 
 Section Proofs.

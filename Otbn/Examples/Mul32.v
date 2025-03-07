@@ -34,13 +34,12 @@ Section Defs.
   Definition mul_fn : otbn_function :=
     ltac:(make_function
          "mul"%string
-         ([ ("", addi x2, x0, 0)
-            ; ("", beq x4, x0, "_mul_end")
-            ; ("", loop x4)
-            ; ("", jal x1, "add")
-            ; ("", addi x2, x5, 0)
-            ; ("", loopend)
-            ; ("_mul_end", ret)
+         ([ "" -: addi x2, x0, 0
+            ; "" -: beq x4, x0, "_mul_end"
+            ; "" -: loop x4
+            ; "" -: jal x1, "add"
+            ; "" -: loopend (addi x2, x5, 0)
+            ; "_mul_end" -: ret
            ]%otbn)%string).
 End Defs.
 
@@ -152,6 +151,7 @@ Section Proofs.
 
       (* end of loop; use loop-end helper lemma *)
       eapply eventually_loop_end; [ reflexivity .. | ].
+      simplify_side_condition; track_registers_update.
       destruct_one_match.
       { (* case: i = 0, loop ends *)
         intros; subst. eapply eventually_done.

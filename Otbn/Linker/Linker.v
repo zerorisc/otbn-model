@@ -64,7 +64,7 @@ Definition link_cinsn
        Ok (Beq r1 r2 dst))
   | Loop r => Ok (Loop r)
   | Loopi imm => Ok (Loopi imm)
-  | LoopEnd => Ok LoopEnd
+  | LoopEnd i => Ok (LoopEnd i)
   end.
 
 Definition link_insn
@@ -112,7 +112,7 @@ Definition cinsn_equiv (syms : symbols)
       a1 = a2 /\ b1 = b2 /\ map.get syms dst1 = Some dst2
   | Loop r1, Loop r2 => r1 = r2
   | Loopi n1, Loopi n2 => n1 = n2
-  | LoopEnd, LoopEnd => True
+  | LoopEnd i1, LoopEnd i2 => i1 = i2
   | _, _ => False
   end.
     

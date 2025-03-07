@@ -253,7 +253,7 @@ Section __.
     | Beq r1 r2 dst => "beq " ++ r1 ++ ", " ++ r2 ++ ", " ++ label_to_string dst
     | Loop r => "loop " ++ r
     | Loopi n => "loop " ++ HexString.of_nat n
-    | LoopEnd => "loopend"
+    | LoopEnd i => "loopend (" ++ sinsn_to_string i ++ ")"
     end.
 
   Definition insn_to_string (i : insn) : string :=

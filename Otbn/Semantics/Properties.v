@@ -213,10 +213,10 @@ Section __.
   Lemma loop_invariant
     {label : Type} {fetch : label * nat -> option insn} :
     forall (invariant : nat -> regfile -> wregfile -> flagfile -> mem -> Prop)
-           (end_pc : label * nat)
+           (end_pc : label * nat) (end_insn : sinsn)
            iters pc r v (regs : regfile) wregs flags dmem cstack lstack post,
       fetch pc = Some (Control (Loop r)) ->
-      fetch end_pc = Some (Control LoopEnd) ->
+      fetch end_pc = Some (Control (LoopEnd end_insn)) ->
       gpr_has_value regs r v ->
       Z.of_nat iters = word.unsigned v ->
       (length lstack < 8)%nat ->
@@ -351,25 +351,32 @@ Section __.
   Qed.
 
   Lemma eventually_loop_end {label : Type} {fetch : label * nat -> option insn}:
-    forall pc regs wregs flags dmem cstack lstack loop_start iters post,
-      fetch pc = Some (Control LoopEnd) ->
-      (match iters with
-       | O => eventually (run1 (fetch:=fetch)) post
-                (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)
-       | S iters => eventually (run1 (fetch:=fetch)) post
-                      (otbn_busy loop_start regs wregs flags dmem cstack
-                         ((loop_start, iters) :: lstack))
-       end) ->
+    forall pc regs wregs flags dmem cstack lstack loop_start iters i post,
+      fetch pc = Some (Control (LoopEnd i)) ->
+      strt1 regs wregs flags dmem i
+        (fun regs wregs flags dmem err_bits =>
+           match err_bits with
+           | Some err_code => post (otbn_error pc err_code)
+           | None =>
+               match iters with
+               | O => eventually (run1 (fetch:=fetch)) post
+                        (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)
+               | S iters =>
+                   eventually (run1 (fetch:=fetch)) post
+                     (otbn_busy loop_start regs wregs flags dmem cstack
+                        ((loop_start, iters) :: lstack))
+               end
+           end) ->
       eventually (run1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack ((loop_start, iters) :: lstack)).
   Proof.
-    intros. destruct iters.
-    { eapply eventually_step_cps.
-      cbv [run1]. eexists; ssplit; [ eassumption .. | ].
-      eassumption. }
-    { eapply eventually_step_cps.
-      cbv [run1]. eexists; ssplit; [ eassumption .. | ].
-      eassumption. }
+    intros. eapply eventually_step_cps.
+    cbn [run1]. eexists; ssplit; [ eassumption .. | ].
+    cbv iota. cbn [ctrl1]. cbv [loop_end].
+    destruct iters; (eapply strt1_weaken; [ eassumption | ]; cbv beta; intros).
+    all: cbv [update_state set_pc].
+    all: destruct_one_match; [ eapply eventually_done; eassumption | ].
+    all: eassumption.
   Qed.
 
   Lemma eventually_ret {label : Type} {fetch : label * nat -> option insn}:

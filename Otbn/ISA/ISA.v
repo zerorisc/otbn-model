@@ -1,6 +1,6 @@
 Require Import Coq.ZArith.ZArith.
 Require Import Coq.Lists.List.
-
+Require Coq.Strings.String.
 
 (* General data registers, 32 bits each. *)
 (* x0 is always wired to 0, x1 is the call stack. *)
@@ -137,9 +137,9 @@ Inductive cinsn {label : Type} : Type :=
 | Beq : gpr -> gpr -> label -> cinsn
 | Loop : gpr -> cinsn
 | Loopi : nat -> cinsn
-(* Note: loops here use an end instruction instead of an iteration
-   count to make codegen and processing easier (can be converted) *)
-| LoopEnd : cinsn
+(* Note: loops here have a marked end instruction instead of an
+   iteration count to make codegen easier (convertible to count). *)
+| LoopEnd : sinsn -> cinsn
 .
 
 Inductive insn {label : Type} : Type :=
@@ -178,137 +178,143 @@ Module Notations.
   Notation "FG0.L" := (flagL FG0 : flag) (at level 20) : otbn_scope.
   Notation "FG1.L" := (flagL FG1 : flag) (at level 20) : otbn_scope.
   
+  (* These wrapper notations let us cast everything to insn to insert coercions. *)
+  Notation "[[ x ; .. ; y ]]" := (cons (x : insn) .. (cons (y : insn) nil) .. )
+                                   (at level 40) : otbn_scope.
+  Notation "l -: i" := (l : String.string, i : insn) (at level 40) : otbn_scope.
+
+
   (* basic 32-bit straightline instructions (not load/store) *)
-  Notation "'addi' d , a , imm" := (Addi d a imm : insn) (at level 40) : otbn_scope. 
-  Notation "'lui' a , imm" := (Lui a imm : insn) (at level 40) : otbn_scope.
-  Notation "'add' d , a , b" := (Add d a b : insn) (at level 40) : otbn_scope.
-  Notation "'sub' d , a , b" := (Sub d a b : insn) (at level 40) : otbn_scope.
-  Notation "'sll' d , a , b" := (Sll d a b : insn) (at level 40) : otbn_scope.
-  Notation "'slli' d , a , b" := (Slli d a b : insn) (at level 40) : otbn_scope.
-  Notation "'srl' d , a , b" := (Srl d a b : insn) (at level 40) : otbn_scope.
-  Notation "'srli' d , a , b" := (Srli d a b : insn) (at level 40) : otbn_scope.
-  Notation "'sra' d , a , b" := (Sra d a b : insn) (at level 40) : otbn_scope.
-  Notation "'srai' d , a , b" := (Srai d a b : insn) (at level 40) : otbn_scope.
-  Notation "'and' d , a , b" := (And d a b : insn) (at level 40) : otbn_scope.
-  Notation "'andi' d , a , b" := (Andi d a b : insn) (at level 40) : otbn_scope.
-  Notation "'or' d , a , b" := (Or d a b : insn) (at level 40) : otbn_scope.
-  Notation "'ori' d , a , b" := (Ori d a b : insn) (at level 40) : otbn_scope.
-  Notation "'xor' d , a , b" := (Xor d a b : insn) (at level 40) : otbn_scope.
-  Notation "'xori' d , a , b" := (Xori d a b : insn) (at level 40) : otbn_scope.
-  Notation "'csrrs' d , a , b" := (Csrrs d a b : insn) (at level 40) : otbn_scope.
-  Notation "'csrrw' d , a , b" := (Csrrw d a b : insn) (at level 40) : otbn_scope.
+  Notation "'addi' d , a , imm" := (Addi d a imm) (at level 40) : otbn_scope.  
+  Notation "'lui' a , imm" := (Lui a imm) (at level 40) : otbn_scope.
+  Notation "'add' d , a , b" := (Add d a b) (at level 40) : otbn_scope.
+  Notation "'sub' d , a , b" := (Sub d a b) (at level 40) : otbn_scope.
+  Notation "'sll' d , a , b" := (Sll d a b) (at level 40) : otbn_scope.
+  Notation "'slli' d , a , b" := (Slli d a b) (at level 40) : otbn_scope.
+  Notation "'srl' d , a , b" := (Srl d a b) (at level 40) : otbn_scope.
+  Notation "'srli' d , a , b" := (Srli d a b) (at level 40) : otbn_scope.
+  Notation "'sra' d , a , b" := (Sra d a b) (at level 40) : otbn_scope.
+  Notation "'srai' d , a , b" := (Srai d a b) (at level 40) : otbn_scope.
+  Notation "'and' d , a , b" := (And d a b) (at level 40) : otbn_scope.
+  Notation "'andi' d , a , b" := (Andi d a b) (at level 40) : otbn_scope.
+  Notation "'or' d , a , b" := (Or d a b) (at level 40) : otbn_scope.
+  Notation "'ori' d , a , b" := (Ori d a b) (at level 40) : otbn_scope.
+  Notation "'xor' d , a , b" := (Xor d a b) (at level 40) : otbn_scope.
+  Notation "'xori' d , a , b" := (Xori d a b) (at level 40) : otbn_scope.
+  Notation "'csrrs' d , a , b" := (Csrrs d a b) (at level 40) : otbn_scope.
+  Notation "'csrrw' d , a , b" := (Csrrw d a b) (at level 40) : otbn_scope.
 
   (* wide register instructions with no special requirements *)
-  Notation "'bn.addm' d , a , b " := (Bn_addm d a b : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subm' d , a , b " := (Bn_subm d a b : insn) (at level 40) : otbn_scope.
-  Notation "'bn.movr' d , a" := (Bn_movr d a : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mov' d , a" := (Bn_mov d a : insn) (at level 40) : otbn_scope.
-  Notation "'bn.wsrr' d , a" := (Bn_wsrr d a : insn) (at level 40) : otbn_scope.
-  Notation "'bn.wsrw' d , a" := (Bn_wsrw d a : insn) (at level 40) : otbn_scope.
-  Notation "'bn.sel' d , a , b , f" := (Bn_sel d a b f : insn) (at level 40) : otbn_scope.
-  Notation "'bn.rshi' d , a , b >> s" := (Bn_rshi d a b s : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addm' d , a , b " := (Bn_addm d a b) (at level 40) : otbn_scope.
+  Notation "'bn.subm' d , a , b " := (Bn_subm d a b) (at level 40) : otbn_scope.
+  Notation "'bn.movr' d , a" := (Bn_movr d a) (at level 40) : otbn_scope.
+  Notation "'bn.mov' d , a" := (Bn_mov d a) (at level 40) : otbn_scope.
+  Notation "'bn.wsrr' d , a" := (Bn_wsrr d a) (at level 40) : otbn_scope.
+  Notation "'bn.wsrw' d , a" := (Bn_wsrw d a) (at level 40) : otbn_scope.
+  Notation "'bn.sel' d , a , b , f" := (Bn_sel d a b f) (at level 40) : otbn_scope.
+  Notation "'bn.rshi' d , a , b >> s" := (Bn_rshi d a b s) (at level 40) : otbn_scope.
 
   (* wide register arithmetic instructions with flag groups *)
-  Notation "'bn.addi' d , a , b" := (Bn_addi d a b FG0 : insn) (at level 40) : otbn_scope.
-  Notation "'bn.addi' d , a , b , fg" := (Bn_addi d a b fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subi' d , a , b" := (Bn_subi d a b FG0 : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subi' d , a , b , fg" := (Bn_subi d a b fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.addi' d , a , b" := (Bn_addi d a b FG0) (at level 40) : otbn_scope.
+  Notation "'bn.addi' d , a , b , fg" := (Bn_addi d a b fg) (at level 40) : otbn_scope.
+  Notation "'bn.subi' d , a , b" := (Bn_subi d a b FG0) (at level 40) : otbn_scope.
+  Notation "'bn.subi' d , a , b , fg" := (Bn_subi d a b fg) (at level 40) : otbn_scope.
 
   (* wide register arithmetic instructions with shifts (and flag groups) *)
-  Notation "'bn.and' d , a , b , fg" := (Bn_and d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.and' d , a , b '<<' s , fg" := (Bn_and d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.and' d , a , b '>>' s , fg" := (Bn_and d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.xor' d , a , b , fg" := (Bn_xor d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.xor' d , a , b '<<' s , fg" := (Bn_xor d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.xor' d , a , b '>>' s , fg" := (Bn_xor d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.or' d , a , b , fg" := (Bn_or d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.or' d , a , b '<<' s , fg" := (Bn_or d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.or' d , a , b '>>' s , fg" := (Bn_or d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.not' d , a , fg" := (Bn_not d a 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.not' d , a '<<' s , fg" := (Bn_not d a s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.not' d , a '>>' s , fg" := (Bn_not d a (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b , fg" := (Bn_add d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b '<<' s , fg" := (Bn_add d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.add' d , a , b '>>' s , fg" := (Bn_add d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b , fg" := (Bn_addc d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b '<<' s , fg" := (Bn_addc d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.addc' d , a , b '>>' s , fg" := (Bn_addc d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b , fg" := (Bn_sub d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b '<<' s , fg" := (Bn_sub d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.sub' d , a , b '>>' s , fg" := (Bn_sub d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b , fg" := (Bn_subb d a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b '<<' s , fg" := (Bn_subb d a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.subb' d , a , b '>>' s , fg" := (Bn_subb d a b (-s) fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmp' a , b , fg" := (Bn_cmp a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmp' a , b '<<' s , fg" := (Bn_cmp a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmp' a , b '>>' s , fg" := (Bn_cmp a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmpb' a , b , fg" := (Bn_cmpb a b 0 fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmpb' a , b '<<' s , fg" := (Bn_cmpb a b s fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.cmpb' a , b '>>' s , fg" := (Bn_cmpb a b (-s) fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.and' d , a , b , fg" := (Bn_and d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.and' d , a , b '<<' s , fg" := (Bn_and d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.and' d , a , b '>>' s , fg" := (Bn_and d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.xor' d , a , b , fg" := (Bn_xor d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.xor' d , a , b '<<' s , fg" := (Bn_xor d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.xor' d , a , b '>>' s , fg" := (Bn_xor d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.or' d , a , b , fg" := (Bn_or d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.or' d , a , b '<<' s , fg" := (Bn_or d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.or' d , a , b '>>' s , fg" := (Bn_or d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.not' d , a , fg" := (Bn_not d a 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.not' d , a '<<' s , fg" := (Bn_not d a s fg) (at level 40) : otbn_scope.
+  Notation "'bn.not' d , a '>>' s , fg" := (Bn_not d a (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b , fg" := (Bn_add d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b '<<' s , fg" := (Bn_add d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.add' d , a , b '>>' s , fg" := (Bn_add d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b , fg" := (Bn_addc d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b '<<' s , fg" := (Bn_addc d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.addc' d , a , b '>>' s , fg" := (Bn_addc d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b , fg" := (Bn_sub d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b '<<' s , fg" := (Bn_sub d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.sub' d , a , b '>>' s , fg" := (Bn_sub d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b , fg" := (Bn_subb d a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b '<<' s , fg" := (Bn_subb d a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.subb' d , a , b '>>' s , fg" := (Bn_subb d a b (-s) fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmp' a , b , fg" := (Bn_cmp a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmp' a , b '<<' s , fg" := (Bn_cmp a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmp' a , b '>>' s , fg" := (Bn_cmp a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmpb' a , b , fg" := (Bn_cmpb a b 0 fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmpb' a , b '<<' s , fg" := (Bn_cmpb a b s fg) (at level 40) : otbn_scope.
+  Notation "'bn.cmpb' a , b '>>' s , fg" := (Bn_cmpb a b (-s) fg) (at level 40) : otbn_scope.
 
   (* bn.mulqacc needs multiple declarations. *)
-  Notation "'bn.mulqacc' a , b , imm" := (Bn_mulqacc false a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo' d , a , b , imm , fg" := (Bn_mulqacc_wo false d a b imm fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo.z' d , a , b , imm , fg" := (Bn_mulqacc_wo true d a b imm fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so false d false a b imm fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so false d true a b imm fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so true d false a b imm fg : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so true d true a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc' a , b , imm" := (Bn_mulqacc false a b imm) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo' d , a , b , imm , fg" := (Bn_mulqacc_wo false d a b imm fg) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo.z' d , a , b , imm , fg" := (Bn_mulqacc_wo true d a b imm fg) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so false d false a b imm fg) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so false d true a b imm fg) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so true d false a b imm fg) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so true d true a b imm fg) (at level 40) : otbn_scope.
 
   (* Load-store offset notations require special handling to parse the
      parentheses as actual symbols. Only the most common offsets get
      notations here, unfortunately; others may need to be written
      without notation. *)
-  Notation "'lw' a , 0( b )" := (Lw a b 0 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 4( b )" := (Lw a b 4 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 8( b )" := (Lw a b 8 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 12( b )" := (Lw a b 12 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 16( b )" := (Lw a b 16 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 20( b )" := (Lw a b 20 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 24( b )" := (Lw a b 24 : insn) (at level 10) : otbn_scope.
-  Notation "'lw' a , 28( b )" := (Lw a b 28 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 0( b )" := (Sw a b 0 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 4( b )" := (Sw a b 4 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 8( b )" := (Sw a b 8 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 12( b )" := (Sw a b 12 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 16( b )" := (Sw a b 16 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 20( b )" := (Sw a b 20 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 24( b )" := (Sw a b 24 : insn) (at level 10) : otbn_scope.
-  Notation "'sw' a , 28( b )" := (Sw a b 28 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 0( b )" := (Bn_lid a b 0 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 32( b )" := (Bn_lid a b 32 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 64( b )" := (Bn_lid a b 64 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 96( b )" := (Bn_lid a b 96 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 128( b )" := (Bn_lid a b 128 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 160( b )" := (Bn_lid a b 160 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 192( b )" := (Bn_lid a b 192 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.lid' a , 224( b )" := (Bn_lid a b 224 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 0( b )" := (Bn_sid a b 0 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 32( b )" := (Bn_sid a b 32 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 64( b )" := (Bn_sid a b 64 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 96( b )" := (Bn_sid a b 96 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 128( b )" := (Bn_sid a b 128 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 160( b )" := (Bn_sid a b 160 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 192( b )" := (Bn_sid a b 192 : insn) (at level 10) : otbn_scope.
-  Notation "'bn.sid' a , 224( b )" := (Bn_sid a b 224 : insn) (at level 10) : otbn_scope.
+  Notation "'lw' a , 0( b )" := (Lw a b 0) (at level 10) : otbn_scope.
+  Notation "'lw' a , 4( b )" := (Lw a b 4) (at level 10) : otbn_scope.
+  Notation "'lw' a , 8( b )" := (Lw a b 8) (at level 10) : otbn_scope.
+  Notation "'lw' a , 12( b )" := (Lw a b 12) (at level 10) : otbn_scope.
+  Notation "'lw' a , 16( b )" := (Lw a b 16) (at level 10) : otbn_scope.
+  Notation "'lw' a , 20( b )" := (Lw a b 20) (at level 10) : otbn_scope.
+  Notation "'lw' a , 24( b )" := (Lw a b 24) (at level 10) : otbn_scope.
+  Notation "'lw' a , 28( b )" := (Lw a b 28) (at level 10) : otbn_scope.
+  Notation "'sw' a , 0( b )" := (Sw a b 0) (at level 10) : otbn_scope.
+  Notation "'sw' a , 4( b )" := (Sw a b 4) (at level 10) : otbn_scope.
+  Notation "'sw' a , 8( b )" := (Sw a b 8) (at level 10) : otbn_scope.
+  Notation "'sw' a , 12( b )" := (Sw a b 12) (at level 10) : otbn_scope.
+  Notation "'sw' a , 16( b )" := (Sw a b 16) (at level 10) : otbn_scope.
+  Notation "'sw' a , 20( b )" := (Sw a b 20) (at level 10) : otbn_scope.
+  Notation "'sw' a , 24( b )" := (Sw a b 24) (at level 10) : otbn_scope.
+  Notation "'sw' a , 28( b )" := (Sw a b 28) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 0( b )" := (Bn_lid a b 0) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 32( b )" := (Bn_lid a b 32) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 64( b )" := (Bn_lid a b 64) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 96( b )" := (Bn_lid a b 96) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 128( b )" := (Bn_lid a b 128) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 160( b )" := (Bn_lid a b 160) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 192( b )" := (Bn_lid a b 192) (at level 10) : otbn_scope.
+  Notation "'bn.lid' a , 224( b )" := (Bn_lid a b 224) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 0( b )" := (Bn_sid a b 0) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 32( b )" := (Bn_sid a b 32) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 64( b )" := (Bn_sid a b 64) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 96( b )" := (Bn_sid a b 96) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 128( b )" := (Bn_sid a b 128) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 160( b )" := (Bn_sid a b 160) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 192( b )" := (Bn_sid a b 192) (at level 10) : otbn_scope.
+  Notation "'bn.sid' a , 224( b )" := (Bn_sid a b 224) (at level 10) : otbn_scope.
 
   (* pseudo-instructions *)
-  Notation "'nop'" := (Addi x0 x0 0 : insn) (at level 40) : otbn_scope.
+  Notation "'nop'" := (Addi x0 x0 0) (at level 40) : otbn_scope.
 
   (* Control instructions. *)
-  Notation "'ret'" := (Ret : insn) (at level 40) : otbn_scope.
-  Notation "'ecall'" := (Ecall : insn) (at level 40) : otbn_scope.
-  Notation "'unimp'" := (Unimp : insn) (at level 40) : otbn_scope.
-  Notation "'jal' a , addr" := (Jal a addr : insn) (at level 40) : otbn_scope.
-  Notation "'bne' a , b , addr" := (Bne a b addr : insn) (at level 40) : otbn_scope.
-  Notation "'beq' a , b , addr" := (Beq a b addr : insn) (at level 40) : otbn_scope.
-  Notation "'loop' a" := (Loop a : insn) (at level 40) : otbn_scope.
-  Notation "'loopi' a" := (Loopi a : insn) (at level 40) : otbn_scope.
-  Notation "'loopend'" := (LoopEnd : insn) (at level 40) : otbn_scope.
+  Notation "'ret'" := (Ret) (at level 40) : otbn_scope.
+  Notation "'ecall'" := (Ecall) (at level 40) : otbn_scope.
+  Notation "'unimp'" := (Unimp) (at level 40) : otbn_scope.
+  Notation "'jal' a , addr" := (Jal a addr) (at level 40) : otbn_scope.
+  Notation "'bne' a , b , addr" := (Bne a b addr) (at level 40) : otbn_scope.
+  Notation "'beq' a , b , addr" := (Beq a b addr) (at level 40) : otbn_scope.
+  Notation "'loop' a" := (Loop a) (at level 40) : otbn_scope.
+  Notation "'loopi' a" := (Loopi a) (at level 40) : otbn_scope.
+  Notation "'loopend' i " := (LoopEnd i) (at level 40) : otbn_scope.
 
   (* Tests for instruction notations. *)
-  Local Definition tests : list (insn (label:=nat)) := [
+  Local Definition tests : list (insn (label:=nat)) := [[
       addi x3, x0, 5
       ; addi x3, x0, 0
       ; addi x3, x0, -5
@@ -400,11 +406,12 @@ Module Notations.
       ; beq x3, x4, 0x400
       ; loop x2
       ; loopi 2
-      ; loopend
+      ; loopend (addi x2, x3, 0)
+      ; loopend (nop)
       ; ret
       ; ecall
       ; nop
       ; unimp
-    ]%otbn.
+    ]]%otbn.
 End Notations.
 

@@ -800,10 +800,11 @@ Section Semantics.
       (wregs : wregfile)
       (flags : flagfile)
       (dmem : mem)
+      (lstack : loop_stack)
       (err_bits : option otbn_software_error)
       (post : otbn_state -> T) : T :=
       match st with
-      | otbn_busy pc _ _ _ _ cstack lstack =>
+      | otbn_busy pc _ _ _ _ cstack _ =>
           match err_bits with
           | Some err_bits => post (otbn_error pc err_bits)
           | None => post (otbn_busy pc regs wregs flags dmem cstack lstack)
@@ -843,26 +844,29 @@ Section Semantics.
     (* Finish a loop iteration (and potentially the entire loop).
        Expects that the current PC matches the loop-body end PC of the
        first loop stack entry. *)
-    Definition loop_end (st : otbn_state) (post : otbn_state -> T) : T :=
+    Definition loop_end (st : otbn_state) (i : sinsn) (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
           match lstack with
           | (start, iters) :: lstack =>
               match iters with
-              | O => post (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)
+              | O =>
+                  strt1 regs wregs flags dmem i
+                    (fun regs wregs flags dmem err_bits =>
+                       update_state st regs wregs flags dmem lstack err_bits
+                         (fun st => set_pc st (advance_pc pc) post))
               | S iters =>
-                  post (otbn_busy start regs wregs flags dmem cstack ((start, iters) :: lstack))
+                  strt1 regs wregs flags dmem i
+                    (fun regs wregs flags dmem err_bits =>
+                       update_state st regs wregs flags dmem
+                         ((start, iters) :: lstack) err_bits
+                         (fun st => set_pc st start post))
               end
           | [] => post (otbn_error pc LOOP)
           end
       | _ => err "Cannot end a loop in a non-busy OTBN state."
       end.
 
-  (* TODO: is it necessary to simulate some error conditions? There
-     should be a difference between "OTBN had an error", which
-     sometimes should in fact happen on some inputs, and "this program
-     is not valid" (e.g. out-of-bounds immediate value that cannot be
-     encoded). *)
   Definition ctrl1
     (st : otbn_state) (i : cinsn (label:=label))
     (post : otbn_state -> T) : T :=
@@ -895,7 +899,7 @@ Section Semantics.
     | Loopi v => loop_start st v post
     | Loop r => read_gpr_from_state st r
                   (fun v => loop_start st (Z.to_nat (word.unsigned v)) post)
-    | LoopEnd => loop_end st post
+    | LoopEnd i => loop_end st i post
     end.
   End WithSemanticsParams.
 
@@ -930,7 +934,7 @@ Section Semantics.
            | Straightline i =>
                strt1 regs wregs flags dmem i
                  (fun regs wregs flags dmem err_bits =>
-                    update_state st regs wregs flags dmem err_bits
+                    update_state st regs wregs flags dmem lstack err_bits
                       (fun st => set_pc st (advance_pc pc) post))
            | Control i => ctrl1 st i post
            end
@@ -951,7 +955,7 @@ Section Semantics.
                 | Straightline i =>
                     (strt1 regs wregs flags dmem i
                        (fun regs wregs flags dmem err_bits =>
-                          update_state st regs wregs flags dmem err_bits
+                          update_state st regs wregs flags dmem lstack err_bits
                             (fun st => set_pc st (advance_pc pc) Ok)))
                 | Control i => ctrl1 st i Ok
                 end)
