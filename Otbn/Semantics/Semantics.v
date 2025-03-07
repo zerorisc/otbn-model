@@ -33,6 +33,16 @@ Class semantics_parameters (T : Type) :=
     option_bind : forall A, option A -> string -> (A -> T) -> T;
   }.
 
+(* Types of OTBN software errors. *)
+Inductive otbn_software_error :=
+| BAD_DATA_ADDR
+| BAD_INSN_ADDR
+| CALL_STACK
+| ILLEGAL_INSN
+| KEY_INVALID
+| LOOP
+.
+
 Section Semantics.
   Context {word32 : word.word 32} {word256 : word.word 256}.
   (* Parameterize over the representation of jump locations. *)
@@ -56,7 +66,7 @@ Section Semantics.
       (dmem : mem)
       (cstack : call_stack)
       (lstack : loop_stack)
-  | otbn_error (pc : label * nat) (errs : list string)
+  | otbn_error (pc : label * nat) (err : otbn_software_error)
   | otbn_done (pc : label * nat) (dmem : mem)
   .
   
@@ -89,6 +99,8 @@ Section Semantics.
     (-2048 <=? imm) && (imm <=? 2047).
   Definition is_valid_wide_mem_offset (imm : Z) : bool :=
     (-16384 <=? imm) && (imm <=? 16352) && (imm mod 32 =? 0).
+  Definition is_valid_wdr_index (i : Z) : bool :=
+    (0 <=? i) && (i <=? 31).
   Definition is_word_aligned width (addr : word32) : bool :=
     word.eqb (word.of_Z 0) (word.and addr (word.of_Z (width - 1))).
   Definition is_valid_arith256_shift_imm (imm : Z) : bool :=
@@ -100,7 +112,7 @@ Section Semantics.
      omnisemantics-style proofs depending on the parameters. *) 
   Section WithSemanticsParams.
     Context {T} {semantics_params : semantics_parameters T}.
-    Local Arguments option_bind {_ _ _}. 
+    Local Arguments option_bind {_ _ _}.
 
     Definition read_gpr (regs : regfile) (r : gpr) (P : word32 -> T) : T :=
       match r with
@@ -149,7 +161,7 @@ Section Semantics.
                          ++ (if (n <? 0) then "-" else "") ++ String.of_nat (Z.to_nat (Z.abs n)))
       end.
  
-    Definition lookup_wdr' (i : nat) : wdr :=
+    Definition lookup_wdr (i : Z) : wdr :=
       (match i with
        | 0 => w0
        | 1 => w1
@@ -184,14 +196,11 @@ Section Semantics.
        | 30 => w30
        | 31 => w31
        | _ => w0 (* unreachable *)
-       end)%nat.
-    Definition lookup_wdr (i : word32) : wdr :=
-      let i := Z.to_nat (word.unsigned (word.and i (word.of_Z 31))) in
-      lookup_wdr' i.
+       end).
 
     Definition read_wdr_indirect
       (i : word32) (wregs : wregfile) (P : word256 -> T) : T :=
-      read_wdr wregs (lookup_wdr i) P.                     
+      read_wdr wregs (lookup_wdr (word.unsigned i)) P.                     
 
     Definition read_flag_group (group : flag_group) (flags : flagfile) (P : word32 -> T) : T :=
       read_flag flags (flagM group)
@@ -227,28 +236,34 @@ Section Semantics.
       | CSR_URND => urandom P
       end.
 
-    Definition load_byte (dmem : mem) (addr : word32) (P : byte -> T) : T :=
-      if word.unsigned addr <? DMEM_BYTES
-      then 
-        option_bind (map.get dmem addr)
-          ("Memory address " ++ HexString.of_Z (word.unsigned addr) ++ " read but not set.")
-          P
-      else err ("Load from out-of-bounds address: " ++ HexString.of_Z (word.unsigned addr)).
-
-    Fixpoint load_bytes (dmem : mem) (addr : word32) (len : nat) (P : list byte -> T) : T :=
+    (* Completely errors out if the read data was not initialized. In
+       reality, this would *probably* return a DMEM_INTG_ERROR
+       (because memory is randomized along with its integrity bits)
+       but because it's not certain it should never be used as a
+       program's expected behavior, even on invalid inputs. *)
+    Fixpoint load_bytes (dmem : mem) (addr : word32) (len : nat) (P : list byte -> T) : T :=      
       match len with
       | 0%nat => P []
-      | S len =>
-          load_byte dmem addr
-            (fun b =>
-               load_bytes dmem (word.add addr (word.of_Z 1)) len (fun bs => P (b :: bs)))
-      end.      
+      | S len => option_bind
+                   (map.get dmem addr)
+                   ("Attempt to read from uninitialized DMEM at address: "
+                      ++ HexString.of_Z (word.unsigned addr))
+                   (fun b => load_bytes dmem (word.add addr (word.of_Z 1)) len
+                               (fun bs => P (b :: bs)))
+      end.
+
+    (* Use this to trigger *OTBN* error conditions. This is subtly
+       distinct from the `err` with a debug message in Semantics, because
+       it can be used for errors that are expected under certain
+       conditions and part of a program's spec. *)
+    Definition assert_or_error
+      (err_bits : option otbn_software_error) (cond : bool) (err_code : otbn_software_error)
+      (P : option otbn_software_error -> T) : T :=
+      if cond then P err_bits else P (Some err_code).
 
     Definition load_word {width} {word : word.word width}
       (dmem : mem) (addr : word32) (P : word -> T) : T :=
-      if is_word_aligned (width / 8) addr
-      then load_bytes dmem addr (Z.to_nat (width / 8)) (fun bs => P (word.of_Z (le_combine bs)))
-      else err ("Attempt to load word from unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
+      load_bytes dmem addr (Z.to_nat (width / 8)) (fun bs => P (word.of_Z (le_combine bs))).
 
     Definition write_gpr (regs : regfile) (r : gpr) (v : word32) (P : regfile -> T) : T :=
       match r with
@@ -278,7 +293,7 @@ Section Semantics.
   
     Definition write_wdr_indirect
       (i : word32) (wregs : wregfile) (v : word256) (P : wregfile -> T) : T :=
-      write_wdr wregs (lookup_wdr i) v P.
+      write_wdr wregs (lookup_wdr (word.unsigned i)) v P.
 
     Definition extract_flag (v : word32) (f : flag) (P : bool -> T) : T :=
       match f with
@@ -326,30 +341,20 @@ Section Semantics.
       | CSR_URND => P flags (* writes ignored *)
       end.
 
-    Definition store_byte (dmem : mem) (addr : word32) (v : byte) (P : mem -> T) : T :=
-      if word.unsigned addr <? DMEM_BYTES
-      then P (map.put dmem addr v)
-      else err ("Store to out-of-bounds address: " ++ HexString.of_Z (word.unsigned addr)).
-
     Fixpoint store_bytes (dmem : mem) (addr : word32) (bs : list byte) (P : mem -> T) : T :=
       match bs with
       | [] => P dmem
-      | b :: bs =>
-          store_byte dmem addr b
-            (fun dmem =>
-               store_bytes dmem (word.add addr (word.of_Z 1)) bs P)
+      | b :: bs => store_bytes (map.put dmem addr b) (word.add addr (word.of_Z 1)) bs P
       end.
 
     Definition store_word {width} {word : word.word width}
       (dmem : mem) (addr : word32) (v : word) (P : mem -> T) : T :=
-      if is_word_aligned (width / 8) addr
-      then store_bytes dmem addr (le_split (Z.to_nat (width / 8)) (word.unsigned v)) P
-      else err ("Attempt to store word at unaligned address: " ++ HexString.of_Z (word.unsigned addr)).
+      store_bytes dmem addr (le_split (Z.to_nat (width / 8)) (word.unsigned v)) P.
  
     Definition addi_spec (v : word32) (imm : Z) : word32 :=
       if (0 <=? imm)
       then word.add v (word.of_Z imm)
-      else word.sub v (word.of_Z imm).
+      else word.sub v (word.of_Z (Z.abs imm)).
 
     Definition apply_shift (v : word256) (shift : Z) (P : word256 -> T) :=
       if is_valid_arith256_shift_imm (Z.abs shift)
@@ -376,21 +381,21 @@ Section Semantics.
       end.
 
     Definition increment_gprs
-      (regs : regfile) (x y : gpr_inc) (xinc : Z) (yinc : Z) (P : regfile -> T) : T :=
+      (regs : regfile) (x y : gpr_inc) (xinc : Z) (yinc : Z)
+      (P : regfile -> option otbn_software_error -> T) : T :=
       match x, y with
-      | gpr_inc_true rx, gpr_inc_true ry =>
-          err ("Multiple increment bits set in the instruction: "
-                 ++ gpr_to_string rx ++ "++ and " ++ gpr_to_string ry ++ "++")
-              
+      | gpr_inc_true rx, gpr_inc_true ry => P regs (Some ILLEGAL_INSN)              
       | gpr_inc_true rx, gpr_inc_false ry =>
           read_gpr regs rx
             (fun vx =>
-               write_gpr regs rx (word.add vx (word.of_Z xinc)) P)
+               write_gpr regs rx (word.add vx (word.of_Z xinc))
+                 (fun regs => P regs None))
       | gpr_inc_false rx, gpr_inc_true ry =>
           read_gpr regs ry
             (fun vy =>
-               write_gpr regs ry (word.add vy (word.of_Z yinc)) P)
-      | gpr_inc_false rx, gpr_inc_false ry => P regs
+               write_gpr regs ry (word.add vy (word.of_Z yinc))
+                 (fun regs => P regs None))
+      | gpr_inc_false rx, gpr_inc_false ry => P regs None
       end.
  
     Definition carry_bit (x : Z) := 2^256 <=? x.
@@ -442,114 +447,132 @@ Section Semantics.
 
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
-      (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
+      (i : sinsn)
+      (post : regfile -> wregfile -> flagfile -> mem -> option otbn_software_error -> T) : T :=
+      let err_bits : option otbn_software_error := None in
       match i with
       | Addi d x imm =>
           if is_valid_arith32_imm imm
           then
             (vx <- read_gpr regs x ;
              regs <- write_gpr regs d (addi_spec vx imm) ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for ADDI: " ++ HexString.of_Z imm)
       | Lui d imm =>
           if is_valid_lui_imm imm
           then
             (regs <- write_gpr regs d (word.of_Z (Z.shiftl imm 12)) ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for LUI: " ++ HexString.of_Z imm)
-      | Add d x y => word32_binop word.add regs d x y (fun regs => post regs wregs flags dmem)
-      | Sub d x y => word32_binop word.sub regs d x y (fun regs => post regs wregs flags dmem)
-      | Sll d x y => word32_binop word.slu regs d x y (fun regs => post regs wregs flags dmem)
+      | Add d x y => word32_binop word.add regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
+      | Sub d x y => word32_binop word.sub regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
+      | Sll d x y => word32_binop word.slu regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
       | Slli d x imm =>
           if is_valid_shamt imm
           then word32_unop (fun x => word.slu x (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for SLLI: " ++ HexString.of_Z imm)
-      | Srl d x y => word32_binop word.sru regs d x y (fun regs => post regs wregs flags dmem)
+      | Srl d x y => word32_binop word.sru regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
       | Srli d x imm =>
           if is_valid_shamt imm
           then word32_unop (fun x => word.sru x (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for SRLI: " ++ HexString.of_Z imm)
-      | Sra d x y => word32_binop word.srs regs d x y (fun regs => post regs wregs flags dmem)
+      | Sra d x y => word32_binop word.srs regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
       | Srai d x imm =>
           if is_valid_shamt imm
           then word32_unop (fun x => word.slu x (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for SRAI: " ++ HexString.of_Z imm)
-      | And d x y => word32_binop word.and regs d x y (fun regs => post regs wregs flags dmem)
+      | And d x y => word32_binop word.and regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
       | Andi d x imm =>
           if is_valid_arith32_imm imm
           then word32_unop (word.and (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for ANDI: " ++ HexString.of_Z imm)
-      | Xor d x y => word32_binop word.xor regs d x y (fun regs => post regs wregs flags dmem)
+      | Xor d x y => word32_binop word.xor regs d x y
+                       (fun regs => post regs wregs flags dmem err_bits)
       | Xori d x imm =>
           if is_valid_arith32_imm imm
           then word32_unop (word.xor (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for XORI: " ++ HexString.of_Z imm)
-      | Or d x y => word32_binop word.or regs d x y (fun regs => post regs wregs flags dmem)
+      | Or d x y => word32_binop word.or regs d x y
+                      (fun regs => post regs wregs flags dmem err_bits)
       | Ori d x imm =>
           if is_valid_arith32_imm imm
           then word32_unop (word.or (word.of_Z imm))
-                 regs d x (fun regs => post regs wregs flags dmem)
+                 regs d x (fun regs => post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for ORI: " ++ HexString.of_Z imm)
       | Lw d x imm =>
           if is_valid_mem_offset imm
           then
             (vx <- read_gpr regs x ;
-             vm <- load_word dmem (word.add vx (word.of_Z imm)) ;
+             let addr := word.add vx (word.of_Z imm) in
+             err_bits <- assert_or_error err_bits (is_word_aligned 4 addr) BAD_DATA_ADDR ;
+             err_bits <- assert_or_error
+                           err_bits (word.unsigned addr + 4 <? DMEM_BYTES) BAD_DATA_ADDR ;
+             vm <- load_word dmem addr ;
              regs <- write_gpr regs d vm ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid memory offset for LW: " ++ HexString.of_Z imm) 
       | Sw x y imm =>
           if is_valid_mem_offset imm
           then
             (vx <- read_gpr regs x ;
              vy <- read_gpr regs y ;
-             dmem <- store_word dmem (word.add vy (word.of_Z imm)) vx ;
-             post regs wregs flags dmem)
+             let addr := word.add vy (word.of_Z imm) in
+             err_bits <- assert_or_error err_bits (is_word_aligned 4 addr) BAD_DATA_ADDR ;
+             err_bits <- assert_or_error
+                           err_bits (word.unsigned addr + 4 <? DMEM_BYTES) BAD_DATA_ADDR ;
+             dmem <- store_word dmem addr vx ;
+             post regs wregs flags dmem err_bits)
           else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
       | Csrrs d x y =>
           (vx <- read_csr regs flags x ;
            vy <- read_gpr regs y ;
            flags <- write_csr regs flags x (word.or vx vy) ;
            regs <- write_gpr regs d vx ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Csrrw d x y =>
           (vx <- read_csr regs flags x ;
            vy <- read_gpr regs y ;
            flags <- write_csr regs flags x vy ;
            regs <- write_gpr regs d vx ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_and d x y s fg => word256_binop word.and wregs flags d x y s fg
-                               (fun wregs flags => post regs wregs flags dmem)
+                               (fun wregs flags => post regs wregs flags dmem err_bits)
       | Bn_xor d x y s fg => word256_binop word.xor wregs flags d x y s fg
-                               (fun wregs flags => post regs wregs flags dmem)
+                               (fun wregs flags => post regs wregs flags dmem err_bits)
       | Bn_or d x y s fg => word256_binop word.or wregs flags d x y s fg
-                              (fun wregs flags => post regs wregs flags dmem)
+                              (fun wregs flags => post regs wregs flags dmem err_bits)
       | Bn_not d x s fg =>
           (vx <- read_wdr wregs x ;
            vx <- apply_shift vx s ;
            let result := word.not vx in
            wregs <- write_wdr wregs d result ;
            flags <- update_mlz flags fg result ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_rshi d x y s =>
           if is_valid_rshi_imm s
           then
             (vx <- read_wdr wregs x ;
              vy <- read_wdr wregs y ;
              wregs <- write_wdr wregs d (rshi_spec vx vy s) ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for BN.RSHI: " ++ HexString.of_Z s)  
       | Bn_sel d x y f =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vf <- read_flag flags f ;
            wregs <- write_wdr wregs d (if vf then vx else vy) ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_cmp x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
@@ -557,7 +580,7 @@ Section Semantics.
            flags <- write_flag flags (flagC fg)
                       (borrow_bit (word.unsigned vx - word.unsigned vy)) ;
            flags <- update_mlz flags fg (word.sub vx vy) ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_cmpb x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
@@ -566,7 +589,7 @@ Section Semantics.
            flags <- write_flag flags (flagC fg)
                       (borrow_bit (word.unsigned vx - word.unsigned vy - Z.b2z c)) ;
            flags <- update_mlz flags fg (word.sub (word.sub vx vy) (word.of_Z (Z.b2z c))) ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_add d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
@@ -575,7 +598,7 @@ Section Semantics.
            wregs <- write_wdr wregs d result ;
            flags <- write_flag flags (flagC fg) (carry_bit (word.unsigned vx + word.unsigned vy)) ;
            flags <- update_mlz flags fg result ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_addc d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
@@ -586,7 +609,7 @@ Section Semantics.
            flags <- write_flag flags (flagC fg)
                       (carry_bit (word.unsigned vx + word.unsigned vy + Z.b2z c)) ;
            flags <- update_mlz flags fg result ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_addi d x imm fg =>
           if is_valid_arith256_imm imm
           then
@@ -595,7 +618,7 @@ Section Semantics.
              wregs <- write_wdr wregs d result ;
              flags <- write_flag flags (flagC fg) (carry_bit (word.unsigned vx + imm)) ;
              flags <- update_mlz flags fg result ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for BN.ADDI: " ++ HexString.of_Z imm)
       | Bn_sub d x y s fg =>
           (vx <- read_wdr wregs x ;
@@ -606,7 +629,7 @@ Section Semantics.
            flags <- write_flag flags (flagC fg)
                       (borrow_bit (word.unsigned vx - word.unsigned vy)) ;
            flags <- update_mlz flags fg result ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_subb d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
@@ -617,7 +640,7 @@ Section Semantics.
            flags <- write_flag flags (flagC fg)
                       (borrow_bit (word.unsigned vx - word.unsigned vy - Z.b2z c)) ;
            flags <- update_mlz flags fg result ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_subi d x imm fg =>
           if is_valid_arith256_imm imm
           then
@@ -626,20 +649,20 @@ Section Semantics.
              wregs <- write_wdr wregs d result ;
              flags <- write_flag flags (flagC fg) (borrow_bit (word.unsigned vx - imm)) ;
              flags <- update_mlz flags fg result ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for BN.SUBI: " ++ HexString.of_Z imm)
       | Bn_addm d x y =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vm <- read_wsr wregs WSR_MOD;           
            wregs <- write_wdr wregs d (addm_spec vx vy vm) ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_subm d x y =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vm <- read_wsr wregs WSR_MOD;           
            wregs <- write_wdr wregs d (subm_spec vx vy vm) ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_mulqacc z x y s =>
           if is_valid_mulqacc_shift s
           then
@@ -647,7 +670,7 @@ Section Semantics.
              vy <- read_limb wregs y ;
              acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
              wregs <- write_wsr wregs WSR_ACC (mulqacc_spec acc vx vy s) ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid shift for BN.MULQACC: " ++ HexString.of_Z s)
       | Bn_mulqacc_wo z d x y s fg =>
           if is_valid_mulqacc_shift s
@@ -659,7 +682,7 @@ Section Semantics.
              wregs <- write_wsr wregs WSR_ACC result ;
              wregs <- write_wdr wregs d result ;
              flags <- update_mlz flags fg result ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid shift for BN.MULQACC.WO: " ++ HexString.of_Z s)
       | Bn_mulqacc_so z d u x y s fg =>
           if is_valid_mulqacc_shift s
@@ -676,57 +699,77 @@ Section Semantics.
              flags <- if u
                       then write_flag flags (flagM fg) (Z.testbit (word.unsigned wb) 255)
                       else write_flag flags (flagL fg) (Z.testbit (word.unsigned wb) 0) ;
-             post regs wregs flags dmem)
+             post regs wregs flags dmem err_bits)
           else err ("Invalid shift for BN.MULQACC.SO: " ++ HexString.of_Z s)
       | Bn_lid dinc xinc imm =>
           if is_valid_wide_mem_offset imm
           then
             (vx <- read_gpr_inc regs xinc ;
-             vm <- load_word dmem (word.add vx (word.of_Z imm)) ;
+             let addr := word.add vx (word.of_Z imm) in
+             err_bits <- assert_or_error err_bits (is_word_aligned 32 addr) BAD_DATA_ADDR ;
+             err_bits <- assert_or_error
+                           err_bits (word.unsigned addr + 32 <? DMEM_BYTES) BAD_DATA_ADDR ;
+             vm <- load_word dmem addr ;
              id <- read_gpr_inc regs dinc ;
+             err_bits <- assert_or_error
+                           err_bits (is_valid_wdr_index (word.unsigned id)) ILLEGAL_INSN ;
              wregs <- write_wdr_indirect id wregs vm ;
-             regs <- increment_gprs regs dinc xinc 1 32 ;
-             post regs wregs flags dmem)
+             increment_gprs regs dinc xinc 1 32
+               (fun regs err_bits =>
+                  post regs wregs flags dmem err_bits))
           else err ("Invalid memory offset for BN.LID: " ++ HexString.of_Z imm)
       | Bn_sid xinc yinc imm =>
           if is_valid_wide_mem_offset imm
           then
             (ix <- read_gpr_inc regs xinc ;
+             err_bits <- assert_or_error
+                           err_bits (is_valid_wdr_index (word.unsigned ix)) ILLEGAL_INSN ;
              vx <- read_wdr_indirect ix wregs ;
              vy <- read_gpr_inc regs yinc ;
-             dmem <- store_word dmem (word.add vy (word.of_Z imm)) vx ;
-             regs <- increment_gprs regs xinc yinc 1 32 ;
-             post regs wregs flags dmem)
+             let addr := word.add vy (word.of_Z imm) in
+             err_bits <- assert_or_error err_bits (is_word_aligned 32 addr) BAD_DATA_ADDR ;
+             err_bits <- assert_or_error
+                           err_bits (word.unsigned addr + 32 <? DMEM_BYTES) BAD_DATA_ADDR ;
+             dmem <- store_word dmem addr vx ;
+             increment_gprs regs xinc yinc 1 32
+               (fun regs err_bits =>
+                  post regs wregs flags dmem err_bits))
           else err ("Invalid memory offset for BN.SID: " ++ HexString.of_Z imm)
       | Bn_mov d x =>
           (vx <- read_wdr wregs x ;
            wregs <- write_wdr wregs d vx ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_movr dinc xinc =>
           (ix <- read_gpr_inc regs xinc ;
+           err_bits <- assert_or_error
+                         err_bits (is_valid_wdr_index (word.unsigned ix)) ILLEGAL_INSN ;
            vx <- read_wdr_indirect ix wregs ;
            id <- read_gpr_inc regs dinc ;
+           err_bits <- assert_or_error
+                         err_bits (is_valid_wdr_index (word.unsigned id)) ILLEGAL_INSN ;
            wregs <- write_wdr_indirect id wregs vx ;
-           regs <- increment_gprs regs dinc xinc 1 1 ;
-           post regs wregs flags dmem)
+           increment_gprs regs dinc xinc 1 1
+             (fun regs err_bits =>
+                post regs wregs flags dmem err_bits))
       | Bn_wsrr d x =>
           (vx <- read_wsr wregs x ;
            wregs <- write_wdr wregs d vx ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       | Bn_wsrw d x =>
           (vx <- read_wdr wregs x ;
            wregs <- write_wsr wregs d vx ;
-           post regs wregs flags dmem)
+           post regs wregs flags dmem err_bits)
       end.
 
     (* Pop an address off the call stack and jump to that location. *)
     Definition call_stack_pop (st : otbn_state) (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
-          option_bind
-            (hd_error cstack)
-            "Attempt to read from empty call stack!"
-            (fun dst => post (otbn_busy dst regs wregs flags dmem (tl cstack) lstack))
+          match cstack with
+          | dst :: cstack => 
+              post (otbn_busy dst regs wregs flags dmem cstack lstack)
+          | [] => post (otbn_error pc CALL_STACK)
+          end
       | _ => post st
       end.
 
@@ -736,7 +779,7 @@ Section Semantics.
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
           if (length cstack <? 8)%nat
           then post (otbn_busy pc regs wregs flags dmem ((advance_pc pc) :: cstack) lstack)
-          else err "Attempt to write to a full call stack!"
+          else post (otbn_error pc CALL_STACK)
       | _ => post st
       end.
     Definition program_exit (st : otbn_state) (post : otbn_state -> T) : T :=
@@ -757,10 +800,14 @@ Section Semantics.
       (wregs : wregfile)
       (flags : flagfile)
       (dmem : mem)
+      (err_bits : option otbn_software_error)
       (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy pc _ _ _ _ cstack lstack =>
-          post (otbn_busy pc regs wregs flags dmem cstack lstack)
+          match err_bits with
+          | Some err_bits => post (otbn_error pc err_bits)
+          | None => post (otbn_busy pc regs wregs flags dmem cstack lstack)
+          end
       | _ => post st
       end.
     Definition next_pc (st : otbn_state) (post : otbn_state -> T) : T :=
@@ -779,7 +826,7 @@ Section Semantics.
     Definition loop_start
       (st : otbn_state) (iters : nat) (post : otbn_state -> T) : T :=
       match iters with
-      | O => err "Number of loop iterations cannot be 0."
+      | O => post (otbn_error (get_pc st) LOOP) (* loop cannot have 0 iterations *)
       | S iters =>
           match st with
           | otbn_busy pc regs wregs flags dmem cstack lstack =>          
@@ -788,7 +835,7 @@ Section Semantics.
               then post (otbn_busy
                            start_pc regs wregs flags dmem cstack
                            ((start_pc, iters) :: lstack))
-              else err "Loop stack full!"
+              else post (otbn_error pc LOOP)
           | _ => err "Cannot start a loop in a non-busy OTBN state."
           end
       end.
@@ -799,18 +846,15 @@ Section Semantics.
     Definition loop_end (st : otbn_state) (post : otbn_state -> T) : T :=
       match st with
       | otbn_busy pc regs wregs flags dmem cstack lstack =>
-          option_bind (hd_error lstack)
-                      "Cannot end loop if loop stack is empty."
-                      (fun start_iters =>
-                             match (snd start_iters) with
-                             | O => post (otbn_busy
-                                            (advance_pc pc) regs wregs flags dmem cstack
-                                            (tl lstack))
-                             | S iters =>
-                                 post (otbn_busy
-                                         (fst start_iters) regs wregs flags dmem cstack
-                                         ((fst start_iters, iters) :: tl lstack))
-                             end)
+          match lstack with
+          | (start, iters) :: lstack =>
+              match iters with
+              | O => post (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)
+              | S iters =>
+                  post (otbn_busy start regs wregs flags dmem cstack ((start, iters) :: lstack))
+              end
+          | [] => post (otbn_error pc LOOP)
+          end
       | _ => err "Cannot end a loop in a non-busy OTBN state."
       end.
 
@@ -825,7 +869,7 @@ Section Semantics.
     match i with
     | Ret =>  call_stack_pop st post
     | Ecall => program_exit st post
-    | Unimp => post (otbn_error (get_pc st) ["ILLEGAL_INSN"%string])
+    | Unimp => post (otbn_error (get_pc st) ILLEGAL_INSN)
     | Jal r dst =>
         match r with
         | x0 => set_pc st (dst, 0%nat) post
@@ -885,8 +929,8 @@ Section Semantics.
         /\ match i with
            | Straightline i =>
                strt1 regs wregs flags dmem i
-                 (fun regs wregs flags dmem =>
-                    update_state st regs wregs flags dmem
+                 (fun regs wregs flags dmem err_bits =>
+                    update_state st regs wregs flags dmem err_bits
                       (fun st => set_pc st (advance_pc pc) post))
            | Control i => ctrl1 st i post
            end
@@ -906,8 +950,8 @@ Section Semantics.
                (match i with
                 | Straightline i =>
                     (strt1 regs wregs flags dmem i
-                       (fun regs wregs flags dmem =>
-                          update_state st regs wregs flags dmem
+                       (fun regs wregs flags dmem err_bits =>
+                          update_state st regs wregs flags dmem err_bits
                             (fun st => set_pc st (advance_pc pc) Ok)))
                 | Control i => ctrl1 st i Ok
                 end)

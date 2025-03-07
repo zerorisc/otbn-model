@@ -578,6 +578,10 @@ Section __.
         | H : _ /\ _ |- _ => destruct H; subst
         | H : forall st1' st2', _ st1' st2' -> _ st1' -> ?spec2 st2' |- ?spec2 _ =>
             eapply H; [ | eassumption ]
+        | H : Forall2 _ [] (_ :: _) |- _ => solve [inversion H]
+        | H : Forall2 _ (_ :: _) [] |- _ => solve [inversion H]
+        | H : Forall2 _ ?l1 ?l2, H1 : (?n <= length ?l1)%nat, H2 : (length ?l2 < ?n)%nat
+          |- _ => apply Forall2_length in H; lia
         | H : Forall2 _ (_ :: _) _ |- _ =>
             inversion H; clear H; subst; cbn [hd_error tl] in *
         | H : context [match ?x with _ => _ end] |- _ => destruct_one_match_hyp
@@ -604,14 +608,10 @@ Section __.
             eapply read_flag_weaken; [ eassumption | ]; cbv beta; intros
         | |- read_csr _ _ _ _ =>
             eapply read_csr_weaken; [ eassumption | ]; cbv beta; intros
-        | |- load_byte _ _ _ =>
-            eapply load_byte_weaken; [ eassumption | ]; cbv beta; intros
         | |- load_bytes _ _ _ _ =>
             eapply load_bytes_weaken; [ eassumption | ]; cbv beta; intros
         | |- load_word _ _ _ =>
             eapply load_word_weaken; [ eassumption | ]; cbv beta; intros
-        | |- store_byte _ _ _ _ =>
-            eapply store_byte_weaken; [ eassumption | ]; cbv beta; intros
         | |- store_bytes _ _ _ _ =>
             eapply store_bytes_weaken; [ eassumption | ]; cbv beta; intros
         | |- store_word _ _ _ _ =>

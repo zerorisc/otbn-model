@@ -122,6 +122,16 @@ Definition pretty_print_lstack {label} {label_params : label_parameters label}
   pretty_print_list (fun '(pc,iters) =>
                        label_params.(pc_to_string) pc ++ ", " ++ String.of_nat iters)%string.
 Definition newline : string := String (Ascii.Ascii false true false true false false false false) "".
+Definition pretty_print_err (err : otbn_software_error) : string :=
+  match err with
+  | BAD_DATA_ADDR => "BAD_DATA_ADDR"
+  | BAD_INSN_ADDR => "BAD_INSN_ADDR"
+  | CALL_STACK => "CALL_STACK"
+  | ILLEGAL_INSN => "ILLEGAL_INSN"
+  | KEY_INVALID => "KEY_INVALID"
+  | LOOP => "LOOP"
+  end.
+  
 Definition pretty_print_otbn_state {label} {label_params : label_parameters label}
   (st : otbn_state) : string :=
   match st with
@@ -136,15 +146,15 @@ Definition pretty_print_otbn_state {label} {label_params : label_parameters labe
   | otbn_done pc dmem =>
       "DONE < pc := " ++ label_params.(pc_to_string) pc ++ newline
         ++ "mem :=  " ++ pretty_print_dmem dmem ++ ">"
-  | otbn_error pc errs =>
+  | otbn_error pc err =>
       "ERROR < pc := " ++ label_params.(pc_to_string) pc ++ newline
-        ++ "errs :=  " ++ String.concat "; " errs ++ ">"
+        ++ "errs :=  " ++ pretty_print_err err ++ ">"
   end.
 Definition pretty_print {label} {label_params : label_parameters label}
   (st : Maybe.maybe otbn_state) : string :=
   match st with
   | inl st => pretty_print_otbn_state st
-  | inr err => ("Error! " ++ err)%string
+  | inr err => ("Runtime error! " ++ err)%string
   end.
 
 (* Check that executing the instantiated model works *)

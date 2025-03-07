@@ -31,7 +31,6 @@ Local Open Scope Z_scope.
 Section Defs.
   Import ISA.Notations.
   
-  
   Definition wide_add_mem_fn : otbn_function :=
     ("wide_add_mem"%string,
       map.empty,

@@ -14,6 +14,7 @@ Require Import Otbn.Semantics.Clobbers.
 Require Import Otbn.ISA.ISA.
 Require Import Otbn.Util.Map.
 Require Import Otbn.Util.Tactics.Mapsimpl.
+Require Import Otbn.Util.Tactics.SubstLets.
 Require Import Otbn.Semantics.Semantics.
 Require Import Otbn.Semantics.Properties.
 Local Open Scope Z_scope.
@@ -70,26 +71,33 @@ Ltac simplify_side_condition_step :=
   | |- context [?x =? ?x] => rewrite (Z.eqb_refl x)
   | |- context [?x <? ?x] => rewrite (Z.ltb_irrefl x)
   | |- context [(0 <? S ?x)%nat] => destr (0 <? S x)%nat; [ | lia ]
+  | |- context [word.unsigned (addi_spec (word.of_Z 0) ?imm)] =>
+      rewrite (li_spec imm) by lia
   | |- context [if is_valid_lui_imm ?v then _ else _] =>
-        replace (is_valid_lui_imm v) with true by (cbv [is_valid_lui_imm]; lia)
+      replace (is_valid_lui_imm v) with true by (cbv [is_valid_lui_imm]; lia)
   | |- context [if is_valid_shamt ?v then _ else _] =>
-        replace (is_valid_shamt v) with true by (cbv [is_valid_shamt]; lia)
+      replace (is_valid_shamt v) with true by (cbv [is_valid_shamt]; lia)
   | |- context [if is_valid_arith32_imm ?v then _ else _] =>
-        replace (is_valid_arith32_imm v) with true by (cbv [is_valid_arith32_imm]; lia)
+      replace (is_valid_arith32_imm v) with true by (cbv [is_valid_arith32_imm]; lia)
   | |- context [if is_valid_arith256_imm ?v then _ else _] =>
-        replace (is_valid_arith256_imm v) with true by (cbv [is_valid_arith256_imm]; lia)
+      replace (is_valid_arith256_imm v) with true by (cbv [is_valid_arith256_imm]; lia)
   | |- context [if is_valid_rshi_imm ?v then _ else _] =>
-        replace (is_valid_arith256_imm v) with true by (cbv [is_valid_rshi_imm]; lia)
+      replace (is_valid_arith256_imm v) with true by (cbv [is_valid_rshi_imm]; lia)
   | |- context [if is_valid_mem_offset ?v then _ else _] =>
-        replace (is_valid_mem_offset v) with true by (cbv [is_valid_mem_offset]; cbn; lia)
+      replace (is_valid_mem_offset v) with true by (cbv [is_valid_mem_offset]; cbn; lia)
   | |- context [if is_valid_wide_mem_offset ?v then _ else _] =>
-        replace (is_valid_wide_mem_offset v) with true by (cbv [is_valid_wide_mem_offset]; cbn; lia)
-  | |- context [if is_word_aligned ?width ?a then _ else _] =>
-        replace (is_word_aligned width a) with true by (symmetry; solve_is_word_aligned ltac:(lia))
+      replace (is_valid_wide_mem_offset v) with true by (cbv [is_valid_wide_mem_offset]; cbn; lia)
   | |- context [if is_valid_arith256_shift_imm ?s then _ else _] =>
-        replace (is_valid_arith256_shift_imm s) with true by (vm_compute; lia)
+      replace (is_valid_arith256_shift_imm s) with true by (vm_compute; lia)
   | |- context [if is_valid_mulqacc_shift ?s then _ else _] =>
-        replace (is_valid_mulqacc_shift s) with true by (vm_compute; lia)
+      replace (is_valid_mulqacc_shift s) with true by (vm_compute; lia)
+  | |- assert_or_error _ (is_word_aligned ?width ?a) _ _ =>
+      replace (is_word_aligned width a) with true by (symmetry; solve_is_word_aligned)
+  | |- assert_or_error _ (?x <? DMEM_BYTES) _ _ =>
+      destr (x <? DMEM_BYTES); [ | lia ]
+  | |- assert_or_error _ (is_valid_wdr_index ?i) _ _ =>
+      replace (is_valid_wdr_index i) with true
+      by (cbv [is_valid_wdr_index]; subst_lets; rewrite ?li_spec by lia; reflexivity)
   | |- context [(_ + 0)%nat] => rewrite Nat.add_0_r
   | |- context [fetch_fn (?s, _, _) (?s, _)] => rewrite fetch_fn_name by auto
   | |- match fetch_fn ?fn ?pc with _ => _ end = Some _ => reflexivity
@@ -108,32 +116,20 @@ Ltac simplify_side_condition_step :=
   | |- apply_shift _ (Zneg ?p) _ => change (Zneg p) with (Z.opp (Zpos p))
   | |- apply_shift _ (- _) _ => eapply apply_shiftr; [ lia | cbn; congruence | ]
   | |- apply_shift _ _ _ => eapply apply_shiftl; [ lia | cbn; congruence | ]
-  | |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
+  | |- @store_word _ _ _ 32 _ _ _ _ _ =>
       eapply store_word32_step; [ solve_is_word_aligned | lia | solve_word_at | ]
-  | |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
+  | |- @load_word _ _ _ _ 32 _ _ _ _ =>
       eapply load_word32_step; [ solve_is_word_aligned | lia | solve_word_at | ]
-  | |- @store_word _ _ _ _ 256 _ ?m ?a _ _ =>
+  | |- @store_word _ _ _ 256 _ _ _ _ _ =>
       eapply store_word256_step; [ solve_is_word_aligned | lia | solve_word_at | ]
-  | |- @load_word _ _ _ _ 256 _ ?m ?a _ =>
+  | |- @load_word _ _ _ _ 256 _ _ _ _ =>
       eapply load_word256_step; [ solve_is_word_aligned | lia | solve_word_at | ]
   | |- read_wdr_indirect ?v _ _ =>
-      eapply read_wdr_indirect_step; eexists;
-      (* when the indirect register value is supplied as an li immediate, compute it *)
-      try (split; [ apply lookup_wdr_li; lia | ];
-           lazymatch goal with
-             |- context[lookup_wdr' (Z.to_nat ?i)] =>
-               let x := eval vm_compute in (lookup_wdr' (Z.to_nat i)) in
-                 change (lookup_wdr' (Z.to_nat i)) with x
-           end)
+      eapply read_wdr_indirect_step; eexists; split;
+      [ subst_lets; rewrite ?li_spec by lia; cbn [lookup_wdr]; reflexivity | ]
   | |- write_wdr_indirect ?v _ _ _ =>
-      eapply write_wdr_indirect_step; eexists;
-      (* when the indirect register value is supplied as an li immediate, compute it *)
-      try (split; [ apply lookup_wdr_li; lia | ];
-           lazymatch goal with
-             |- context[lookup_wdr' (Z.to_nat ?i)] =>
-               let x := eval vm_compute in (lookup_wdr' (Z.to_nat i)) in
-                 change (lookup_wdr' (Z.to_nat i)) with x
-           end)
+      eapply write_wdr_indirect_step; eexists; split; 
+      [ subst_lets; rewrite ?li_spec by lia; cbn [lookup_wdr]; reflexivity | ]
   | |- (_ < _) => lia
   | |- (_ <= _) => lia                                   
   | |- (_ < _)%nat => lia
@@ -145,9 +141,9 @@ Ltac simplify_side_condition_step :=
                           read_wdr write_wdr read_flag write_flag
                           set_pc update_state call_stack_pop call_stack_push
                           length hd_error tl skipn nth_error fold_left
-                          fetch fetch_ctx Nat.add fst snd
+                          fetch fetch_ctx Nat.add fst snd lookup_wdr
                           err random option_bind proof_semantics
-                          repeat_advance_pc advance_pc]
+                          repeat_advance_pc advance_pc assert_or_error]
                | progress cbv [gpr_has_value write_wdr update_mlz write_flag
                                  word32_binop word32_unop word256_binop]
                | eassumption ]

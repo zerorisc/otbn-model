@@ -364,16 +364,12 @@ Section __.
         (otbn_busy pc regs wregs flags dmem cstack ((loop_start, iters) :: lstack)).
   Proof.
     intros. destruct iters.
-    { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbn [loop_end hd_error tl ctrl1].
-        do 2 eexists; ssplit; [ reflexivity .. | ].
-        cbv iota. apply eq_refl. }
-      intros; subst. eassumption. }
-    { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbn [loop_end hd_error tl ctrl1].
-        do 2 eexists; ssplit; [ reflexivity .. | ].
-        cbv iota. apply eq_refl. }
-      intros; subst. eassumption. }
+    { eapply eventually_step_cps.
+      cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+      eassumption. }
+    { eapply eventually_step_cps.
+      cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+      eassumption. }
   Qed.
 
   Lemma eventually_ret {label : Type} {fetch : label * nat -> option insn}:
@@ -384,11 +380,11 @@ Section __.
       eventually (run1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
-    intros. eapply eventually_step.
-    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
-      cbn [ctrl1 call_stack_pop]. eexists; ssplit; [ eassumption .. | ].
-      apply eq_refl. }
-    intros; subst. eauto using eventually_done.
+    intros. eapply eventually_step_cps.
+    cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+    cbn [ctrl1 call_stack_pop].
+    destruct cstack; cbn [hd_error tl] in *; [ congruence | ].
+    eapply eventually_done. congruence.
   Qed.
 
   Lemma eventually_ecall {label : Type} {fetch : label * nat -> option insn}:
@@ -402,22 +398,6 @@ Section __.
     { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
       cbn [ctrl1 program_exit]. eassumption. }
     intros; subst. eauto using eventually_done.
-  Qed.
-
-  Lemma eventually_straightline
-    {label : Type} {fetch : label * nat -> option insn}:
-    forall pc regs wregs flags dmem cstack lstack i post,
-      fetch pc = Some (Straightline i) ->
-      strt1 regs wregs flags dmem i
-        (fun regs wregs flags dmem =>
-           eventually (run1 (fetch:=fetch)) post
-             (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)) ->
-      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs wregs flags dmem cstack lstack).
-  Proof.
-    intros. eapply eventually_step.
-    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
-      cbv iota. cbv [update_state set_pc]. eassumption. }
-    intros; subst. eauto.
   Qed.
 
   Lemma is_word_aligned_imm width imm :
@@ -520,8 +500,7 @@ Section __.
     assert (DMEM_BYTES < 2^32) by (cbv [DMEM_BYTES]; lia).
     generalize dependent dmem. generalize dependent addr.
     generalize dependent P. generalize dependent R. generalize dependent old_bs.    
-    induction bs; destruct old_bs; cbn [store_bytes length] in *; try lia;
-      cbv [store_byte]; intros;
+    induction bs; destruct old_bs; cbn [store_bytes length] in *; try lia; intros;
       repeat lazymatch goal with
         | H : context [map.of_list_word_at _ nil] |- _ =>
             rewrite map.of_list_word_nil in H
@@ -567,7 +546,7 @@ Section __.
   Proof.
     intros. subst.
     pose proof word.width_pos (word:=word).
-    cbv [store_word]. destruct_one_match; [ | congruence ].
+    cbv [store_word].
     eapply store_bytes_step.
     { rewrite length_le_split.
       rewrite Z2Nat.id by (apply Z.div_pos; lia). lia. }
@@ -606,8 +585,7 @@ Section __.
     generalize dependent addr. generalize dependent bs. generalize dependent P.
     generalize dependent R.
     induction len; destruct bs; cbn [load_bytes length] in *; try lia; eauto; [ ].
-    intros. cbv [load_byte]. destruct_one_match; try lia; [ ].
-    cbn [option_bind proof_semantics].
+    intros. cbn [option_bind proof_semantics].
     pose proof word.unsigned_range addr.
     lazymatch goal with
       | H : sep (eq (map.of_list_word_at _ (_ :: _))) _ _ |- _ =>
@@ -634,8 +612,7 @@ Section __.
     load_word dmem addr P.
   Proof.
     intros. pose proof word.width_pos (word:=word).
-    cbv [load_word]. destruct_one_match; [ | congruence ].
-    eapply load_bytes_step.
+    cbv [load_word]. eapply load_bytes_step.
     { rewrite Z2Nat.id by (apply Z.div_pos; lia). lia. }
     { use_sep_assumption. cbv [word_at]. ecancel. }
     { rewrite !length_le_split. reflexivity. }
@@ -663,28 +640,22 @@ Section __.
   Proof. intros; eapply load_word_step; eauto. Qed.
 
   Lemma read_wdr_indirect_step i wregs (P : _ -> Prop) :
-    (exists w, lookup_wdr i = w /\ read_wdr wregs w P) ->
+    (exists w, lookup_wdr (word.unsigned i) = w /\ read_wdr wregs w P) ->
     read_wdr_indirect i wregs P.
   Proof. cbv [read_wdr_indirect]; intros [? [? ?]]. subst. eauto. Qed.
 
   Lemma write_wdr_indirect_step i wregs v (P : _ -> Prop) :
-    (exists w, lookup_wdr i = w /\ write_wdr wregs w v P) ->
+    (exists w, lookup_wdr (word.unsigned i) = w /\ write_wdr wregs w v P) ->
     write_wdr_indirect i wregs v P.
   Proof. cbv [write_wdr_indirect]; intros [? [? ?]]. subst. eauto. Qed.
-  
 
-  Lemma lookup_wdr_li imm :
-    0 <= imm < 32 ->
-    lookup_wdr (addi_spec (word.of_Z 0) imm) = lookup_wdr' (Z.to_nat imm).
+  Lemma li_spec imm :
+    0 <= imm < 2048 ->
+    word.unsigned (addi_spec (word.of_Z 0) imm) = imm.
   Proof.
-    cbv [lookup_wdr addi_spec]; intros.
-    destruct_one_match; try lia; [ ]. do 2 apply f_equal.
-    rewrite word.add_0_l.
-    rewrite word.unsigned_and, !word.unsigned_of_Z_nowrap by lia.
-    change 31 with (Z.ones 5).
-    rewrite Z.land_ones by lia. change (2^5) with 32.
-    rewrite Z.mod_small by lia. cbv [word.wrap].
-    apply Z.mod_small; lia.
+    intros; cbv [addi_spec]; destruct_one_match; [ | lia ].
+    rewrite word.add_0_l, word.unsigned_of_Z_nowrap by lia.
+    reflexivity.
   Qed.
 
   Lemma apply_shift_0 x P : P x -> apply_shift x 0 P.
