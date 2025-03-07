@@ -1,5 +1,6 @@
 Require Import Coq.Strings.String.
 Require Import Coq.ZArith.ZArith.
+Require Import coqutil.Datatypes.String.
 Require Import coqutil.Word.Interface.
 Require Import Otbn.ISA.ISA.
 Require Import Otbn.ISA.Labels.
@@ -131,6 +132,14 @@ Section __.
     | flagC g => flag_group_to_string g ++ ".C"
     end.
 
+  Definition limb_to_string (l : limb) : string :=
+    match l with
+    | limb0 => ".0"
+    | limb1 => ".1"
+    | limb2 => ".2"
+    | limb3 => ".3"
+    end.
+
   Definition shift_to_string (shift : Z) : string :=
     if shift =? 0
     then ""
@@ -139,28 +148,86 @@ Section __.
   Definition inc_to_string (inc : bool) : string :=
     if inc then "++" else "".
 
+  Definition imm_to_dec (imm : Z) :=
+    (if (0 <? imm)%Z then "-" else "" ++ String.of_nat (Z.to_nat (Z.abs imm)))%string.
+
+  Print sinsn.
   Definition sinsn_to_string (i : sinsn) : string :=
     match i with
     | Addi rd rs imm =>
         "addi " ++ rd ++ ", " ++ rs ++ ", " ++ HexString.of_Z imm
+    | Lui rd imm =>
+        "lui " ++ rd ++ ", " ++ HexString.of_Z imm
     | Add rd rs1 rs2 =>
         "add " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Sub rd rs1 rs2 =>
+        "sub " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Sll rd rs1 rs2 =>
+        "sll " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Slli rd rs1 imm =>
+        "slli " ++ rd ++ ", " ++ rs1 ++ ", " ++ imm_to_dec imm
+    | Srl rd rs1 rs2 =>
+        "srl " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Srli rd rs1 imm =>
+        "srli " ++ rd ++ ", " ++ rs1 ++ ", " ++ imm_to_dec imm
+    | Sra rd rs1 rs2 =>
+        "sra " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Srai rd rs1 imm =>
+        "srai " ++ rd ++ ", " ++ rs1 ++ ", " ++ imm_to_dec imm
+    | And rd rs1 rs2 =>
+        "and " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Andi rd rs1 imm =>
+        "andi " ++ rd ++ ", " ++ rs1 ++ ", " ++ HexString.of_Z imm
+    | Or rd rs1 rs2 =>
+        "or " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Ori rd rs1 imm =>
+        "ori " ++ rd ++ ", " ++ rs1 ++ ", " ++ HexString.of_Z imm
+    | Xor rd rs1 rs2 =>
+        "xor " ++ rd ++ ", " ++ rs1 ++ ", " ++ rs2
+    | Xori rd rs1 imm =>
+        "xori " ++ rd ++ ", " ++ rs1 ++ ", " ++ HexString.of_Z imm
     | Lw rd rs imm =>
         "lw " ++ rd ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs
     | Sw rs1 rs2 imm =>
         "sw " ++ rs2 ++ ", (" ++ HexString.of_Z imm ++ ")" ++ rs1
-    | Csrrs rd rs =>
-        "csrrs " ++ rd ++ ", " ++ rs ++ ", "
+    | Csrrs rd cs1 rs =>
+        "csrrs " ++ rd ++ ", " ++ cs1 ++ ", " ++ rs
+    | Csrrw rd cs1 rs =>
+        "csrrs " ++ rd ++ ", " ++ cs1 ++ ", " ++ rs
+    | Bn_and wrd wrs1 wrs2 shift fg =>
+        "bn.and " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_or wrd wrs1 wrs2 shift fg =>
+        "bn.or " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_xor wrd wrs1 wrs2 shift fg =>
+        "bn.xor " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_not wrd wrs1 shift fg =>
+        "bn.not " ++ wrd ++ ", " ++ wrs1 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_rshi wrd wrs1 wrs2 imm =>
+        "bn.rshi " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ " << " ++ imm_to_dec imm
+    | Bn_sel wrd wrs1 wrs2 f =>
+        "bn.sel " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ ", " ++ flag_to_string f
+    | Bn_cmp wrs1 wrs2 shift fg =>
+        "bn.cmp " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_cmpb wrs1 wrs2 shift fg =>
+        "bn.cmpb " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
     | Bn_add wrd wrs1 wrs2 shift fg =>
         "bn.add " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
     | Bn_addc wrd wrs1 wrs2 shift fg =>
         "bn.addc " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
     | Bn_addi wrd wrs1 imm fg =>
         "bn.addi " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ HexString.of_Z imm ++ ", " ++ flag_group_to_string fg
-    | Bn_xor wrd wrs1 wrs2 shift fg =>
-        "bn.xor " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
-    | Bn_and wrd wrs1 wrs2 shift fg =>
-        "bn.and " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_sub wrd wrs1 wrs2 shift fg =>
+        "bn.sub " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_subb wrd wrs1 wrs2 shift fg =>
+        "bn.subb " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2 ++ shift_to_string shift ++ ", " ++ flag_group_to_string fg
+    | Bn_subi wrd wrs1 imm fg =>
+        "bn.subi " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ HexString.of_Z imm ++ ", " ++ flag_group_to_string fg
+    | Bn_addm wrd wrs1 wrs2 =>
+        "bn.addm " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2
+    | Bn_subm wrd wrs1 wrs2 =>
+        "bn.subm " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2
+    | Bn_mulqacc z wrs1 wrs1_qwsel wrs2 wrs2_qwsel imm  =>
+        "bn.mulqacc" ++ if z then ".z" else "" ++ " " ++ wrs1 ++ limb_to_string wrs1_qwsel ++ ", " ++ wrs2 ++ limb_to_string wrs2_qwsel ++ "<<" ++ imm_to_dec imm
     | Bn_lid grd grd_inc grs1 grs1_inc imm =>
         "bn.lid " ++ grd ++ inc_to_string grd_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ grs1 ++ inc_to_string grs1_inc
     | Bn_sid grs2 grs2_inc grs1 grs1_inc imm =>

@@ -661,11 +661,6 @@ Section Semantics.
     end%maybe.
 End Semantics.
 
-Module Coercions.
-  Coercion Straightline : sinsn >-> insn.
-  Coercion Control : cinsn >-> insn.
-End Coercions.
-
 (* Functions consist of a name, internal labels (map of string ->
    offset within the function), and a list of instructions. *)
 Definition symbols : map.map string nat := SortedListString.map _.
