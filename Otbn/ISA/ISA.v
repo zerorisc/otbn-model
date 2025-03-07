@@ -115,8 +115,8 @@ Inductive sinsn : Type :=
 | Bn_addm : wdr -> wdr -> wdr -> sinsn
 | Bn_subm : wdr -> wdr -> wdr -> sinsn
 | Bn_mulqacc : bool -> limb -> limb -> Z -> sinsn
-| Bn_mulqacc_wo : bool -> wdr -> limb -> limb -> Z -> sinsn
-| Bn_mulqacc_so : bool -> wdr -> bool -> limb -> limb -> Z -> sinsn
+| Bn_mulqacc_wo : bool -> wdr -> limb -> limb -> Z -> flag_group -> sinsn
+| Bn_mulqacc_so : bool -> wdr -> bool -> limb -> limb -> Z -> flag_group -> sinsn
 | Bn_mov : wdr -> wdr -> sinsn
 | Bn_movr : gpr_inc -> gpr_inc -> sinsn
 | Bn_lid : gpr_inc -> gpr_inc -> Z -> sinsn
@@ -249,12 +249,12 @@ Module Notations.
   (* bn.mulqacc needs multiple declarations. *)
   Notation "'bn.mulqacc' a , b , imm" := (Bn_mulqacc false a b imm : insn) (at level 40) : otbn_scope.
   Notation "'bn.mulqacc.z' a , b , imm" := (Bn_mulqacc true a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo' d , a , b , imm" := (Bn_mulqacc_wo false d a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.wo.z' d , a , b , imm" := (Bn_mulqacc_wo true d a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.L' , a , b , imm" := (Bn_mulqacc_so false d false a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so' d '.U' , a , b , imm" := (Bn_mulqacc_so false d true a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm" := (Bn_mulqacc_so true d false a b imm : insn) (at level 40) : otbn_scope.
-  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm" := (Bn_mulqacc_so true d true a b imm : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo' d , a , b , imm , fg" := (Bn_mulqacc_wo false d a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.wo.z' d , a , b , imm , fg" := (Bn_mulqacc_wo true d a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so false d false a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so false d true a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.L' , a , b , imm , fg" := (Bn_mulqacc_so true d false a b imm fg : insn) (at level 40) : otbn_scope.
+  Notation "'bn.mulqacc.so.z' d '.U' , a , b , imm , fg" := (Bn_mulqacc_so true d true a b imm fg : insn) (at level 40) : otbn_scope.
 
   (* Load-store offset notations require special handling to parse the
      parentheses as actual symbols. Only the most common offsets get
@@ -378,12 +378,12 @@ Module Notations.
       ; bn.mulqacc w2.0, w3.0, 0
       ; bn.mulqacc w2.0, w3.3, 64
       ; bn.mulqacc.z w2.0, w3.3, 64
-      ; bn.mulqacc.wo w4, w2.0, w3.3, 64
-      ; bn.mulqacc.wo.z w4, w2.0, w3.3, 64
-      ; bn.mulqacc.so w4.L, w2.0, w3.3, 64
-      ; bn.mulqacc.so w4.U, w2.0, w3.3, 64
-      ; bn.mulqacc.so.z w4.L, w2.0, w3.3, 128
-      ; bn.mulqacc.so.z w4.U, w2.0, w3.3, 192
+      ; bn.mulqacc.wo w4, w2.0, w3.3, 64, FG0
+      ; bn.mulqacc.wo.z w4, w2.0, w3.3, 64, FG1
+      ; bn.mulqacc.so w4.L, w2.0, w3.3, 64, FG0
+      ; bn.mulqacc.so w4.U, w2.0, w3.3, 64, FG1
+      ; bn.mulqacc.so.z w4.L, w2.0, w3.3, 128, FG0
+      ; bn.mulqacc.so.z w4.U, w2.0, w3.3, 192, FG1
       ; bn.movr x20, x21
       ; bn.movr x20++, x21
       ; bn.movr x20, x21++

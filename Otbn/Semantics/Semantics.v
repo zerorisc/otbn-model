@@ -25,11 +25,11 @@ Definition DMEM_BYTES := 8192.
 (* Parameters to use for instantiating semantics. This allows us to
    use the same semantics definitions for both proofs (T:=Prop) and an
    executable model of OTBN (T:=maybe otbn_state). *)
-Class semantics_parameters {word32 : word.word 32} (T : Type) :=
+Class semantics_parameters (T : Type) :=
   {
     err : string -> T;
-    random : (word32 -> T) -> T;
-    urandom : (word32 -> T) -> T;
+    random : forall {width} {word : word.word width}, (word -> T) -> T;
+    urandom : forall {width} {word : word.word width}, (word -> T) -> T;
     option_bind : forall A, option A -> string -> (A -> T) -> T;
   }.
 
@@ -75,24 +75,32 @@ Section Semantics.
     | S n => advance_pc (repeat_advance_pc pc n)
     end.
   
-  Definition is_valid_addi_imm (imm : Z) : bool :=
+  Definition is_valid_lui_imm (imm : Z) : bool :=
+    (0 <=? imm) && (imm <=? 1048575).
+  Definition is_valid_shamt (imm : Z) : bool :=
+    (0 <=? imm) && (imm <=? 31).
+  Definition is_valid_arith32_imm (imm : Z) : bool :=
     (-2048 <=? imm) && (imm <=? 2047).
-  Definition is_valid_bn_imm (imm : Z) : bool :=
+  Definition is_valid_arith256_imm (imm : Z) : bool :=
     (0 <=? imm) && (imm <=? 1023).
+  Definition is_valid_rshi_imm (imm : Z) : bool :=
+    (0 <=? imm) && (imm <=? 255).
   Definition is_valid_mem_offset (imm : Z) : bool :=
     (-2048 <=? imm) && (imm <=? 2047).
   Definition is_valid_wide_mem_offset (imm : Z) : bool :=
     (-16384 <=? imm) && (imm <=? 16352) && (imm mod 32 =? 0).
   Definition is_word_aligned width (addr : word32) : bool :=
     word.eqb (word.of_Z 0) (word.and addr (word.of_Z (width - 1))).
-  Definition is_valid_shift_imm (imm : Z) : bool :=
+  Definition is_valid_arith256_shift_imm (imm : Z) : bool :=
     (0 <=? imm) && (imm <=? 248) && (imm mod 8 =? 0).
+  Definition is_valid_mulqacc_shift (imm : Z) : bool :=
+    (0 <=? imm) && (imm <=? 192) && (imm mod 64 =? 0).
 
   (* Code in this section can be used either for execution or for
      omnisemantics-style proofs depending on the parameters. *) 
   Section WithSemanticsParams.
     Context {T} {semantics_params : semantics_parameters T}.
-    Local Arguments option_bind {_ _ _ _}.    
+    Local Arguments option_bind {_ _ _}. 
 
     Definition read_gpr (regs : regfile) (r : gpr) (P : word32 -> T) : T :=
       match r with
@@ -111,7 +119,36 @@ Section Semantics.
     Definition read_flag (flags : flagfile) (f : flag) (P : bool -> T) : T :=
       option_bind (map.get flags f)
         ("Flag " ++ flag_to_string f ++ " read but not set") P.
+    
+    Definition read_wsr (wregs : wregfile) (r : wsr) (P : word256 -> T) : T :=
+      match r with
+      | WSR_RND => random P
+      | WSR_URND => urandom P
+      | _ => 
+          option_bind (map.get wregs (wsreg r))
+            ("Register " ++ wsr_to_string r ++ " read but not set.")
+            P
+      end.
 
+    Definition read_limb (wregs : wregfile) (l : limb) (P : word256 -> T) : T :=
+      match l with
+      | (r, 0) =>
+          read_wdr wregs r
+            (fun v => P (word.and v (word.of_Z (Z.ones 64))))
+      | (r, 1) =>
+          read_wdr wregs r
+            (fun v => P (word.and (word.sru v (word.of_Z 64)) (word.of_Z (Z.ones 64))))
+      | (r, 2) =>
+          read_wdr wregs r
+            (fun v => P (word.and (word.sru v (word.of_Z 128)) (word.of_Z (Z.ones 64))))
+      | (r, 3) =>
+          read_wdr wregs r
+            (fun v => P (word.and (word.sru v (word.of_Z 192)) (word.of_Z (Z.ones 64))))
+      | (r, n) => err ("Invalid BN.MULQACC quarter-word selector for "
+                         ++ wdr_to_string r ++ ": "
+                         ++ (if (n <? 0) then "-" else "") ++ String.of_nat (Z.to_nat (Z.abs n)))
+      end.
+ 
     Definition lookup_wdr' (i : nat) : wdr :=
       (match i with
        | 0 => w0
@@ -226,6 +263,19 @@ Section Semantics.
     Definition write_flag (flags : flagfile) (f : flag) (v : bool) (P : flagfile -> T) : T :=
       P (map.put flags f v).
 
+    Definition write_wsr
+      (wregs : wregfile) (r : wsr) (v : word256) (P : wregfile -> T) : T :=
+      match r with
+      | WSR_MOD => P (map.put wregs (wsreg r) v)
+      | WSR_ACC => P (map.put wregs (wsreg r) v)
+      | WSR_RND => P wregs (* writes ignored *)
+      | WSR_URND => P wregs (* writes ignored *)
+      | WSR_KEY_S0_L => P wregs (* writes ignored *)
+      | WSR_KEY_S0_H => P wregs (* writes ignored *)
+      | WSR_KEY_S1_L => P wregs (* writes ignored *)
+      | WSR_KEY_S1_H => P wregs (* writes ignored *)
+      end.
+  
     Definition write_wdr_indirect
       (i : word32) (wregs : wregfile) (v : word256) (P : wregfile -> T) : T :=
       write_wdr wregs (lookup_wdr i) v P.
@@ -302,7 +352,7 @@ Section Semantics.
       else word.sub v (word.of_Z imm).
 
     Definition apply_shift (v : word256) (shift : Z) (P : word256 -> T) :=
-      if is_valid_shift_imm (Z.abs shift)
+      if is_valid_arith256_shift_imm (Z.abs shift)
       then if shift =? 0
            then P v
            else if shift >? 0
@@ -311,7 +361,7 @@ Section Semantics.
       else err ("Invalid shift argument: " ++ HexString.of_Z shift).
 
     Definition update_mlz
-      (flags : flagfile) (fg : flag_group) (v : word256) (P : flagfile -> T) :=
+      (flags : flagfile) (fg : flag_group) (v : word256) (P : flagfile -> T) : T:=
       write_flag flags (flagM fg) (Z.testbit (word.unsigned v) 255)
         (fun flags =>
            write_flag flags (flagL fg) (Z.testbit (word.unsigned v) 0)
@@ -319,27 +369,132 @@ Section Semantics.
                 write_flag flags (flagZ fg) (word.unsigned v =? 0)
                   (fun flags => P flags))).
 
+    Definition read_gpr_inc (regs : regfile) (x : gpr_inc) (P : word32 -> T) : T :=
+      match x with
+      | gpr_inc_true r => read_gpr regs r P
+      | gpr_inc_false r => read_gpr regs r P
+      end.
+
+    Definition increment_gprs
+      (regs : regfile) (x y : gpr_inc) (xinc : Z) (yinc : Z) (P : regfile -> T) : T :=
+      match x, y with
+      | gpr_inc_true rx, gpr_inc_true ry =>
+          err ("Multiple increment bits set in the instruction: "
+                 ++ gpr_to_string rx ++ "++ and " ++ gpr_to_string ry ++ "++")
+              
+      | gpr_inc_true rx, gpr_inc_false ry =>
+          read_gpr regs rx
+            (fun vx =>
+               write_gpr regs rx (word.add vx (word.of_Z xinc)) P)
+      | gpr_inc_false rx, gpr_inc_true ry =>
+          read_gpr regs ry
+            (fun vy =>
+               write_gpr regs ry (word.add vy (word.of_Z yinc)) P)
+      | gpr_inc_false rx, gpr_inc_false ry => P regs
+      end.
+ 
     Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
 
+    Definition rshi_spec (x y : word256) (s : Z) : word256 :=
+      word.of_Z (Z.shiftr (word.unsigned x + Z.shiftl (word.unsigned y) 256) s).
+    Definition addm_spec (x y m : word256) : word256 :=
+      if (word.unsigned m <? word.unsigned x + word.unsigned y)
+      then word.of_Z (word.unsigned x + word.unsigned y - word.unsigned m)
+      else word.add x y.
+    Definition subm_spec (x y m : word256) : word256 :=
+      if (word.unsigned y <? word.unsigned x)
+      then word.of_Z (word.unsigned x + word.unsigned m - word.unsigned y)
+      else word.sub x y.
+    Definition mulqacc_spec (acc x y : word256) (s : Z) : word256 :=
+      word.add acc (word.of_Z (Z.shiftl (word.unsigned x * word.unsigned y) s)).
+    (* helper for mulqacc half-word writebacks *)
+    Definition so_writeback_spec (u : bool) (vd result : word256) : word256 :=
+      if u
+      then word.or (word.slu result (word.of_Z 128)) (word.and vd (word.of_Z (Z.ones 128)))
+      else word.or (word.and result (word.of_Z (Z.ones 128)))
+             (word.and vd (word.slu (word.of_Z (Z.ones 128)) (word.of_Z 128))).
+
     Local Notation "x <- f ; e" := (f (fun x => e)) (at level 100, right associativity).
+
+    (* convenience for instructions that are basic word ops *)
+    Definition word32_binop (op : word32 -> word32 -> word32) (regs : regfile) (d x y : gpr)
+      (post : regfile -> T) : T :=
+      (vx <- read_gpr regs x ;
+       vy <- read_gpr regs y ;
+       regs <- write_gpr regs d (op vx vy) ;
+       post regs).
+    Definition word32_unop (op : word32 -> word32) (regs : regfile) (d x : gpr)
+      (post : regfile -> T) : T :=
+      (vx <- read_gpr regs x ;
+       regs <- write_gpr regs d (op vx) ;
+       post regs).
+    Definition word256_binop
+      (op : word256 -> word256 -> word256) (wregs : wregfile) (flags : flagfile)
+      (d x y : wdr) (s : Z) (fg : flag_group) (post : wregfile -> flagfile -> T) : T :=
+      (vx <- read_wdr wregs x ;
+       vy <- read_wdr wregs y ;
+       vy <- apply_shift vy s ;
+       let result := op vx vy in
+       wregs <- write_wdr wregs d result ;
+       flags <- update_mlz flags fg result ;
+       post wregs flags).
 
     Definition strt1
       (regs : regfile) (wregs : wregfile) (flags : flagfile) (dmem : mem)
       (i : sinsn) (post : regfile -> wregfile -> flagfile -> mem -> T) : T :=
       match i with
       | Addi d x imm =>
-          if is_valid_addi_imm imm
+          if is_valid_arith32_imm imm
           then
             (vx <- read_gpr regs x ;
              regs <- write_gpr regs d (addi_spec vx imm) ;
              post regs wregs flags dmem)
           else err ("Invalid immediate for ADDI: " ++ HexString.of_Z imm)
-      | Add d x y =>
-          (vx <- read_gpr regs x ;
-           vy <- read_gpr regs y ;
-           regs <- write_gpr regs d (word.add vx vy) ;
-           post regs wregs flags dmem)
+      | Lui d imm =>
+          if is_valid_lui_imm imm
+          then
+            (regs <- write_gpr regs d (word.of_Z (Z.shiftl imm 12)) ;
+             post regs wregs flags dmem)
+          else err ("Invalid immediate for LUI: " ++ HexString.of_Z imm)
+      | Add d x y => word32_binop word.add regs d x y (fun regs => post regs wregs flags dmem)
+      | Sub d x y => word32_binop word.sub regs d x y (fun regs => post regs wregs flags dmem)
+      | Sll d x y => word32_binop word.slu regs d x y (fun regs => post regs wregs flags dmem)
+      | Slli d x imm =>
+          if is_valid_shamt imm
+          then word32_unop (fun x => word.slu x (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for SLLI: " ++ HexString.of_Z imm)
+      | Srl d x y => word32_binop word.sru regs d x y (fun regs => post regs wregs flags dmem)
+      | Srli d x imm =>
+          if is_valid_shamt imm
+          then word32_unop (fun x => word.sru x (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for SRLI: " ++ HexString.of_Z imm)
+      | Sra d x y => word32_binop word.srs regs d x y (fun regs => post regs wregs flags dmem)
+      | Srai d x imm =>
+          if is_valid_shamt imm
+          then word32_unop (fun x => word.slu x (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for SRAI: " ++ HexString.of_Z imm)
+      | And d x y => word32_binop word.and regs d x y (fun regs => post regs wregs flags dmem)
+      | Andi d x imm =>
+          if is_valid_arith32_imm imm
+          then word32_unop (word.and (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for ANDI: " ++ HexString.of_Z imm)
+      | Xor d x y => word32_binop word.xor regs d x y (fun regs => post regs wregs flags dmem)
+      | Xori d x imm =>
+          if is_valid_arith32_imm imm
+          then word32_unop (word.xor (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for XORI: " ++ HexString.of_Z imm)
+      | Or d x y => word32_binop word.or regs d x y (fun regs => post regs wregs flags dmem)
+      | Ori d x imm =>
+          if is_valid_arith32_imm imm
+          then word32_unop (word.or (word.of_Z imm))
+                 regs d x (fun regs => post regs wregs flags dmem)
+          else err ("Invalid immediate for ORI: " ++ HexString.of_Z imm)
       | Lw d x imm =>
           if is_valid_mem_offset imm
           then
@@ -356,11 +511,61 @@ Section Semantics.
              dmem <- store_word dmem (word.add vx (word.of_Z imm)) vy ;
              post regs wregs flags dmem)
           else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
-      | Csrrs d x =>
-          (vx <- read_gpr regs x ;
-           vd <- read_csr regs flags d ;
-           flags <- write_csr regs flags d (word.xor vd vx) ;
-           regs <- write_gpr regs x vd ;
+      | Csrrs d x y =>
+          (vx <- read_csr regs flags x ;
+           vy <- read_gpr regs y ;
+           flags <- write_csr regs flags x (word.or vx vy) ;
+           regs <- write_gpr regs d vx ;
+           post regs wregs flags dmem)
+      | Csrrw d x y =>
+          (vx <- read_csr regs flags x ;
+           vy <- read_gpr regs y ;
+           flags <- write_csr regs flags x vy ;
+           regs <- write_gpr regs d vx ;
+           post regs wregs flags dmem)
+      | Bn_and d x y s fg => word256_binop word.and wregs flags d x y s fg
+                               (fun wregs flags => post regs wregs flags dmem)
+      | Bn_xor d x y s fg => word256_binop word.xor wregs flags d x y s fg
+                               (fun wregs flags => post regs wregs flags dmem)
+      | Bn_or d x y s fg => word256_binop word.or wregs flags d x y s fg
+                              (fun wregs flags => post regs wregs flags dmem)
+      | Bn_not d x s fg =>
+          (vx <- read_wdr wregs x ;
+           vx <- apply_shift vx s ;
+           let result := word.not vx in
+           wregs <- write_wdr wregs d result ;
+           flags <- update_mlz flags fg result ;
+           post regs wregs flags dmem)
+      | Bn_rshi d x y s =>
+          if is_valid_rshi_imm s
+          then
+            (vx <- read_wdr wregs x ;
+             vy <- read_wdr wregs y ;
+             wregs <- write_wdr wregs d (rshi_spec vx vy s) ;
+             post regs wregs flags dmem)
+          else err ("Invalid immediate for BN.RSHI: " ++ HexString.of_Z s)  
+      | Bn_sel d x y f =>
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vf <- read_flag flags f ;
+           wregs <- write_wdr wregs d (if vf then vx else vy) ;
+           post regs wregs flags dmem)
+      | Bn_cmp x y s fg =>
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           flags <- write_flag flags (flagC fg)
+                      (borrow_bit (word.unsigned vx - word.unsigned vy)) ;
+           flags <- update_mlz flags fg (word.sub vx vy) ;
+           post regs wregs flags dmem)
+      | Bn_cmpb x y s fg =>
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vy <- apply_shift vy s ;
+           c <- read_flag flags (flagC fg) ;
+           flags <- write_flag flags (flagC fg)
+                      (borrow_bit (word.unsigned vx - word.unsigned vy - Z.b2z c)) ;
+           flags <- update_mlz flags fg (word.sub (word.sub vx vy) (word.of_Z (Z.b2z c))) ;
            post regs wregs flags dmem)
       | Bn_add d x y s fg =>
           (vx <- read_wdr wregs x ;
@@ -383,71 +588,135 @@ Section Semantics.
            flags <- update_mlz flags fg result ;
            post regs wregs flags dmem)
       | Bn_addi d x imm fg =>
-          if is_valid_bn_imm imm
+          if is_valid_arith256_imm imm
           then
             (vx <- read_wdr wregs x ;
              let result := word.add vx (word.of_Z imm) in
              wregs <- write_wdr wregs d result ;
              flags <- write_flag flags (flagC fg) (carry_bit (word.unsigned vx + imm)) ;
-           flags <- update_mlz flags fg result ;
+             flags <- update_mlz flags fg result ;
              post regs wregs flags dmem)
           else err ("Invalid immediate for BN.ADDI: " ++ HexString.of_Z imm)
-      | Bn_and d x y s fg =>
+      | Bn_sub d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vy <- apply_shift vy s ;
-           let result := word.and vx vy in
+           let result :=  word.sub vx vy in
            wregs <- write_wdr wregs d result ;
+           flags <- write_flag flags (flagC fg)
+                      (borrow_bit (word.unsigned vx - word.unsigned vy)) ;
            flags <- update_mlz flags fg result ;
            post regs wregs flags dmem)
-      | Bn_xor d x y s fg =>
+      | Bn_subb d x y s fg =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vy <- apply_shift vy s ;
-           let result := word.xor vx vy in
+           c <- read_flag flags (flagC fg) ;
+           let result := word.sub (word.sub vx vy) (word.of_Z (Z.b2z c)) in
            wregs <- write_wdr wregs d result ;
+           flags <- write_flag flags (flagC fg)
+                      (borrow_bit (word.unsigned vx - word.unsigned vy - Z.b2z c)) ;
            flags <- update_mlz flags fg result ;
            post regs wregs flags dmem)
-      | Bn_lid d dinc x xinc imm =>
+      | Bn_subi d x imm fg =>
+          if is_valid_arith256_imm imm
+          then
+            (vx <- read_wdr wregs x ;
+             let result := word.sub vx (word.of_Z imm) in
+             wregs <- write_wdr wregs d result ;
+             flags <- write_flag flags (flagC fg) (borrow_bit (word.unsigned vx - imm)) ;
+             flags <- update_mlz flags fg result ;
+             post regs wregs flags dmem)
+          else err ("Invalid immediate for BN.SUBI: " ++ HexString.of_Z imm)
+      | Bn_addm d x y =>
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vm <- read_wsr wregs WSR_MOD;           
+           wregs <- write_wdr wregs d (addm_spec vx vy vm) ;
+           post regs wregs flags dmem)
+      | Bn_subm d x y =>
+          (vx <- read_wdr wregs x ;
+           vy <- read_wdr wregs y ;
+           vm <- read_wsr wregs WSR_MOD;           
+           wregs <- write_wdr wregs d (subm_spec vx vy vm) ;
+           post regs wregs flags dmem)
+      | Bn_mulqacc z x y s =>
+          if is_valid_mulqacc_shift s
+          then
+            (vx <- read_limb wregs x ;
+             vy <- read_limb wregs y ;
+             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
+             wregs <- write_wsr wregs WSR_ACC (mulqacc_spec acc vx vy s) ;
+             post regs wregs flags dmem)
+          else err ("Invalid shift for BN.MULQACC: " ++ HexString.of_Z s)
+      | Bn_mulqacc_wo z d x y s fg =>
+          if is_valid_mulqacc_shift s
+          then
+            (vx <- read_limb wregs x ;
+             vy <- read_limb wregs y ;
+             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
+             let result := mulqacc_spec acc vx vy s in
+             wregs <- write_wsr wregs WSR_ACC result ;
+             wregs <- write_wdr wregs d result ;
+             flags <- update_mlz flags fg result ;
+             post regs wregs flags dmem)
+          else err ("Invalid shift for BN.MULQACC.WO: " ++ HexString.of_Z s)
+      | Bn_mulqacc_so z d u x y s fg =>
+          if is_valid_mulqacc_shift s
+          then
+            (vx <- read_limb wregs x ;
+             vy <- read_limb wregs y ;
+             vd <- read_wdr wregs d ;
+             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
+             let result := mulqacc_spec acc vx vy s in
+             wregs <- write_wsr wregs WSR_ACC (word.sru result (word.of_Z 128)) ;
+             let wb := so_writeback_spec u vd result in
+             wregs <- write_wdr wregs d wb ;
+             flags <- write_flag flags (flagZ fg) (word.unsigned wb =? 0) ;
+             flags <- if u
+                      then write_flag flags (flagM fg) (Z.testbit (word.unsigned wb) 255)
+                      else write_flag flags (flagL fg) (Z.testbit (word.unsigned wb) 0) ;
+             post regs wregs flags dmem)
+          else err ("Invalid shift for BN.MULQACC.SO: " ++ HexString.of_Z s)
+      | Bn_lid dinc xinc imm =>
           if is_valid_wide_mem_offset imm
           then
-            (vx <- read_gpr regs x ;
-             let addr := (word.add vx (word.of_Z imm)) in
-             vm <- load_word dmem addr ;
-             id <- read_gpr regs d ;
+            (vx <- read_gpr_inc regs xinc ;
+             vm <- load_word dmem (word.add vx (word.of_Z imm)) ;
+             id <- read_gpr_inc regs dinc ;
              wregs <- write_wdr_indirect id wregs vm ;
-             if dinc
-             then if xinc
-                  then err ("Both increment bits set for BN.LID.")
-                  else
-                    (regs <- write_gpr regs d (word.add id (word.of_Z 1)) ;
-                     post regs wregs flags dmem)
-             else if xinc
-                  then
-                    (regs <- write_gpr regs x (word.add vx (word.of_Z 32)) ;
-                     post regs wregs flags dmem)
-                  else post regs wregs flags dmem)
+             regs <- increment_gprs regs dinc xinc 1 32 ;
+             post regs wregs flags dmem)
           else err ("Invalid memory offset for BN.LID: " ++ HexString.of_Z imm)
-      | Bn_sid x xinc y yinc imm =>
+      | Bn_sid xinc yinc imm =>
           if is_valid_wide_mem_offset imm
           then
-            (ix <- read_gpr regs x ;
+            (ix <- read_gpr_inc regs xinc ;
              vx <- read_wdr_indirect ix wregs ;
-             vy <- read_gpr regs y ;
-             let addr := (word.add vy (word.of_Z imm)) in
-             dmem <- store_word dmem addr vx ;
-             if xinc
-             then if yinc
-                  then err ("Both increment bits set for BN.SID.")
-                  else
-                    (regs <- write_gpr regs x (word.add ix (word.of_Z 1)) ;
-                     post regs wregs flags dmem)
-             else if yinc
-                  then 
-                    (regs <- write_gpr regs y (word.add vy (word.of_Z 32)) ;
-                     post regs wregs flags dmem)
-                  else post regs wregs flags dmem)
+             vy <- read_gpr_inc regs yinc ;
+             dmem <- store_word dmem (word.add vy (word.of_Z imm)) vx ;
+             regs <- increment_gprs regs xinc yinc 1 32 ;
+             post regs wregs flags dmem)
           else err ("Invalid memory offset for BN.SID: " ++ HexString.of_Z imm)
+      | Bn_mov d x =>
+          (vx <- read_wdr wregs x ;
+           wregs <- write_wdr wregs d vx ;
+           post regs wregs flags dmem)
+      | Bn_movr dinc xinc =>
+          (ix <- read_gpr_inc regs xinc ;
+           vx <- read_wdr_indirect ix wregs ;
+           id <- read_gpr_inc regs dinc ;
+           wregs <- write_wdr_indirect id wregs vx ;
+           regs <- increment_gprs regs dinc xinc 1 1 ;
+           post regs wregs flags dmem)
+      | Bn_wsrr d x =>
+          (vx <- read_wsr wregs x ;
+           wregs <- write_wdr wregs d vx ;
+           post regs wregs flags dmem)
+      | Bn_wsrw d x =>
+          (vx <- read_wdr wregs x ;
+           wregs <- write_wsr wregs d vx ;
+           post regs wregs flags dmem)
       end.
 
     (* Pop an address off the call stack and jump to that location. *)

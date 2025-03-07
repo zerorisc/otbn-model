@@ -225,10 +225,10 @@ Section __.
         "bn.subm " ++ wrd ++ ", " ++ wrs1 ++ ", " ++ wrs2
     | Bn_mulqacc z wrs1 wrs2 imm  =>
         "bn.mulqacc" ++ if z then ".z" else "" ++ " " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
-    | Bn_mulqacc_wo z wrd wrs1 wrs2 imm  =>
-        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
-    | Bn_mulqacc_so z wrd U wrs1 wrs2 imm  =>
-        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ if U then ".U" else ".L" ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm
+    | Bn_mulqacc_wo z wrd wrs1 wrs2 imm fg =>
+        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm ++ ", " ++ flag_group_to_string fg
+    | Bn_mulqacc_so z wrd U wrs1 wrs2 imm fg =>
+        "bn.mulqacc.wo" ++ if z then ".z" else "" ++ " " ++ wdr_to_string wrd ++ if U then ".U" else ".L" ++ ", " ++ limb_to_string wrs1 ++ ", " ++ limb_to_string wrs2 ++ "<<" ++ imm_to_dec imm ++ ", " ++ flag_group_to_string fg
     | Bn_lid grd_inc grs1_inc imm =>
         "bn.lid " ++ inc_to_string grd_inc ++ ", (" ++ HexString.of_Z imm ++ ")" ++ inc_to_string grs1_inc
     | Bn_sid grs2_inc grs1_inc imm =>
