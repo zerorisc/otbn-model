@@ -177,7 +177,7 @@ Module Notations.
   (* .L conflicts with bn.mulqacc.so so it's special *)
   Notation "FG0.L" := (flagL FG0 : flag) (at level 20) : otbn_scope.
   Notation "FG1.L" := (flagL FG1 : flag) (at level 20) : otbn_scope.
-
+  
   (* basic 32-bit straightline instructions (not load/store) *)
   Notation "'addi' d , a , imm" := (Addi d a imm : insn) (at level 40) : otbn_scope. 
   Notation "'lui' a , imm" := (Lui a imm : insn) (at level 40) : otbn_scope.

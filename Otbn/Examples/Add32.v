@@ -23,21 +23,25 @@ Local Open Scope Z_scope.
 
 (*** The world's most basic OTBN test program: adds two 32-bit registers. ***)
 
-(* Code reference:
+Section Defs.
+  Import ISA.Notations.
 
-     start:
-       addi x2, x0, 2
-       addi x3, x0, 3
-       jal  x1, add
-       sw   x5, 0(x0)
-       ecall
+  Definition add_fn : otbn_function :=
+    ("add"%string,
+      map.empty,
+      [add x5, x2, x3
+       ; ret]%otbn).
+  Definition start_fn : otbn_function :=
+    ("start"%string,
+      map.empty,
+      [ addi x2, x0, 2
+        ; addi x3, x0, 3
+        ; jal x1, "add"%string
+        ; sw x5, 0(x0)
+        ; ecall ]%otbn).
+End Defs.
 
-     add:
-       add  x5, x2, x3
-       ret
-*)
-
-Section __.
+Section Proofs.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
   Context {word256 : word.word 256} {word256_ok : word.ok word256}.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
@@ -47,19 +51,6 @@ Section __.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
 
-  Definition add_fn : otbn_function :=
-    ("add"%string,
-      map.empty,
-      [(Add x5 x2 x3 : insn);
-       (Ret : insn)]).
-  Definition start_fn : otbn_function :=
-    ("start",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Jal x1 "add" : insn);
-        (Sw x0 x5 0 : insn) ;
-        (Ecall : insn)])%string.
 
   Lemma add_correct :
     forall regs wregs flags dmem cstack lstack a b,
@@ -77,6 +68,7 @@ Section __.
   Proof.
     cbv [add_fn returns]. intros; subst.
     repeat straightline_step.
+    
     eapply eventually_ret; [ reflexivity | eassumption | ].
     ssplit; try reflexivity; [ mapsimpl | solve_clobbers .. ].
   Qed.
@@ -89,4 +81,4 @@ Section __.
   Print add_prog.
   *)
 
-End __.
+End Proofs.

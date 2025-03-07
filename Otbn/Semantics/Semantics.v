@@ -508,7 +508,7 @@ Section Semantics.
           then
             (vx <- read_gpr regs x ;
              vy <- read_gpr regs y ;
-             dmem <- store_word dmem (word.add vx (word.of_Z imm)) vy ;
+             dmem <- store_word dmem (word.add vy (word.of_Z imm)) vx ;
              post regs wregs flags dmem)
           else err ("Invalid memory offset for SW: " ++ HexString.of_Z imm)
       | Csrrs d x y =>
@@ -1039,3 +1039,23 @@ Definition fetch
   let global_offset := fst pc in
   let fn_offset := snd pc in
   nth_error prog (global_offset + fn_offset).
+
+(* Experimental way to smoothly insert symbols without manual calculations. *)
+Fixpoint make_symbols
+  (body : list (string * insn (label:=string))) (offset : nat) : symbols :=
+  match body with
+  | (EmptyString, _) :: body => make_symbols body (S offset)
+  | (s, _) :: body => map.put (make_symbols body (S offset)) s offset
+  | [] => map.empty
+  end.
+Fixpoint make_insns (body : list (string * insn (label:=string))) : list insn :=
+  match body with
+  | (_, i) :: body => i :: make_insns body
+  | [] => []
+  end.
+Definition make_function name body : otbn_function :=  
+  (name, make_symbols body 0, make_insns body).
+
+Ltac make_function name body :=
+  let val := eval cbv [make_function make_insns make_symbols] in (make_function name body) in
+    exact val.

@@ -28,19 +28,23 @@ Local Open Scope Z_scope.
 
 (*** Simple program that adds two 256-bit values from memory. ***)
 
-(* Code reference:
+Section Defs.
+  Import ISA.Notations.
+  
+  
+  Definition wide_add_mem_fn : otbn_function :=
+    ("wide_add_mem"%string,
+      map.empty,
+      [ addi     x2, x0, 2
+        ; addi     x3, x0, 3
+        ; bn.lid   x2, 0(x12)
+        ; bn.lid   x3, 0(x13)
+        ; bn.add   w2, w2, w3, FG0
+        ; bn.sid   x2, 0(x12)
+        ; ret]%otbn).
+End Defs.
 
-     wide_add_mem:
-       li       x2, 2
-       li       x3, 3
-       bn.lid   x2, 0(x12)
-       bn.lid   x3, 0(x13)
-       bn,add   w2, w2, w3
-       bn.sid   x2, 0(x12)
-       ret
- *)
-
-Section __.
+Section Proofs.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
   Context {word256 : word.word 256} {word256_ok : word.ok word256}.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
@@ -49,18 +53,6 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
-  
-  Definition wide_add_mem_fn : otbn_function :=
-    ("wide_add_mem",
-      map.empty,
-      [ (Addi x2 x0 2 : insn);
-        (Addi x3 x0 3 : insn);
-        (Bn_lid x2 false x12 false  0 : insn);
-        (Bn_lid x3 false x13 false  0 : insn);
-        (Bn_add w2 w2 w3 0 FG0 : insn);
-        (Bn_sid x2 false x12 false  0 : insn);
-        (Ret : insn)])%string.
-
 
   Lemma wide_add_mem_correct :
     forall regs wregs flags dmem cstack lstack (a b : word256) pa pb Ra Rb,
@@ -91,4 +83,4 @@ Section __.
     ecancel_assumption.
   Qed.
 
-End __.
+End Proofs.

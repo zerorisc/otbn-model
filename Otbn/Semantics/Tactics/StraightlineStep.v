@@ -29,7 +29,7 @@ Usage tl;dr:
 - The `find_loop_end` tactic is useful for applying loop invariant lemmas; see Examples/.
 *)
 
-Ltac solve_is_word_aligned t :=
+Ltac solve_is_word_aligned_step t :=
   lazymatch goal with
   | H : is_word_aligned ?sz ?a = true |- is_word_aligned ?sz ?a = true => exact H
   | |- is_word_aligned _ (word.of_Z 0) = true => apply is_word_aligned_0; t
@@ -42,15 +42,19 @@ Ltac solve_is_word_aligned t :=
   | |- is_word_aligned 32 (word.of_Z (_ * 32)) = true =>
       apply is_word256_aligned_imm; apply Z.mod_mul; t
   | |- is_word_aligned ?sz (word.of_Z (?sz * ?x)) = true =>
-      rewrite (Z.mul_comm sz x); solve_is_word_aligned t
+      rewrite (Z.mul_comm sz x)
   | |- is_word_aligned 4 (word.of_Z _) = true => apply is_word32_aligned_imm; t
   | |- is_word_aligned 32 (word.of_Z _) = true => apply is_word256_aligned_imm; t
   | |- is_word_aligned 4 (word.add ?a ?offset) = true =>
-      apply is_word32_aligned_add; solve_is_word_aligned t
+      apply is_word32_aligned_add
   | |- is_word_aligned 32 (word.add ?a ?offset) = true =>
-      apply is_word256_aligned_add; solve_is_word_aligned t
+      apply is_word256_aligned_add
+  | |- is_word_aligned _ ?x = true =>
+      (subst x || fail "cannot determine if" x "is word-aligned")
   | _ => t
   end.
+
+Ltac solve_is_word_aligned := repeat solve_is_word_aligned_step ltac:(lia).
 
 Ltac solve_word_at :=
   match goal with
@@ -105,13 +109,13 @@ Ltac simplify_side_condition_step :=
   | |- apply_shift _ (- _) _ => eapply apply_shiftr; [ lia | cbn; congruence | ]
   | |- apply_shift _ _ _ => eapply apply_shiftl; [ lia | cbn; congruence | ]
   | |- @store_word _ _ _ _ 32 _ ?m ?a _ _ =>
-      eapply store_word32_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+      eapply store_word32_step; [ solve_is_word_aligned | lia | solve_word_at | ]
   | |- @load_word _ _ _ _ 32 _ ?m ?a _ =>
-      eapply load_word32_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+      eapply load_word32_step; [ solve_is_word_aligned | lia | solve_word_at | ]
   | |- @store_word _ _ _ _ 256 _ ?m ?a _ _ =>
-      eapply store_word256_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+      eapply store_word256_step; [ solve_is_word_aligned | lia | solve_word_at | ]
   | |- @load_word _ _ _ _ 256 _ ?m ?a _ =>
-      eapply load_word256_step; [ solve_is_word_aligned ltac:(lia) | lia | solve_word_at | ]
+      eapply load_word256_step; [ solve_is_word_aligned | lia | solve_word_at | ]
   | |- read_wdr_indirect ?v _ _ =>
       eapply read_wdr_indirect_step; eexists;
       (* when the indirect register value is supplied as an li immediate, compute it *)
@@ -137,14 +141,15 @@ Ltac simplify_side_condition_step :=
   | |- Some _ = Some _ => reflexivity
   | _ => first [ progress
                    cbn [run1 strt1 read_gpr write_gpr ctrl1
-                          read_gpr_from_state
+                          read_gpr_from_state read_gpr_inc increment_gprs
                           read_wdr write_wdr read_flag write_flag
                           set_pc update_state call_stack_pop call_stack_push
                           length hd_error tl skipn nth_error fold_left
                           fetch fetch_ctx Nat.add fst snd
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc]
-               | progress cbv [gpr_has_value write_wdr update_mlz write_flag]
+               | progress cbv [gpr_has_value write_wdr update_mlz write_flag
+                                 word32_binop word32_unop word256_binop]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.

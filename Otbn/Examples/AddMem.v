@@ -24,17 +24,20 @@ Local Open Scope Z_scope.
 
 (*** A simple function that adds two 32-bit values from memory. ***)
 
-(* Code reference:
+Section Defs.
+  Import ISA.Notations.
 
-     add_mem:
-       lw   x2, 0(x12)
-       lw   x3, 0(x13)
-       add  x5, x2, x3
-       sw   x5, 0(x12)
-       ret
-*)
+  Definition add_mem_fn : otbn_function :=
+    ("add_mem"%string,
+      map.empty,
+      [ lw   x2, 0(x12)
+        ; lw   x3, 0(x13)
+        ; add  x5, x2, x3
+        ; sw   x5, 0(x12)
+        ; ret]%otbn).
+End Defs.
 
-Section __.
+Section Proofs.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
   Context {word256 : word.word 256} {word256_ok : word.ok word256}.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
@@ -43,16 +46,6 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
-
-  Definition add_mem_fn : otbn_function :=
-    ("add_mem",
-      map.empty,
-      [ (Lw x2 x12 0 : insn);
-        (Lw x3 x13 0 : insn);
-        (Add x5 x2 x3 : insn);
-        (Sw x12 x5 0 : insn) ;
-        (Ret : insn)])%string.
-
   
   Lemma add_mem_correct :
     forall regs wregs flags dmem cstack lstack a b pa pb Ra Rb,
@@ -83,4 +76,4 @@ Section __.
     ecancel_assumption.
   Qed.
 
-End __.
+End Proofs.

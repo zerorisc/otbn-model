@@ -31,103 +31,60 @@ Local Open Scope Z_scope.
 
 (* Test out the model by trying to prove the fold_bignum function for RSA trial division. *)
 
-(***
-Original code:
+Section Defs.
+  Import ISA.Notations.
 
-/**
- * Partially reduce a value modulo m such that 2^32 mod m == 1.
- *
- * Returns r such that r mod m = x mod m and r < 2^35.
- *
- * Can be used to speed up modular reduction on certain numbers, such as 3, 5,
- * 17, and 65537.
- *
- * Because we know 2^32 mod m is 1, it follows that in general 2^(32*k) for any
- * k are all 1 modulo m. This includes 2^256, so when we receive the input as
- * a bignum in 256-bit limbs, we can simply all the limbs together to get an
- * equivalent number modulo m:
- *  x = x[0] + 2^256 * x[1] + 2^512 * x[2] + ...
- *  x \equiv x[0] + x[1] + x[2] + ... (mod F4)
- *
- * From there, we can essentially use the same trick to bisect the number into
- * 128-bit, 64-bit, and 32-bit chunks and add these together to get an
- * equivalent number modulo m. This operation is visually sort of like folding
- * the number over itself repeatedly, which is where the function gets its
- * name.
- *
- * Flags: Flags have no meaning beyond the scope of this subroutine.
- *
- * @param[in]  x16: dptr_x, pointer to first limb of x in dmem
- * @param[in]  x30: plen, number of 256-bit limbs for x
- * @param[in]  w24: constant, 2^256 - 1
- * @param[in]  w31: all-zero
- * @param[out] w23: r, result
- *
- * clobbered registers: x2, w22, w23
- * clobbered flag groups: FG0
- */
-fold_bignum:
-  /* Initialize constants for loop. */
-  li      x22, 22
-
-  /* Copy input pointer. */
-  addi    x2, x16, 0
-
-  /* Initialize sum to zero and clear FG0.C.
-       w23 <= 0
-       FG0.C <= 0 */
-  bn.addi  w23, w31, 0
-
-  /* Iterate through the limbs of x and add them together.
-
-     Loop invariants for iteration i (i=0..n-1):
-       x2 = dptr_x + i*32
-       x22 = 22
-       (w23 + FG0.C) \equiv x[0] + x[1] + ... + x[i-1] (mod m)
-   */
-  loop    x30, 2
-    /* Load the next limb.
-         w22 <= x[i] */
-
-    bn.lid   x22, 0(x2++)
-
-    /* Accumulate the new limb, incorporating the carry bit from the previous
-       round if there was one (this works because 2^256 \equiv 1 mod m).
-         w23 <= (w23 + x[i] + FG0.C) mod 2^256
-         FG0.C <= (w23 + x[i] + FG0.C) / 2^256 */
-    bn.addc  w23, w23, w22
-
-  /* Isolate the lower 128 bits of the sum.
-       w22 <= w23[127:0] */
-  bn.and   w22, w23, w24 >> 128
-
-  /* Add the two 128-bit halves of the sum, plus the carry from the last round
-     of the sum computation. The sum is now up to 129 bits.
-       w23 <= (w22 + (w23 >> 128) + FG0.C) */
-  bn.addc  w23, w22, w23 >> 128
-
-  /* Isolate the lower 64 bits of the sum.
-       w22 <= w23[63:0] */
-  bn.and   w22, w23, w24 >> 192
-
-  /* Add the two halves of the sum (technically 64 and 65 bits). A carry was
-     not possible in the previous addition since the value is too small. The
-     value is now up to 66 bits.
-       w23 <= (w22 + (w23 >> 64)) */
-  bn.add   w23, w22, w23 >> 64
-
-  /* Isolate the lower 32 bits of the sum.
-       w22 <= w23[31:0] */
-  bn.and   w22, w23, w24 >> 224
-
-  /* Add the two halves of the sum (technically 32 and 34 bits). A carry was
-     not possible in the previous addition since the value is too small.
-       w23 <= (w22 + (w23 >> 32)) */
-  bn.add   w23, w22, w23 >> 32
-
-  ret
-
- ***)
+  (**
+   * Original function specification:
+   *
+   * Partially reduce a value modulo m such that 2^32 mod m == 1.
+   *
+   * Returns r such that r mod m = x mod m and r < 2^35.
+   *
+   * Can be used to speed up modular reduction on certain numbers, such as 3, 5,
+   * 17, and 65537.
+   *
+   * Because we know 2^32 mod m is 1, it follows that in general 2^(32*k) for any
+   * k are all 1 modulo m. This includes 2^256, so when we receive the input as
+   * a bignum in 256-bit limbs, we can simply all the limbs together to get an
+   * equivalent number modulo m:
+   *  x = x[0] + 2^256 * x[1] + 2^512 * x[2] + ...
+   *  x \equiv x[0] + x[1] + x[2] + ... (mod F4)
+   *
+   * From there, we can essentially use the same trick to bisect the number into
+   * 128-bit, 64-bit, and 32-bit chunks and add these together to get an
+   * equivalent number modulo m. This operation is visually sort of like folding
+   * the number over itself repeatedly, which is where the function gets its
+   * name.
+   *
+   * Flags: Flags have no meaning beyond the scope of this subroutine.
+   * @param[in]  x16: dptr_x, pointer to first limb of x in dmem
+   * @param[in]  x30: plen, number of 256-bit limbs for x
+   * @param[in]  w24: constant, 2^256 - 1
+   * @param[in]  w31: all-zero
+   * @param[out] w23: r, result
+   *
+   * clobbered registers: x2, w22, w23
+   * clobbered flag groups: FG0
+   *)
+  Definition fold_bignum : otbn_function :=
+    ("fold_bignum"%string,
+      map.empty,
+      [ addi x22, x0, 22
+        ; addi x2, x16, 0
+        ; bn.addi w23, w31, 0, FG0
+        ; loop x30
+        ; bn.lid x22, 0(x2++)
+        ; bn.addc w23, w23, w22, FG0
+        ; loopend
+        ; bn.and w22, w23, w24 >> 128, FG0
+        ; bn.addc w23, w22, w23 >> 128, FG0
+        ; bn.and w22, w23, w24 >> 192, FG0
+        ; bn.add w23, w22, w23 >> 64, FG0
+        ; bn.and w22, w23, w24 >> 224, FG0
+        ; bn.add w23, w22, w23 >> 32, FG0
+        ; ret]%otbn).
+End Defs.
 
 (* generic bignums *)
 Section WithWord.
@@ -218,24 +175,6 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
-
-  Definition fold_bignum : otbn_function :=
-    ("fold_bignum"%string,
-      map.empty,
-      [(Addi x22 x0 22 : insn);
-       (Addi x2 x16 0 : insn);
-       (Bn_addi w23 w31 0 FG0 : insn);
-       (Loop x30 : insn);
-       (Bn_lid x22 false x2 true 0 : insn);
-       (Bn_addc w23 w23 w22 0 FG0 : insn);
-       (LoopEnd : insn);
-       (Bn_and w22 w23 w24 (-128) FG0 : insn);
-       (Bn_addc w23 w22 w23 (-128) FG0 : insn);
-       (Bn_and w22 w23 w24 (-192) FG0 : insn);
-       (Bn_add w23 w22 w23 (-64) FG0 : insn);
-       (Bn_and w22 w23 w24 (-224) FG0 : insn);
-       (Bn_add w23 w22 w23 (-32) FG0 : insn);
-       (Ret : insn)]).
 
   Definition fold_bignum_array (x : list word256) : Z :=
     fold_left (fun acc x => (acc mod 2^256 + x + acc / 2^256)) (map word.unsigned x) 0.
@@ -670,7 +609,11 @@ Section __.
            | |- word.unsigned ?v = ?x => progress subst x
            end.
 
-    (* first fold is different from the others because it has a carry *)
+    (* should now be at the first fold (128-bit), which is different
+    from the others because it has a carry *)
+    lazymatch goal with |- word.unsigned _ = _ mod 2^128 + _ + _ => idtac end.
+
+    (* prove the first fold manually *)
     subst_lets.
     rewrite !word.unsigned_add.
     rewrite and_shift_right_ones, shift_right_ones by lia.

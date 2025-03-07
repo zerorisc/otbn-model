@@ -87,5 +87,5 @@ Section __.
     lazymatch goal with |- ?x = word.mul _ (word.of_Z 0) => subst x end.
     cbv [addi_spec]. destruct_one_match; try lia; [ ].
     ring.
-    Time Qed. (* 0.75s *)
+    Time Qed. (* 1.2s *)
 End __.

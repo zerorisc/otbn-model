@@ -23,14 +23,18 @@ Local Open Scope Z_scope.
 
 (*** Very simple program that adds two 256-bit registers. ***)
 
-(* Code reference:
+Section Defs.
+  Import ISA.Notations.
+ 
+  Definition wide_add_fn : otbn_function :=
+    ("wide_add"%string,
+      map.empty,
+      [
+        bn.add w5, w2, w3, FG0
+        ; ret]%otbn).
+End Defs.
 
-     wide_add:
-       bn.add w5, w2, w3
-       ret
-*)
-
-Section __.
+Section Proofs.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
   Context {word256 : word.word 256} {word256_ok : word.ok word256}.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
@@ -39,13 +43,6 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
- 
-  Definition wide_add_fn : otbn_function :=
-    ("wide_add"%string,
-      map.empty,
-      [(Bn_add w5 w2 w3 0 FG0: insn);
-       (Ret : insn)]).
-
   
   Lemma wide_add_correct :
     forall regs wregs flags dmem cstack lstack a b,
@@ -68,4 +65,4 @@ Section __.
     ssplit; try reflexivity; [ mapsimpl | mapsimpl | solve_clobbers .. ].
   Qed.
 
-End __.
+End Proofs.

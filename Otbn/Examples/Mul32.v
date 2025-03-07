@@ -28,23 +28,23 @@ Local Open Scope Z_scope.
 
 (*** Build 32-bit multiplication out of 32-bit addition. ***)
 
-(* Code reference:
+Section Defs.
+  Import ISA.Notations.
 
-     mul:
-       addi   x2, x0, x0
-       beq    x4, x0, _mul_end
-       loop   x4, 2
-         jal    x1, add
-         addi   x2, x5, 0
-       _mul_end:
-       ret
+  Definition mul_fn : otbn_function :=
+    ltac:(make_function
+         "mul"%string
+         ([ ("", addi x2, x0, 0)
+            ; ("", beq x4, x0, "_mul_end")
+            ; ("", loop x4)
+            ; ("", jal x1, "add")
+            ; ("", addi x2, x5, 0)
+            ; ("", loopend)
+            ; ("_mul_end", ret)
+           ]%otbn)%string).
+End Defs.
 
-     add:
-       add  x5, x2, x3
-       ret
-*)
-
-Section __.
+Section Proofs.
   Context {word32 : word.word 32} {word32_ok : word.ok word32}.
   Context {word256 : word.word 256} {word256_ok : word.ok word256}.
   Context {regfile : map.map reg word32} {regfile_ok : map.ok regfile}.
@@ -53,22 +53,6 @@ Section __.
   Context {mem : map.map word32 byte} {mem_ok : map.ok mem}.
   Add Ring wring32: (@word.ring_theory 32 word32 word32_ok).
   Add Ring wring256: (@word.ring_theory 256 word256 word256_ok).
-
-  (* Constructed in a way that avoids hardcoding the offset for the label. *)
-  Definition mul_fn : otbn_function :=
-    Eval cbn [List.app length] in (
-        let syms := map.empty in
-        let body : list insn :=
-          [ (Addi x2 x0 0 : insn);
-            (Beq x4 x0 "_mul_end" : insn);
-            (Loop x4 : insn);
-            (Jal x1 "add" : insn);
-            (Addi x2 x5 0 : insn);
-            (LoopEnd : insn)] in
-        let syms := map.put syms "_mul_end" (length body) in
-        let body := (body ++  [(Ret : insn)])%list in
-        ("mul", syms, body))%string.
-
   
   Lemma mul_correct :
     forall regs wregs flags dmem cstack lstack a b,
@@ -145,7 +129,7 @@ Section __.
 
       (* helper assertion that mul and add don't share symbols *)
       assert (function_symbols_disjoint add_fn mul_fn).
-      { cbv [function_symbols_disjoint]; cbn [add_fn mul_fn fst snd].
+      { cbv [function_symbols_disjoint]; cbn [add_fn mul_fn fst snd].        
         ssplit; mapsimpl; try congruence; [ ].
         cbv [map.disjoint]; intros *. rewrite map.get_empty; congruence. }
 
@@ -201,4 +185,4 @@ Section __.
     ssplit; eauto.
   Qed.
 
-End __.
+End Proofs.
