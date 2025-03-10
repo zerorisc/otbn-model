@@ -133,6 +133,7 @@ Section __.
     rewrite IHx. replace (2^256 mod m) with 1 by lia.
     rewrite Z.mul_1_l. Z.push_pull_mod. f_equal; lia.
   Qed.
+
   (* helper lemma for shift expressions *)
   Lemma and_shift_right_ones (x : word256) n :
     0 <= n < 256 ->
@@ -211,20 +212,6 @@ Section __.
     { intros. rewrite Z.mul_succ_r, Z.pow_add_r by lia. Z.push_mod.
       repeat match goal with H : context [2^_ mod m = 1] |- _ => rewrite H by lia end.
       rewrite Z.mul_1_r, Z.mod_1_l by lia; lia. }
-  Qed.
-
-  (* TODO: move *)
-  Lemma carry_bit_addc_div x y c :
-    0 <= x < 2^256 ->
-    0 <= y < 2^256 ->
-    Z.b2z (carry_bit (x + y + Z.b2z c)) = (x + y + Z.b2z c) / 2^256.
-  Proof.
-    intros. cbv [carry_bit].
-    pose proof Z.div_small (x + y + Z.b2z c) (2^256).
-    assert (0 <= Z.b2z c < 2) by (destr c; cbn; lia).
-    pose proof Z.div_lt_upper_bound (x + y + Z.b2z c) (2^256) 2 ltac:(lia) ltac:(lia).
-    pose proof Z.div_le_lower_bound (x + y + Z.b2z c) (2^256) 1 ltac:(lia).
-    cbv [Z.b2z] in *; repeat destruct_one_match; lia.    
   Qed.
 
   Lemma fold_bignum_correct :
