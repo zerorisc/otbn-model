@@ -401,24 +401,18 @@ Section Semantics.
     Definition carry_bit (x : Z) := 2^256 <=? x.
     Definition borrow_bit (x : Z) := x <? 0.
 
-    Definition rshi_spec (x y : word256) (s : Z) : word256 :=
-      word.of_Z (Z.shiftr (word.unsigned x + Z.shiftl (word.unsigned y) 256) s).
-    Definition addm_spec (x y m : word256) : word256 :=
-      if (word.unsigned m <? word.unsigned x + word.unsigned y)
-      then word.of_Z (word.unsigned x + word.unsigned y - word.unsigned m)
-      else word.add x y.
-    Definition subm_spec (x y m : word256) : word256 :=
-      if (word.unsigned y <? word.unsigned x)
-      then word.of_Z (word.unsigned x + word.unsigned m - word.unsigned y)
-      else word.sub x y.
-    Definition mulqacc_spec (acc x y : word256) (s : Z) : word256 :=
-      word.add acc (word.of_Z (Z.shiftl (word.unsigned x * word.unsigned y) s)).
+    Definition rshi_spec (x y s : Z) : Z := Z.shiftr (x + Z.shiftl y 256) s.
+    Definition addm_spec (x y m : Z) : Z :=
+      if (m <? x + y) then x + y - m else x + y.
+    Definition subm_spec (x y m : Z) : Z :=
+      if (y <? x) then x + m - y else x - y.
+    Definition mulqacc_spec (acc x y : Z) (s : Z) : Z := acc + Z.shiftl (x * y) s.
     (* helper for mulqacc half-word writebacks *)
-    Definition so_writeback_spec (u : bool) (vd result : word256) : word256 :=
+    Definition so_writeback_spec (u : bool) (vd result : Z) : Z :=
       if u
-      then word.or (word.slu result (word.of_Z 128)) (word.and vd (word.of_Z (Z.ones 128)))
-      else word.or (word.and result (word.of_Z (Z.ones 128)))
-             (word.and vd (word.slu (word.of_Z (Z.ones 128)) (word.of_Z 128))).
+      then Z.lor (Z.shiftr result 128) (Z.land vd (Z.ones 128))
+      else Z.lor (Z.land result (Z.ones 128))
+                 (Z.land vd (Z.shiftl (Z.ones 128) 128)).
 
     Local Notation "x <- f ; e" := (f (fun x => e)) (at level 100, right associativity).
 
@@ -564,7 +558,8 @@ Section Semantics.
           then
             (vx <- read_wdr wregs x ;
              vy <- read_wdr wregs y ;
-             wregs <- write_wdr wregs d (rshi_spec vx vy s) ;
+             wregs <- write_wdr wregs d
+                        (word.of_Z (rshi_spec (word.unsigned vx) (word.unsigned vy) s)) ;
              post regs wregs flags dmem err_bits)
           else err ("Invalid immediate for BN.RSHI: " ++ HexString.of_Z s)  
       | Bn_sel d x y f =>
@@ -655,21 +650,27 @@ Section Semantics.
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vm <- read_wsr wregs WSR_MOD;           
-           wregs <- write_wdr wregs d (addm_spec vx vy vm) ;
+           wregs <- write_wdr wregs d
+                      (word.of_Z (addm_spec (word.unsigned vx)
+                                    (word.unsigned vy) (word.unsigned vm))) ;
            post regs wregs flags dmem err_bits)
       | Bn_subm d x y =>
           (vx <- read_wdr wregs x ;
            vy <- read_wdr wregs y ;
            vm <- read_wsr wregs WSR_MOD;           
-           wregs <- write_wdr wregs d (subm_spec vx vy vm) ;
+           wregs <- write_wdr wregs d
+                      (word.of_Z (subm_spec (word.unsigned vx)
+                                    (word.unsigned vy) (word.unsigned vm))) ;
            post regs wregs flags dmem err_bits)
       | Bn_mulqacc z x y s =>
           if is_valid_mulqacc_shift s
           then
             (vx <- read_limb wregs x ;
              vy <- read_limb wregs y ;
-             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
-             wregs <- write_wsr wregs WSR_ACC (mulqacc_spec acc vx vy s) ;
+             acc <- if z then (fun P => P (word.of_Z 0)) else read_wsr wregs WSR_ACC ;
+             wregs <- write_wsr wregs WSR_ACC
+                        (word.of_Z (mulqacc_spec (word.unsigned acc)
+                                      (word.unsigned vx) (word.unsigned vy) s)) ;
              post regs wregs flags dmem err_bits)
           else err ("Invalid shift for BN.MULQACC: " ++ HexString.of_Z s)
       | Bn_mulqacc_wo z d x y s fg =>
@@ -677,8 +678,9 @@ Section Semantics.
           then
             (vx <- read_limb wregs x ;
              vy <- read_limb wregs y ;
-             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
-             let result := mulqacc_spec acc vx vy s in
+             acc <- if z then (fun P => P (word.of_Z 0)) else read_wsr wregs WSR_ACC ;
+             let result := (word.of_Z (mulqacc_spec (word.unsigned acc)
+                                         (word.unsigned vx) (word.unsigned vy) s)) in
              wregs <- write_wsr wregs WSR_ACC result ;
              wregs <- write_wdr wregs d result ;
              flags <- update_mlz flags fg result ;
@@ -690,10 +692,11 @@ Section Semantics.
             (vx <- read_limb wregs x ;
              vy <- read_limb wregs y ;
              vd <- read_wdr wregs d ;
-             acc <- if z then read_wsr wregs WSR_ACC else (fun P => P (word.of_Z 0)) ;
-             let result := mulqacc_spec acc vx vy s in
+             acc <- if z then (fun P => P (word.of_Z 0)) else read_wsr wregs WSR_ACC ;
+             let result := (word.of_Z (mulqacc_spec (word.unsigned acc)
+                                         (word.unsigned vx) (word.unsigned vy) s)) in
              wregs <- write_wsr wregs WSR_ACC (word.sru result (word.of_Z 128)) ;
-             let wb := so_writeback_spec u vd result in
+             let wb := word.of_Z (so_writeback_spec u (word.unsigned vd) (word.unsigned result)) in
              wregs <- write_wdr wregs d wb ;
              flags <- write_flag flags (flagZ fg) (word.unsigned wb =? 0) ;
              flags <- if u

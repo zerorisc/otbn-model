@@ -243,14 +243,14 @@ Section __.
            /\ clobbers [wdreg w22; wdreg w23] wregs wregs'
            /\ clobbers [gpreg x2; gpreg x22] regs regs').
   Proof.    
-    cbv [fold_bignum returns]. intros; subst.
+    intros; subst; cbv [fold_bignum returns]. intros; subst.
     track_registers_init.
 
     (* helpful assertions *)
     assert (2^256 mod m = 1) by (apply (pow2_mod1_multiple 32 8); lia).
     assert (2^128 mod m = 1) by (apply (pow2_mod1_multiple 32 4); lia).
     assert (2^64 mod m = 1) by (apply (pow2_mod1_multiple 32 2); lia).
-
+    
     straightline_step.
     straightline_step.
     straightline_step.

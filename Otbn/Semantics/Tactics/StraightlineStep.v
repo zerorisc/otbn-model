@@ -138,7 +138,8 @@ Ltac simplify_side_condition_step :=
   | _ => first [ progress
                    cbn [run1 strt1 read_gpr write_gpr ctrl1
                           read_gpr_from_state read_gpr_inc increment_gprs
-                          read_wdr write_wdr read_flag write_flag
+                          read_wdr write_wdr read_flag write_flag read_limb
+                          read_wsr write_wsr
                           set_pc update_state call_stack_pop call_stack_push
                           length hd_error tl skipn nth_error fold_left
                           fetch fetch_ctx Nat.add fst snd lookup_wdr
