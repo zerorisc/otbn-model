@@ -142,24 +142,21 @@ Section Semantics.
             P
       end.
 
+    Definition limb_spec (v : Z) (i : Z) : Z := (v / 2^(64*i)) mod 2^64.
+
     Definition read_limb (wregs : wregfile) (l : limb) (P : word256 -> T) : T :=
-      match l with
-      | (r, 0) =>
-          read_wdr wregs r
-            (fun v => P (word.and v (word.of_Z (Z.ones 64))))
-      | (r, 1) =>
-          read_wdr wregs r
-            (fun v => P (word.and (word.sru v (word.of_Z 64)) (word.of_Z (Z.ones 64))))
-      | (r, 2) =>
-          read_wdr wregs r
-            (fun v => P (word.and (word.sru v (word.of_Z 128)) (word.of_Z (Z.ones 64))))
-      | (r, 3) =>
-          read_wdr wregs r
-            (fun v => P (word.and (word.sru v (word.of_Z 192)) (word.of_Z (Z.ones 64))))
-      | (r, n) => err ("Invalid BN.MULQACC quarter-word selector for "
-                         ++ wdr_to_string r ++ ": "
-                         ++ (if (n <? 0) then "-" else "") ++ String.of_nat (Z.to_nat (Z.abs n)))
-      end.
+      if (0 <=? snd l)
+      then if (snd l <? 4)
+           then read_wdr wregs (fst l)
+                  (fun v => P (word.of_Z (limb_spec (word.unsigned v) (snd l))))
+           else 
+             err ("Too large BN.MULQACC quarter-word selector for "
+                    ++ wdr_to_string (fst l) ++ ": "
+                    ++ String.of_nat (Z.to_nat (Z.abs (snd l))))
+      else
+        err ("Negative BN.MULQACC quarter-word selector for "
+               ++ wdr_to_string (fst l) ++ ": -"
+               ++ String.of_nat (Z.to_nat (Z.abs (snd l)))).
  
     Definition lookup_wdr (i : Z) : wdr :=
       (match i with
@@ -403,14 +400,14 @@ Section Semantics.
 
     Definition rshi_spec (x y s : Z) : Z := Z.shiftr (x + Z.shiftl y 256) s.
     Definition addm_spec (x y m : Z) : Z :=
-      if (m <? x + y) then x + y - m else x + y.
+      if (m <=? x + y) then x + y - m else x + y.
     Definition subm_spec (x y m : Z) : Z :=
       if (y <? x) then x + m - y else x - y.
     Definition mulqacc_spec (acc x y : Z) (s : Z) : Z := acc + Z.shiftl (x * y) s.
     (* helper for mulqacc half-word writebacks *)
     Definition so_writeback_spec (u : bool) (vd result : Z) : Z :=
       if u
-      then Z.lor (Z.shiftr result 128) (Z.land vd (Z.ones 128))
+      then Z.lor (Z.shiftl result 128) (Z.land vd (Z.ones 128))
       else Z.lor (Z.land result (Z.ones 128))
                  (Z.land vd (Z.shiftl (Z.ones 128) 128)).
 

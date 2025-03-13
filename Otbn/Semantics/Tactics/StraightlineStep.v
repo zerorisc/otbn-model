@@ -63,6 +63,7 @@ Ltac solve_word_at :=
   | _ => use_sep_assumption; ecancel
   end.
 
+Search (?x <=? ?x)%Z.
 Ltac simplify_side_condition_step :=
   match goal with
   | |- exists _, _ => eexists
@@ -70,6 +71,14 @@ Ltac simplify_side_condition_step :=
   | |- context [word.add ?a (word.of_Z 0)] => rewrite (word.add_0_r a)
   | |- context [?x =? ?x] => rewrite (Z.eqb_refl x)
   | |- context [?x <? ?x] => rewrite (Z.ltb_irrefl x)
+  | |- context [?x <=? ?x] => rewrite (Z.leb_refl x)
+  | |- context [0 <=? 1] => change (0 <=? 1) with true
+  | |- context [0 <=? 2] => change (0 <=? 2) with true
+  | |- context [0 <=? 3] => change (0 <=? 3) with true
+  | |- context [0 <? 4] => change (0 <? 4) with true
+  | |- context [1 <? 4] => change (1 <? 4) with true
+  | |- context [2 <? 4] => change (2 <? 4) with true
+  | |- context [3 <? 4] => change (3 <? 4) with true
   | |- context [(0 <? S ?x)%nat] => destr (0 <? S x)%nat; [ | lia ]
   | |- context [word.unsigned (addi_spec (word.of_Z 0) ?imm)] =>
       rewrite (li_spec imm) by lia
@@ -146,7 +155,7 @@ Ltac simplify_side_condition_step :=
                           err random option_bind proof_semantics
                           repeat_advance_pc advance_pc assert_or_error]
                | progress cbv [gpr_has_value write_wdr update_mlz write_flag
-                                 word32_binop word32_unop word256_binop]
+                                 word32_binop word32_unop word256_binop read_limb]
                | eassumption ]
   end.
 Ltac simplify_side_condition := repeat simplify_side_condition_step.
