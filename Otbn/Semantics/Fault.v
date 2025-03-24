@@ -19,7 +19,15 @@ Import MaybeNotations.
 Import ISA.Coercions.
 Local Open Scope Z_scope.
 
-(*** Small fault-modelling example for a live HACS session 2025-03-24 ***)
+(*** Small fault-modelling example for a live HACS session 2025-03-24
+
+The code examples (`hardened_word_cmp` and `hardened_array_cmp`) are simplified snippets loosely based on a fault-hardened equality check from OpenTitan:
+https://github.com/lowRISC/opentitan/blob/b8865df6b779375e8bc0119ff80cec828928ea73/sw/device/silicon_creator/lib/sigverify/ecdsa_p256_verify.c#L96
+
+Readers may be interested to know that the functional correctness of the full equality check was also verified in Rocq:
+https://gist.github.com/jadephilipoom/b5feae0bc1b229715a4b9ac06a15e96c
+
+***)
 
 Section Specs.
   Context {word32 : word.word 32} {word256 : word.word 256}.
@@ -30,6 +38,7 @@ Section Specs.
     {mem : map.map word32 byte}
     {fetch : label * nat -> option (insn (label:=label))}.
 
+  (* define the type of a fault model in omnisemantics style *)
   Definition fault_model : Type :=
     (otbn_state (label:=label) * nat) ->
     ((otbn_state (label:=label) * nat) -> Prop) -> Prop.
@@ -53,7 +62,7 @@ Section Specs.
         (* no more faults *)
         post (state, count).
 
-  (* incorporates a customizable fault model *)
+  (* "run 1 cycle" function that incorporates a customizable fault model *)
   Definition fault1
     (fault_step : fault_model)
     (state_and_score : otbn_state * nat)
@@ -115,9 +124,9 @@ Section Defs.
      pseudocode:
         result = 0
         for i in range(n):
-            res ^= lhs[i]
-            res ^= shares[i]
-            res ^= rhs[i]
+            t = lhs[i] ^ shares[i]
+            t ^= rhs[i]
+            res ^= t
         return result
    *)
   Definition hardened_array_cmp_fn : otbn_function :=
@@ -126,11 +135,11 @@ Section Defs.
       [[ addi x6, x0, 0
          ; loop x2
          ; lw x13, 0(x3)
-         ; xor x6, x6, x13
          ; lw x15, 0(x5)
-         ; xor x6, x6, x15
+         ; xor x13, x13, x15
          ; lw x14, 0(x4)
-         ; xor x6, x6, x14
+         ; xor x13, x13, x14
+         ; xor x6, x6, x13
          ; addi x3, x3, 4
          ; addi x4, x4, 4
          ; loopend(addi x5, x5, 4)
