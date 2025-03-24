@@ -925,7 +925,7 @@ Section Semantics.
     |}%maybe.
 
   (* Prop model for proofs *)
-  Definition run1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
+  Definition after1 (st : otbn_state) (post : otbn_state -> Prop) : Prop :=
     match st with
     | otbn_busy pc regs wregs flags dmem cstack lstack =>
         exists i,
@@ -1003,7 +1003,7 @@ Section Specs.
     forall ret_pc,
       hd_error cstack = Some ret_pc ->
       eventually
-        (run1 (fetch:=fetch))
+        (after1 (fetch:=fetch))
         (fun st =>
            match st with
            | otbn_busy pc regs' wregs' flags' dmem' cstack' lstack' =>
@@ -1022,7 +1022,7 @@ Section Specs.
     (spec : mem -> Prop) (err_spec : _ -> Prop)
     : Prop :=
     eventually
-      (run1 (fetch:=fetch))
+      (after1 (fetch:=fetch))
       (fun st =>
          match st with
          | otbn_done pc dmem => spec dmem

@@ -23,7 +23,7 @@ The `ISA` folder defines the instructions, and `Semantics` describes what they d
 The model can be instantiated in two ways.
 When it's run on a program and start state, it can be set up to return either:
 - a concrete final state when it's run on a program (executable semantics, represented by `exec1`)
-- a statement that holds on the final state (`run1`)
+- a statement that holds on the final state (`after1`)
 
 This setup allows smooth reasoning about things like random numbers in proofs while preserving the ability to have a concrete executable model.
 

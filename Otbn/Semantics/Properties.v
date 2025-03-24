@@ -167,15 +167,15 @@ Section __.
       (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
       (forall regs wregs flags dmem,
           spec regs wregs flags dmem ->
-          eventually (run1 (fetch:=fetch2))
+          eventually (after1 (fetch:=fetch2))
             post (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)) ->
-      eventually (run1 (fetch:=fetch2)) post
+      eventually (after1 (fetch:=fetch2)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     cbv [returns]; intros.
     cbn [hd_error] in *.
     eapply eventually_step.
-    { cbv [run1]; intros. eexists; split; [ eassumption | ].
+    { cbv [after1]; intros. eexists; split; [ eassumption | ].
       cbv iota. cbn [ctrl1 call_stack_push set_pc].
       destruct_one_match; try lia; apply eq_refl. }
     intros; subst.
@@ -191,9 +191,9 @@ Section __.
       (forall i st,
           (0 <= i < iters)%nat ->
           invariant (S i) st ->
-          eventually (run1 (fetch:=fetch)) (fun st => invariant i st \/ post st) st) ->
-      (forall st, invariant 0%nat st -> eventually (run1 (fetch:=fetch)) post st) ->
-      eventually (run1 (fetch:=fetch)) post st.
+          eventually (after1 (fetch:=fetch)) (fun st => invariant i st \/ post st) st) ->
+      (forall st, invariant 0%nat st -> eventually (after1 (fetch:=fetch)) post st) ->
+      eventually (after1 (fetch:=fetch)) post st.
   Proof.
     induction iters; intros; [ solve [eauto] | ].
     apply (eventually_trans _ (fun st => invariant iters st \/ post st));
@@ -226,7 +226,7 @@ Section __.
       (forall i regs wregs flags dmem,
           (0 <= i < iters)%nat ->
           invariant (S i) regs wregs flags dmem ->
-          eventually (run1 (fetch:=fetch))
+          eventually (after1 (fetch:=fetch))
           (fun st => (exists regs wregs flags dmem,
                          invariant i regs wregs flags dmem
                          /\ st = match i with
@@ -240,15 +240,15 @@ Section __.
              ((advance_pc pc, i) :: lstack))) ->
       (forall regs wregs flags dmem,
           invariant 0%nat regs wregs flags dmem ->
-          eventually (run1 (fetch:=fetch)) post
+          eventually (after1 (fetch:=fetch)) post
             (otbn_busy (advance_pc end_pc) regs wregs flags dmem cstack lstack)) ->
-      eventually (run1 (fetch:=fetch)) post (otbn_busy pc regs wregs flags dmem cstack lstack).
+      eventually (after1 (fetch:=fetch)) post (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     cbv [loop_start]; intros.
     repeat match goal with H : _ /\ _ |- _ => destruct H end.
     destruct iters; [ lia | ].    
     eapply eventually_step.
-    { cbn [run1]. eexists; ssplit; [ eassumption | ].
+    { cbn [after1]. eexists; ssplit; [ eassumption | ].
       cbv iota. cbn [ctrl1 read_gpr_from_state].
       eapply read_gpr_weaken; [ eassumption | ].
       intros; cbv [loop_start]. ssplit; [ lia .. | ].
@@ -275,7 +275,7 @@ Section __.
              | H : _ /\ _ |- _ => destruct H
              | H : exists _, _ |- _ => destruct H
              | H : Some _ = Some _ |- _ => inversion H; clear H; subst
-             | H : context [eventually run1 (fun st => _ \/ post st)] |- _ =>
+             | H : context [eventually after1 (fun st => _ \/ post st)] |- _ =>
                  apply H; eauto; lia
              | _ => progress subst
              end. }
@@ -296,25 +296,25 @@ Section __.
       gpr_has_value regs r2 v2 ->
       (* branch case *)
       (v1 = v2 ->
-       eventually (run1 (fetch:=fetch)) post
+       eventually (after1 (fetch:=fetch)) post
          (otbn_busy (dst, 0%nat) regs wregs flags dmem cstack lstack)) ->
       (* no-branch case *)
       (v1 <> v2 ->
-       eventually (run1 (fetch:=fetch)) post
+       eventually (after1 (fetch:=fetch)) post
          (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)) ->
-      eventually (run1 (fetch:=fetch)) post
+      eventually (after1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     intros.
     destr (word.eqb v1 v2).
     { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+      { cbv [after1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
         rewrite word.eqb_eq by reflexivity.
         cbv [set_pc]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+      { cbv [after1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
         destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
@@ -327,24 +327,24 @@ Section __.
       gpr_has_value regs r2 v2 ->
       (* branch case *)
       (v1 <> v2 ->
-       eventually (run1 (fetch:=fetch)) post
+       eventually (after1 (fetch:=fetch)) post
          (otbn_busy (dst, 0%nat) regs wregs flags dmem cstack lstack)) ->
       (* no-branch case *)
       (v1 = v2 ->
-       eventually (run1 (fetch:=fetch)) post
+       eventually (after1 (fetch:=fetch)) post
          (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)) ->
-      eventually (run1 (fetch:=fetch)) post
+      eventually (after1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     intros.
     destr (word.eqb v1 v2).
     { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+      { cbv [after1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
         destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
     { eapply eventually_step.
-      { cbv [run1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
+      { cbv [after1]. eexists; ssplit; [ eassumption .. | ]. cbv [ctrl1 read_gpr_from_state].
         repeat (eapply read_gpr_weaken; [ eassumption .. | ]; intros; subst).
         destruct_one_match; try congruence; [ ]. apply eq_refl. }
       intros; subst. eauto. }
@@ -359,19 +359,19 @@ Section __.
            | Some err_code => post (otbn_error pc err_code)
            | None =>
                match iters with
-               | O => eventually (run1 (fetch:=fetch)) post
+               | O => eventually (after1 (fetch:=fetch)) post
                         (otbn_busy (advance_pc pc) regs wregs flags dmem cstack lstack)
                | S iters =>
-                   eventually (run1 (fetch:=fetch)) post
+                   eventually (after1 (fetch:=fetch)) post
                      (otbn_busy loop_start regs wregs flags dmem cstack
                         ((loop_start, iters) :: lstack))
                end
            end) ->
-      eventually (run1 (fetch:=fetch)) post
+      eventually (after1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack ((loop_start, iters) :: lstack)).
   Proof.
     intros. eapply eventually_step_cps.
-    cbn [run1]. eexists; ssplit; [ eassumption .. | ].
+    cbn [after1]. eexists; ssplit; [ eassumption .. | ].
     cbv iota. cbn [ctrl1]. cbv [loop_end].
     destruct iters; (eapply strt1_weaken; [ eassumption | ]; cbv beta; intros).
     all: cbv [update_state set_pc].
@@ -384,11 +384,11 @@ Section __.
       fetch pc = Some (Control Ret) ->
       hd_error cstack = Some ret_pc ->
       post (otbn_busy ret_pc regs wregs flags dmem (tl cstack) lstack) ->
-      eventually (run1 (fetch:=fetch)) post
+      eventually (after1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     intros. eapply eventually_step_cps.
-    cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+    cbv [after1]. eexists; ssplit; [ eassumption .. | ].
     cbn [ctrl1 call_stack_pop].
     destruct cstack; cbn [hd_error tl] in *; [ congruence | ].
     eapply eventually_done. congruence.
@@ -398,11 +398,11 @@ Section __.
     forall pc regs wregs flags dmem cstack lstack post,
       fetch pc = Some (Control Ecall) ->
       post (otbn_done pc dmem) ->
-      eventually (run1 (fetch:=fetch)) post
+      eventually (after1 (fetch:=fetch)) post
         (otbn_busy pc regs wregs flags dmem cstack lstack).
   Proof.
     intros. eapply eventually_step.
-    { cbv [run1]. eexists; ssplit; [ eassumption .. | ].
+    { cbv [after1]. eexists; ssplit; [ eassumption .. | ].
       cbn [ctrl1 program_exit]. eassumption. }
     intros; subst. eauto using eventually_done.
   Qed.

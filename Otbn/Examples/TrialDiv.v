@@ -262,16 +262,16 @@ Section __.
        (w23 + FG0.C) \equiv x[0] + x[1] + ... + x[n-i] (mod m)
      *)
     let regs := lazymatch goal with
-                  |- eventually run1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
+                  |- eventually after1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
                     regs end in
     let wregs := lazymatch goal with
-                  |- eventually run1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
+                  |- eventually after1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
                     wregs end in
     let flags := lazymatch goal with
-                  |- eventually run1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
+                  |- eventually after1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
                     flags end in
     let dmem := lazymatch goal with
-                  |- eventually run1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
+                  |- eventually after1 _ (otbn_busy  _ ?regs ?wregs ?flags ?dmem _ _) =>
                     dmem end in
     let loop_end_pc := find_loop_end in
     eapply loop_invariant

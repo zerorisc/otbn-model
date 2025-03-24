@@ -145,7 +145,7 @@ Ltac simplify_side_condition_step :=
   | |- (_ <= _)%nat => lia
   | |- Some _ = Some _ => reflexivity
   | _ => first [ progress
-                   cbn [run1 strt1 read_gpr write_gpr ctrl1
+                   cbn [after1 strt1 read_gpr write_gpr ctrl1
                           read_gpr_from_state read_gpr_inc increment_gprs
                           read_wdr write_wdr read_flag write_flag read_limb
                           read_wsr write_wsr
@@ -162,7 +162,7 @@ Ltac simplify_side_condition := repeat simplify_side_condition_step.
 
 Ltac get_next_insn :=
   lazymatch goal with
-  | |- eventually (run1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _ _ _ _) =>
+  | |- eventually (after1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _ _ _ _) =>
       let i := eval vm_compute in (fetch pc) in
         i
   end.
@@ -188,7 +188,7 @@ Ltac find_loop_end' fetch pc :=
     end.
 Ltac find_loop_end :=
   lazymatch goal with
-  | |- context [eventually (run1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _ _ _ _)] =>
+  | |- context [eventually (after1 (fetch:=?fetch)) _ (otbn_busy ?pc _ _ _ _ _ _)] =>
       let i := eval vm_compute in (fetch pc) in
         match i with
         | Some (Control (Loop _)) => find_loop_end' fetch (advance_pc pc)
@@ -206,7 +206,7 @@ Ltac straightline_step :=
       intros; subst; eapply eventually_step_cps;
       simplify_side_condition; intros; subst;
       lazymatch goal with
-      | |- eventually run1 _ _ => idtac
+      | |- eventually after1 _ _ => idtac
       | _ => fail "straightline_step: failed to prove side conditions!"
                "Try `eapply eventually_step_cps; simplify_side_condition`"
                "to see what was left over"

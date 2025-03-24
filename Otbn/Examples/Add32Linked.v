@@ -44,7 +44,7 @@ Section __.
   Lemma add_prog_correct_raw v dmem R :
     (word32_at (word.of_Z 0) v * R)%sep dmem ->
     eventually
-      (run1 (fetch:=fetch add_prog))
+      (after1 (fetch:=fetch add_prog))
       (fun st =>
          match st with
          | otbn_done _ dmem =>

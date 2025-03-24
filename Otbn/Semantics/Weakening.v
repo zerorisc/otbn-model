@@ -353,16 +353,16 @@ Section __.
         end.
   Qed.
 
-  Lemma fetch_weaken_run1
+  Lemma fetch_weaken_after1
     {label : Type}
     {fetch1 : label * nat -> option insn}
     {fetch2 : label * nat -> option insn} :
     forall st P,
-      run1 (fetch:=fetch1) st P ->
+      after1 (fetch:=fetch1) st P ->
       (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
-      run1 (fetch:=fetch2) st P.
+      after1 (fetch:=fetch2) st P.
   Proof.
-    induction st; cbn [run1]; intros; auto; [ ].
+    induction st; cbn [after1]; intros; auto; [ ].
     repeat lazymatch goal with
            | H : exists _, _ |- _ => destruct H
            | H : _ /\ _ |- _ => destruct H
@@ -375,11 +375,11 @@ Section __.
     {fetch1 : label * nat -> option insn}
     {fetch2 : label * nat -> option insn} :
     forall st P,
-      eventually (run1 (fetch:=fetch1)) P st ->
+      eventually (after1 (fetch:=fetch1)) P st ->
       (forall dst i, fetch1 dst = Some i -> fetch2 dst = Some i) ->
-      eventually (run1 (fetch:=fetch2)) P st.
+      eventually (after1 (fetch:=fetch2)) P st.
   Proof.
     induction 1; intros; [ auto using eventually_done | ].
-    eapply eventually_step; eauto using fetch_weaken_run1.
+    eapply eventually_step; eauto using fetch_weaken_after1.
   Qed.
 End __.

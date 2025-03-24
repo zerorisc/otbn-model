@@ -654,8 +654,8 @@ Section __.
     destruct st1, st2; related_states_hammer.
   Qed.
 
-  (* prove that run1 on related states produces a related state *)
-  Lemma link_run1 fns prog syms st1 st2 spec1 spec2 :
+  (* prove that after1 on related states produces a related state *)
+  Lemma link_after1 fns prog syms st1 st2 spec1 spec2 :
       link fns = Ok prog ->
       link_symbols fns = Ok syms ->
       states_related syms st1 st2 ->
@@ -663,10 +663,10 @@ Section __.
           states_related syms st1' st2' ->
           spec1 st1' ->
           spec2 st2') ->
-      run1 (fetch:=fetch_ctx fns) st1 spec1 ->
-      run1 (fetch:=fetch prog) st2 spec2.
+      after1 (fetch:=fetch_ctx fns) st1 spec1 ->
+      after1 (fetch:=fetch prog) st2 spec2.
   Proof.
-    cbv [run1].
+    cbv [after1].
     destruct st1, st2; cbn [states_related]; try contradiction; intros;
       repeat lazymatch goal with
         | H : exists _, _ |- _ => destruct H
@@ -691,7 +691,7 @@ Section __.
       related_states_hammer. ssplit; related_states_hammer. }
   Qed.
 
-  Lemma link_eventually_run1 fns prog syms st1 st2 spec1 spec2 :
+  Lemma link_eventually_after1 fns prog syms st1 st2 spec1 spec2 :
       link fns = Ok prog ->
       link_symbols fns = Ok syms ->
       (forall st1' st2',
@@ -699,14 +699,14 @@ Section __.
           spec1 st1' ->
           spec2 st2') ->
       states_related syms st1 st2 ->
-      eventually (run1 (fetch:=fetch_ctx fns)) spec1 st1 ->
-      eventually (run1 (fetch:=fetch prog)) spec2 st2.
+      eventually (after1 (fetch:=fetch_ctx fns)) spec1 st1 ->
+      eventually (after1 (fetch:=fetch prog)) spec2 st2.
   Proof.
     intros. generalize dependent st2.
     let H := lazymatch goal with H : eventually _ _ _ |- _ => H end in
     induction H; intros; [ solve [eauto using eventually_done] | ].    
     eapply eventually_step; [ | solve [eauto] ].
-    eapply link_run1; eauto.      
+    eapply link_after1; eauto.      
   Qed.
 
   Lemma link_symbols_name fns1 fns2 fn name syms :
@@ -720,7 +720,7 @@ Section __.
     eauto using link_symbols'_name.
   Qed.
 
-  (* Theorem that connects run1 with a ctx to run1 with a program *)
+  (* Theorem that connects after1 with a ctx to after1 with a program *)
   Lemma link_exits' :
     forall fns prog syms start_fn start_name n start_pc regs wregs flags dmem spec err_spec,
       (* ...if `prog` is the result of a successful `link fns`... *)
@@ -747,7 +747,7 @@ Section __.
            | H : nth_error _ _ = Some _ |- _ => apply nth_error_split in H
            | _ => progress subst
            end.
-    eapply link_eventually_run1; eauto; [ | ].
+    eapply link_eventually_after1; eauto; [ | ].
     { cbv beta; intros.
       cbv [states_related] in *.
       related_states_hammer. }
@@ -1034,7 +1034,7 @@ Section __.
     do 2 eexists; ssplit; eauto using nth_error_In.    
   Qed.
 
-  (* Theorem that connects run1 with a ctx to run1 with a program *)
+  (* Theorem that connects after1 with a ctx to after1 with a program *)
   Lemma link_exits :
     forall fns prog syms start_name start_pc regs wregs flags dmem spec err_spec,
       (* ...if `prog` is the result of a successful `link fns`... *)
@@ -1061,7 +1061,7 @@ Section __.
            | H : exists _, _ |- _ => destruct H
            | H : _ /\ _ |- _ => destruct H
            end.
-    eapply link_eventually_run1; eauto; [ | ].
+    eapply link_eventually_after1; eauto; [ | ].
     { cbv beta; intros.
       cbv [states_related] in *.
       related_states_hammer. }
